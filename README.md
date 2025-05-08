@@ -11,7 +11,7 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
   Assess the performance impact of large state sizes (e.g. 10× mainnet) across clients and scenarios. Establish whether state growth meaningfully affects throughput and block processing.
 
 - **Infrastructure & Coordination**  
-  - Maintain advanced Perfnet and Blobs-only Perfnet networks  
+  - Maintain advanced Perfnets for multiple purposes (stress testing, mainnet-like verification, state bloat perfnet)
   - Provide reproducible benchmarking environments  
   - Ensure coordination across Execution and Consensus Layer teams  
   - Public dashboards and transparent metrics
