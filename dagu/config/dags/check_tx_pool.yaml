@@ -1,0 +1,11 @@
+steps:
+  - name: send POST request
+    command: POST http://172.233.124.18:8545
+    executor:
+      type: http
+      config:
+        timeout: 10
+        headers:
+          Content-Type: "application/json"
+        silent: true # If silent is true, it outputs response body only.
+        body: '{ "jsonrpc": "2.0", "id": 0,  "method": "txpool_status",  "params": [] }'

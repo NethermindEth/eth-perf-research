@@ -1,0 +1,21 @@
+params:
+  - SPAMMER_URL: "http://172.233.96.208:8090"
+  - SPAMMER_ID: "1"
+  - TIMEOUT_SECONDS: "30"
+steps:
+  - name: Info
+    command: echo Pause spamoor scenario scenario $SPAMMER_ID at $SPAMMER_URL instance after $TIMEOUT_SECONDS seconds
+  - name: Wait test finish
+    command: sleep $TIMEOUT_SECONDS
+  - name: Stop spammer
+    command: POST $SPAMMER_URL/api/spammer/$SPAMMER_ID/pause
+    continueOn:
+      failure: true
+      markSuccess: true
+    executor:
+      type: http
+      config:
+        timeout: 10
+        silent: true
+    depends:
+      - Wait test finish

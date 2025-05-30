@@ -1,0 +1,15 @@
+tags: python, rpc
+params:
+  - RPC_URL: "http://172.233.124.18:8545"
+  - MIN_GAS_LIMIT: "2000000017"
+steps:
+  - name: check gas limit is less than MIN_GAS_LIMIT
+    command: uv run /root/.config/dagu/scripts/check_gas_price.py --url $RPC_URL --min_gas_price_wei $MIN_GAS_LIMIT --log
+    output: CHECK_RESULT
+  - name: check gas limit output
+    command: echo "${CHECK_RESULT}"
+    preconditions:
+      - condition: "${CHECK_RESULT}"
+        expected: "true"
+    depends:
+      - check gas limit is less than MIN_GAS_LIMIT

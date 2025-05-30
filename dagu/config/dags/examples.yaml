@@ -1,0 +1,26 @@
+schedule: "5 4 * * *" # Run at 04:05
+params:
+  - NAME: "Dagu"
+steps:
+  - name: Hello world
+    command: echo Hello $NAME
+  - name: Done
+    command: echo Done!
+    depends: Hello world
+  - name: Hello world with script
+    command: bash
+    script: |
+      echo hello world
+      echo goodbye world
+  - name: monthly task
+    command: ls -la
+    preconditions:
+      - condition: "`date '+%d'`"
+        expected: "01"
+  - name: hello
+    executor:
+      type: docker
+      config:
+        image: alpine
+        autoRemove: true
+    command: echo "hello"
