@@ -9,6 +9,8 @@ if [ ! -f "$INIT_DONE_FLAG" ]; then
     # Install Python dependencies or run other init scripts
     pip3 install uv --break-system-packages
     # Make sure to mount docker volume
+    ls -la /root/.config/dagu/dags
+    ls -la /root/.config/dagu/scripts
     pip3 install -r /root/.config/dagu/scripts/requirements.txt --break-system-packages
 
     # Create flag file to indicate initialization is complete

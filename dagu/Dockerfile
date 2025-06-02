@@ -72,7 +72,7 @@ COPY --from=go-builder /app/bin/dagu /usr/local/bin/
 COPY ./entrypoint.sh /entrypoint.sh
 # Copy Python scripts and install dependencies
 COPY scripts/requirements.txt /config/scripts/requirements.txt
-COPY scripts/check_last_5_blocks_not_empty.py /config/scripts/check_last_5_blocks_not_empty.py
+# COPY scripts/check_last_5_blocks_not_empty.py /config/scripts/check_last_5_blocks_not_empty.py
 RUN pip3 install uv --break-system-packages && \
     pip3 install -r /config/scripts/requirements.txt --break-system-packages
 

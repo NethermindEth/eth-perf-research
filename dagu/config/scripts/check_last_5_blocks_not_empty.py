@@ -3,7 +3,7 @@
 Script to check if the last 5 Ethereum blocks contain empty transactions.
 
 Usage:
-    uv run check_last_5_blocks_not_empty --url http://localhost:8545
+    uv run check_last_5_blocks_not_empty.py --url http://localhost:8545
 """
 
 import argparse

@@ -9,7 +9,8 @@ services:
       - DAGU_PORT=8080 # optional. default is 8080
     volumes:
       - ./config/dags:/root/.config/dagu/dags
-      - ./scripts:/root/.config/dagu/scripts
+      - ./config/scripts:/root/.config/dagu/scripts
+      - ./config/logs:/root/.local # to keep history and logs
       - ./init.sh:/init.sh # Mount the initialization scrip
       - /var/run/docker.sock:/var/run/docker.sock # optional. required for docker in docker
     command: sh -c "chmod +x /init.sh && /init.sh && dagu start-all"
