@@ -1,10 +1,11 @@
 tags: python, rpc
 params:
-  - RPC_URL: "http://172.233.124.18:8545"
-  - MIN_GAS_LIMIT: "2000000017"
+  - RPC_URL: "https://rpc.perf-devnet-1.ethpandaops.io"
+  - MIN_GAS_LIMIT: "1000000000"
+  - MAX_WAIT_TIMEOUT: "1800"
 steps:
   - name: check gas limit is less than MIN_GAS_LIMIT
-    command: uv run /root/.config/dagu/scripts/check_gas_price.py --url $RPC_URL --min_gas_price_wei $MIN_GAS_LIMIT --log
+    command: uv run /root/.config/dagu/scripts/check_gas_price.py --url $RPC_URL --min_gas_price_wei $MIN_GAS_LIMIT --wait --timeout $MAX_WAIT_TIMEOUT --log
     output: CHECK_RESULT
   - name: check gas limit output
     command: echo "${CHECK_RESULT}"

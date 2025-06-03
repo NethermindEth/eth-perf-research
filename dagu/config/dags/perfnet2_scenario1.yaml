@@ -17,28 +17,30 @@ steps:
     output: STOP_SPAMMER_RESULT
     depends:
       - Start spamer
-  - name: Check spammer results
-    run: check_blocks_empty
-    params: "RPC_URL=$RPC_URL"
-    output: CHECK_SPAMMER_RESULT
-    depends:
-      - Stop spamer
   - name: Wait spamoor finish
     command: sleep 120
-  - name: Check gas limit
-    run: check_gas_limit
-    params: "RPC_URL=$RPC_URL MIN_GAS_LIMIT=$MIN_GAS_LIMIT"
-    output: CHECK_GAS_LIMIT_RESULT
     depends:
       - Stop spamer
+  - name: Check spammer results
+    run: check_blocks_empty
+    params: "RPC_URL=$RPC_URL TRANSACTIONS=50"
+    output: CHECK_SPAMMER_RESULT
+    depends:
+      - Wait spamoor finish
+  - name: Check gas price
+    run: check_gas_limit
+    params: "RPC_URL=$RPC_URL MIN_GAS_LIMIT=$MIN_GAS_LIMIT"
+    output: CHECK_GAS_RESULT
+    depends:
+      - Wait spamoor finish
   - name: Finished scenario 1
     command: echo true
     output: FINISH_SCENARIO_1
     preconditions:
       - condition: "${CHECK_SPAMMER_RESULT.outputs.CHECK_RESULT}"
         expected: "true"
-      - condition: "${CHECK_GAS_LIMIT_RESULT.outputs.CHECK_RESULT}"
+      - condition: "${CHECK_GAS_RESULT.outputs.CHECK_RESULT}"
         expected: "true"
     depends:
       - Check spammer results
-      - Check gas limit
+      - Check gas price

@@ -1,9 +1,11 @@
 tags: python, rpc
 params:
-  - RPC_URL: "http://172.233.124.18:8545"
+  - RPC_URL: "https://rpc.perf-devnet-1.ethpandaops.io"
+  - TRANSACTIONS: "50"
+  - MAX_WAIT_TIMEOUT: "1800"
 steps:
   - name: check last 5 blocks not empty
-    command: uv run /root/.config/dagu/scripts/check_last_5_blocks_not_empty.py --url $RPC_URL
+    command: uv run /root/.config/dagu/scripts/check_last_5_blocks_not_empty.py --url $RPC_URL --transactions $TRANSACTIONS --wait --timeout $MAX_WAIT_TIMEOUT
     output: CHECK_RESULT
   - name: use output
     command: echo "${CHECK_RESULT}"
