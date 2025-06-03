@@ -79,6 +79,7 @@ def main():
     parser.add_argument("--log", required=False, help="Print blocks if True")
     parser.add_argument("--transactions", type=int, required=False, help="Max number of transactions allowed per block")
     parser.add_argument("--wait", action="store_true", help="Wait until the condition is met")
+    parser.add_argument("--fail", action="store_true", help="Exit with status 1 if sets to true")
     parser.add_argument("--timeout", type=int, default=1800, help="Max wait time in seconds (default: 1800)")
     args = parser.parse_args()
 
@@ -92,7 +93,8 @@ def main():
                 sys.exit(0)
             if time.time() - start_time > args.timeout:
                 print("false")
-                sys.exit(1)
+                exit_code = 1 if args.fail else 0
+                sys.exit(exit_code)
             time.sleep(10)
     else:
         result = check_blocks(args.url, log, args.transactions)

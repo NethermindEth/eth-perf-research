@@ -43,9 +43,11 @@ def main():
     parser.add_argument("--log", action="store_true", help="Print gas price if True")
     parser.add_argument("--wait", action="store_true", help="Wait until the condition is met")
     parser.add_argument("--timeout", type=int, default=1800, help="Max wait time in seconds (default: 1800)")
+    parser.add_argument("--fail", action="store_true", help="Exit with status 1 if sets to true")
     args = parser.parse_args()
 
     start_time = time.time()
+    exit_code = 1 if args.fail else 0
 
     if args.wait:
         while True:
@@ -55,10 +57,10 @@ def main():
                     sys.exit(0)
             except Exception as e:
                 print(f"Error retrieving gas price: {e}")
-                sys.exit(1)
+                sys.exit(exit_code)
             if time.time() - start_time > args.timeout:
                 print("false")
-                sys.exit(1)
+                sys.exit(exit_code)
             time.sleep(10)
     else:
         try:
@@ -66,7 +68,7 @@ def main():
             print("true" if result else "false")
         except Exception as e:
             print(f"Error retrieving gas price: {e}")
-            sys.exit(1)
+            sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()
