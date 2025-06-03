@@ -4,6 +4,7 @@ Script to check if the last 5 Ethereum blocks contain empty transactions.
 
 Usage:
     uv run check_last_5_blocks_not_empty.py --url http://localhost:8545
+    uv run check_last_5_blocks_not_empty.py --url http://localhost:8545 --transactions 10
 """
 
 import argparse
@@ -46,6 +47,7 @@ def main():
     )
     parser.add_argument("--url", required=True, help="JRPC Node URL")
     parser.add_argument("--log", required=False, help="Print blocks if True")
+    parser.add_argument("--transactions", type=int, required=False, help="Max number of transactions allowed per block")
     args = parser.parse_args()
 
     try:
@@ -54,7 +56,7 @@ def main():
         print("Error retrieving latest block:", e)
         sys.exit(1)
 
-    all_empty = True
+    check_passed = True
     for block_number in range(latest_block, latest_block - 5, -1):
         block = get_block(args.url, block_number)
         if args.log:
@@ -63,10 +65,19 @@ def main():
             print(f"Block {block_number} not found")
             sys.exit(1)
         transactions = block.get("transactions", [])
-        if transactions:
-            all_empty = False
-            break
-    print("true" if all_empty else "false")
+
+        if args.transactions is not None:
+            # Check if number of transactions is less than the provided limit
+            if len(transactions) >= args.transactions:
+                check_passed = False
+                break
+        else:
+            # Original behavior: check if any block has transactions
+            if transactions:
+                check_passed = False
+                break
+
+    print("true" if check_passed else "false")
 
 if __name__ == "__main__":
     main()
