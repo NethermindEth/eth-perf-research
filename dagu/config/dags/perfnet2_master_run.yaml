@@ -1,0 +1,38 @@
+schedule: "*/5 * * * *" # Run every 5 minutes
+description: Run all spamoor scenarios every 5 minutes
+params:
+  - SPAMMER_URL: "https://spamoor.perf-devnet-1.ethpandaops.io"
+  - TIMEOUT_SECONDS: "300"
+  - RPC_URL: "https://rpc.perf-devnet-1.ethpandaops.io"
+  - MIN_GAS_LIMIT: "1000000000"
+steps:
+  - name: Get variable
+    run: get_variable
+    params: "VARIABLE_NAME=IS_RUN_FINISHED"
+    output: VARIABLE_OUTPUT
+  - name: Start spamers
+    run: perfnet2_all_scenarios
+    params: "SPAMMER_URL=$SPAMMER_URL TIMEOUT_SECONDS=$TIMEOUT_SECONDS RPC_URL=$RPC_URL MIN_GAS_LIMIT=$MIN_GAS_LIMIT"
+    output: SPAMMER_RESULT
+    continueOn:
+      skipped: true
+    preconditions:
+      - condition: "${VARIABLE_OUTPUT.outputs.VARIABLE_VALUE}"
+        expected: "true"
+    depends:
+      - Get variable
+  - name: Wait test start
+    command: sleep 10
+    depends:
+      - Get variable
+  - name: Block execution
+    run: set_variable
+    params: "VARIABLE_NAME=IS_RUN_FINISHED VARIABLE_VALUE=false"
+    depends:
+      - Wait test start
+  - name: Unblock next run
+    run: set_variable
+    params: "VARIABLE_NAME=IS_RUN_FINISHED VARIABLE_VALUE=true"
+    depends:
+      - Block execution
+      - Start spamers
