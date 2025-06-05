@@ -1,3 +1,5 @@
+description: Perform txpool_status RPC call
+tags: HTTP, rpc
 steps:
   - name: send POST request
     command: POST http://172.233.124.18:8545

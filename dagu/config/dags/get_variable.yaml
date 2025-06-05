@@ -1,8 +1,9 @@
-tags: python, rpc
+description: Python script to get json property VARIABLE_NAME from FILE_CONFIG_NAME
+tags: python, config, files
 params:
   - VARIABLE_NAME: "IS_RUN_FINISHED"
   - VARIABLE_DEFAULT_VALUE: "true"
-  - FILE_CONFIG_NAME: "config.json"    
+  - FILE_CONFIG_NAME: "config.json"
 steps:
   - name: get variable VARIABLE_NAME
     command: uv run /root/.config/dagu/scripts/make_config.py --name=$VARIABLE_NAME --value=$VARIABLE_DEFAULT_VALUE --read --file_name=$FILE_CONFIG_NAME

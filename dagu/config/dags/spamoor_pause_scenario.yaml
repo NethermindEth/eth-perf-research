@@ -1,5 +1,7 @@
+description: Pause spamoor scenario with specific ID
+tags: spamoor
 params:
-  - SPAMMER_URL: "http://172.233.96.208:8090"
+  - SPAMMER_URL: "https://spamoor.perf-devnet-1.ethpandaops.io"
   - SPAMMER_ID: "1"
   - TIMEOUT_SECONDS: "30"
 steps:

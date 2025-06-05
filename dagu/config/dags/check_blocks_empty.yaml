@@ -1,3 +1,4 @@
+description: Execute python script to check if the last 5 blocks contains less than TRANSACTIONS transactions
 tags: python, rpc
 params:
   - RPC_URL: "https://rpc.perf-devnet-1.ethpandaops.io"
