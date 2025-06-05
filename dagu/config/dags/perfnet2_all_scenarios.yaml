@@ -2,7 +2,7 @@ description: Run spamoor scenarios 1-6 for perfnet2
 tags: spamoor, perfnet2
 params:
   - SPAMMER_URL: "https://spamoor.perf-devnet-1.ethpandaops.io"
-  - TIMEOUT_SECONDS: "600"
+  - TIMEOUT_SECONDS: "300"
   - RPC_URL: "https://rpc.perf-devnet-1.ethpandaops.io"
   - MIN_GAS_LIMIT: "1000000000"
 steps:
@@ -29,8 +29,14 @@ steps:
     depends:
       - Start spamer 3
   - name: Start spamer 5
-    run: perfnet2_scenario4
+    run: perfnet2_scenario5
     params: "SPAMMER_URL=$SPAMMER_URL SPAMMER_ID=5 TIMEOUT_SECONDS=$TIMEOUT_SECONDS RPC_URL=$RPC_URL MIN_GAS_LIMIT=$MIN_GAS_LIMIT"
     output: SPAMMER_RESULT_5
     depends:
       - Start spamer 4
+  - name: Start spamer 6
+    run: perfnet2_scenario6
+    params: "SPAMMER_URL=$SPAMMER_URL SPAMMER_ID=5 TIMEOUT_SECONDS=$TIMEOUT_SECONDS RPC_URL=$RPC_URL MIN_GAS_LIMIT=$MIN_GAS_LIMIT"
+    output: SPAMMER_RESULT_6
+    depends:
+      - Start spamer 5
