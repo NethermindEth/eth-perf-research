@@ -1,0 +1,22 @@
+description: Start spamoor scenario with specific ID
+tags: spamoor
+params:
+  - SPAMMER_URL: "https://spamoor.perf-devnet-1.ethpandaops.io"
+  - SPAMMER_ID: "1"
+steps:
+  - name: Info
+    command: echo Run spamoor start scenario $SPAMMER_ID at $SPAMMER_URL instance
+  - name: Get all spammers
+    command: GET $SPAMMER_URL/api/spammers
+    executor:
+      type: http
+      config:
+        timeout: 10
+        silent: true # If silent is true, it outputs response body only.
+  - name: Start spammer
+    command: POST $SPAMMER_URL/api/spammer/$SPAMMER_ID/start
+    executor:
+      type: http
+      config:
+        timeout: 10
+        silent: true

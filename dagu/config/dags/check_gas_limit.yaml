@@ -1,0 +1,17 @@
+description: Execute python script to check if gas price is less than MIN_GAS_LIMIT
+tags: python, rpc
+params:
+  - RPC_URL: "https://rpc.perf-devnet-1.ethpandaops.io"
+  - MIN_GAS_LIMIT: "1000000000"
+  - MAX_WAIT_TIMEOUT: "1800"
+steps:
+  - name: check gas limit is less than MIN_GAS_LIMIT
+    command: uv run /root/.config/dagu/scripts/check_gas_price.py --url $RPC_URL --min_gas_price_wei $MIN_GAS_LIMIT --wait --timeout $MAX_WAIT_TIMEOUT --log
+    output: CHECK_RESULT
+  - name: check gas limit output
+    command: echo "${CHECK_RESULT}"
+    preconditions:
+      - condition: "${CHECK_RESULT}"
+        expected: "true"
+    depends:
+      - check gas limit is less than MIN_GAS_LIMIT

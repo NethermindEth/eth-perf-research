@@ -1,0 +1,10 @@
+description: Python script to save VARIABLE_NAME to FILE_CONFIG_NAME
+tags: python, config, files
+params:
+  - VARIABLE_NAME: "IS_RUN_FINISHED"
+  - VARIABLE_VALUE: "false"
+  - FILE_CONFIG_NAME: "config.json"
+steps:
+  - name: set variable VARIABLE_NAME to VARIABLE_VALUE
+    command: uv run /root/.config/dagu/scripts/make_config.py --name=$VARIABLE_NAME --value=$VARIABLE_VALUE --file_name=$FILE_CONFIG_NAME
+    output: SET_VARIABLE_VALUE

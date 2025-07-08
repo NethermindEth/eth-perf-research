@@ -1,0 +1,41 @@
+description: Run spamoor scenario
+tags: spamoor
+params:
+  - SPAMMER_URL: "http://172.233.96.208:8090"
+  - SPAMMER_ID: "1"
+  - TIMEOUT_SECONDS: "40"
+  - RPC_URL: "http://172.233.124.18:8545"
+  - MIN_GAS_LIMIT: "2000000017"  
+steps:
+  - name: Start spamer
+    run: spamoor_run_scenario
+    params: "SPAMMER_URL=$SPAMMER_URL SPAMMER_ID=$SPAMMER_ID"
+    output: START_SPAMMER_RESULT
+  - name: Check spammer results
+    run: check_blocks_empty
+    params: "RPC_URL=$RPC_URL"
+    output: CHECK_SPAMMER_RESULT
+    depends:
+      - Start spamer
+  - name: Check gas limit
+    run: check_gas_limit
+    params: "RPC_URL=$RPC_URL MIN_GAS_LIMIT=$MIN_GAS_LIMIT"
+    output: CHECK_GAS_LIMIT_RESULT
+    depends:
+      - Start spamer
+  - name: Replace with next test
+    command: echo starting next test
+    preconditions:
+      - condition: "${CHECK_SPAMMER_RESULT.outputs.CHECK_RESULT}"
+        expected: "true"
+      - condition: "${CHECK_GAS_LIMIT_RESULT.outputs.CHECK_RESULT}"
+        expected: "true"
+    depends:
+      - Check spammer results
+      - Check gas limit
+  - name: Stop spamer
+    run: spamoor_pause_scenario
+    params: "SPAMMER_URL=$SPAMMER_URL SPAMMER_ID=$SPAMMER_ID TIMEOUT_SECONDS=$TIMEOUT_SECONDS"
+    output: STOP_SPAMMER_RESULT
+    depends:
+      - Start spamer

@@ -1,0 +1,46 @@
+description: Run spamoor scenario 1
+tags: spamoor
+params:
+  - SPAMMER_URL: "https://spamoor.perf-devnet-1.ethpandaops.io"
+  - SPAMMER_ID: "1"
+  - TIMEOUT_SECONDS: "600"
+  - RPC_URL: "https://rpc.perf-devnet-1.ethpandaops.io"
+  - MIN_GAS_LIMIT: "1000000000"
+steps:
+  - name: Start spamer
+    run: spamoor_run_scenario
+    params: "SPAMMER_URL=$SPAMMER_URL SPAMMER_ID=$SPAMMER_ID"
+    output: START_SPAMMER_RESULT
+  - name: Stop spamer
+    run: spamoor_pause_scenario
+    params: "SPAMMER_URL=$SPAMMER_URL SPAMMER_ID=$SPAMMER_ID TIMEOUT_SECONDS=$TIMEOUT_SECONDS"
+    output: STOP_SPAMMER_RESULT
+    depends:
+      - Start spamer
+  - name: Wait spamoor finish
+    command: sleep 120
+    depends:
+      - Stop spamer
+  - name: Check spammer results
+    run: check_blocks_empty
+    params: "RPC_URL=$RPC_URL TRANSACTIONS=50"
+    output: CHECK_SPAMMER_RESULT
+    depends:
+      - Wait spamoor finish
+  - name: Check gas price
+    run: check_gas_limit
+    params: "RPC_URL=$RPC_URL MIN_GAS_LIMIT=$MIN_GAS_LIMIT"
+    output: CHECK_GAS_RESULT
+    depends:
+      - Wait spamoor finish
+  - name: Finished scenario 1
+    command: echo true
+    output: FINISH_SCENARIO_1
+    preconditions:
+      - condition: "${CHECK_SPAMMER_RESULT.outputs.CHECK_RESULT}"
+        expected: "true"
+      - condition: "${CHECK_GAS_RESULT.outputs.CHECK_RESULT}"
+        expected: "true"
+    depends:
+      - Check spammer results
+      - Check gas price
