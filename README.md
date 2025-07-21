@@ -55,6 +55,9 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - [ ] 5X Mainnet Size
 - [ ] 10X Mainnet Size
 
+### Various issues reported or fixes made thanks to findings during testing
+- [Client_name] Description + Issue Link/PR Link
+
 ## 🧠 Who Is This For?
 
 - Ethereum client developers (EL and CL)  
