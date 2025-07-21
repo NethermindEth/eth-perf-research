@@ -24,6 +24,37 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - Streamlined collaboration across clients  
 - Transparent and trackable process for EL/CL teams
 
+## 📈 Current Results/Findings
+
+### Gas Limit blockers
+#### **45 MGas**
+- [X] OpCodes benchmarking tool having proper execution on performance branches giving enough insgihts for client teams
+- [X] Besu Improve EC Scenarios
+- [X] General optimizations around ModExp to reach at least 10/12 MGas/s in each EL
+- [X] Ensure there is no critical issues on ZKEVM tests
+#### **60 MGas**
+- [ ] Further Modexp Improvements for Geth and Erigon
+- [X] Point Precompile analysis
+- [ ] XEN and heavy contracts testing + automation on perfnet
+#### **85 Mgas**
+- [ ] Receipts size too big - to be addressed in https://eips.ethereum.org/EIPS/eip-7975
+#### **100 MGas**
+- [ ] Point Precomiple repricing - EIP to be created
+#### **105 MGas**
+- [ ] Calldata further repricing?
+
+### State Bloating
+- [X] Creating initial infrastructure for State Bloating
+- [X] Validating various options for state bloat - Geth/Nethermind plugins or Manual pruning via State-heavy transactions
+- [X] Creating first scenarios to bloat a state via Spamoor
+- [X] First 50GB bloated
+- [X] 1,5X Mainnet Size
+- [ ] 2X Mainnet Size
+- [ ] SyncTests executed on 2X state as a baseline comparing to 1X
+- [ ] 3X Mainnet Size
+- [ ] 5X Mainnet Size
+- [ ] 10X Mainnet Size
+
 ## 🧠 Who Is This For?
 
 - Ethereum client developers (EL and CL)  
