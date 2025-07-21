@@ -39,7 +39,8 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 #### **85 Mgas**
 - [ ] Receipts size too big - to be addressed in https://eips.ethereum.org/EIPS/eip-7975
 #### **100 MGas**
-- [ ] Point Precomiple repricing - EIP to be created
+- [ ] Modexp repricing - https://eips.ethereum.org/EIPS/eip-7883
+- [ ] Point Precompile repricing - EIP to be created
 #### **105 MGas**
 - [ ] Calldata further repricing?
 
