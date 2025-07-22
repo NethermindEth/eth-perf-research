@@ -40,9 +40,8 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - [ ] Receipts size too big - to be addressed in https://eips.ethereum.org/EIPS/eip-7975
 #### **100 MGas**
 - [ ] Modexp repricing - https://eips.ethereum.org/EIPS/eip-7883
-
 #### **105 MGas**
-- [ ] Calldata further repricing?
+- [ ] Calldata cap - https://eips.ethereum.org/EIPS/eip-7934
 - [ ] Point Precompile repricing - EIP to be created
 
 ### State Bloating
