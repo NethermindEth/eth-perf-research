@@ -33,11 +33,16 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - [X] General optimizations around ModExp to reach at least 10/12 MGas/s in each EL
 - [X] Ensure there is no critical issues on ZKEVM tests
 #### **60 MGas**
-- [ ] Further Modexp Improvements for Geth and Erigon
+- [ ] Further Modexp Improvements for Geth
+- [X] Further Modexp Improvements for Erigon
 - [X] Point Precompile analysis
 - [ ] XEN and heavy contracts testing + automation on perfnet
+- [X] Full EEST Integration of gas-benchmarks
+- [ ] Mod/ModArith/Binop_Simple/calldatacopy fixes for Besu
+- [ ] 2x Bloated state testing
 #### **85 Mgas**
 - [ ] Receipts size too big - to be addressed in https://eips.ethereum.org/EIPS/eip-7975
+- [ ] Modexp Improvements for Besu (if 85 before Fusaka)
 #### **100 MGas**
 - [ ] Modexp repricing - https://eips.ethereum.org/EIPS/eip-7883
 #### **105 MGas**
@@ -50,7 +55,7 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - [X] Creating first scenarios to bloat a state via Spamoor
 - [X] First 50GB bloated
 - [X] 1,5X Mainnet Size
-- [ ] 2X Mainnet Size
+- [X] 2X Mainnet Size
 - [ ] SyncTests executed on 2X state as a baseline comparing to 1X
 - [ ] 3X Mainnet Size
 - [ ] 5X Mainnet Size
