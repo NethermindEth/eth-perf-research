@@ -25,6 +25,10 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - Transparent and trackable process for EL/CL teams
 
 ## 📈 Current Results/Findings
+> Assumptions:
+> 
+> 1. There is no scenario which performs slower than 4 seconds in specified range
+> 2. Tests to be performed on hardware BELOW EIP-7870 recomendations
 
 ### Gas Limit blockers
 #### **45 MGas**
@@ -45,6 +49,7 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - [ ] Modexp Improvements for Besu (if 85 before Fusaka)
 #### **100 MGas**
 - [ ] Modexp repricing - https://eips.ethereum.org/EIPS/eip-7883
+- [ ] EC Add improvements for Besu (current slowest 22.7 MGas/s)
 #### **105 MGas**
 - [ ] Calldata cap - https://eips.ethereum.org/EIPS/eip-7934
 - [ ] Point Precompile repricing - EIP to be created
