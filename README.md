@@ -44,6 +44,7 @@ This repository hosts infrastructure, tooling, and research focused on benchmark
 - [X] Full EEST Integration of gas-benchmarks
 - [ ] Mod/ModArith/Binop_Simple/calldatacopy fixes for Besu
 - [ ] 2x Bloated state testing
+- [ ] Besu Modexp and SelfDestruct analysis (really weak results reported from gas-benchmarks)
 #### **85 Mgas**
 - [ ] Receipts size too big - to be addressed in https://eips.ethereum.org/EIPS/eip-7975
 - [ ] Modexp Improvements for Besu (if 85 before Fusaka)
