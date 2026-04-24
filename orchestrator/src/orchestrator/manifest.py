@@ -1,6 +1,7 @@
 """Run manifest — records environment, session log, and final state root."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
@@ -87,21 +88,27 @@ class Manifest:
         sessions = [Session(**s) for s in body.pop("sessions", [])]
         replay_raw = body.pop("replay_context", None)
         replay_ctx = ReplayContext(**replay_raw) if replay_raw else None
-        return cls(sessions=sessions, replay_context=replay_ctx, **body)
+        # Filter to known fields so newer manifests with extra keys don't crash
+        # older readers. Unknown keys are ignored; missing required keys will
+        # raise from ``cls(...)`` as usual.
+        known = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in body.items() if k in known}
+        return cls(sessions=sessions, replay_context=replay_ctx, **filtered)
 
 
 def compute_composition_hash(
     target_sha256: str,
     env: EnvInfo,
-    replay_context: ReplayContext | None = None,
+    replay_context: ReplayContext | None = None,  # noqa: ARG001 — kept for signature stability
 ) -> str:
-    """sha256 over every knob that could change final_state_root across runs.
+    """sha256 matching the exact preimage defined in design §7.
 
-    Order is fixed; joining with ``|`` avoids concatenation ambiguity. The replay
-    context is included so two runs with identical target.yaml but different
-    ``base_address`` / ``revision`` / ``chain_id`` / signer key produce different
-    composition hashes — which is what we want for resume refusal and cross-run
-    provenance.
+    Preimage: ``target_yaml || genesis || plugin || nethermind || runtime || arch``.
+    ``replay_context`` is accepted for call-site compatibility but no longer folded
+    in; the signer / chain identity lives in ``Manifest.replay_context`` and is
+    compared structurally on resume (see ``manifest_replay_context_compatible``).
+    Keeping the hash narrow preserves spec alignment and lets journals produced by
+    pre-widening versions still resume under the new code.
     """
     parts = [
         target_sha256,
@@ -111,18 +118,21 @@ def compute_composition_hash(
         str(env.dotnet_runtime_major),
         env.cpu_arch,
     ]
-    if replay_context is not None:
-        parts.extend(
-            [
-                replay_context.base_address,
-                str(replay_context.revision),
-                str(replay_context.chain_id),
-                str(replay_context.gas_limit),
-                str(replay_context.address_stride),
-                replay_context.deploy_pubkey_sha256,
-            ]
-        )
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def replay_context_matches(a: ReplayContext | None, b: ReplayContext | None) -> bool:
+    """Resume-time compatibility check for two run contexts.
+
+    Returns ``True`` iff every field that affects tx/block hashes is identical.
+    Equivalent to ``a == b`` for dataclass instances, but wrapped here so callers
+    can express intent clearly and so future fields get added in one place.
+    """
+    if a is None or b is None:
+        # A legacy manifest (pre-replay-context) is compatible with any current
+        # context — the operator already accepted this behavior by resuming.
+        return True
+    return a == b
 
 
 def compute_journal_sha256(journal_path: Path | str) -> str:

@@ -13,8 +13,10 @@ import numpy as np
 def project_simplex(x: np.ndarray) -> np.ndarray:
     """Project a vector onto the unit simplex. Returns a new array.
 
-    Raises ValueError on NaN/Inf input — corrupt controller inputs must not silently
-    produce a numerically-plausible simplex point. The n==1 branch returns ``[1.0]``.
+    Raises ``ValueError`` on NaN/Inf input — corrupt controller inputs must not
+    silently produce a numerically-plausible simplex point. The general formula
+    handles ``n == 1`` correctly on its own (it collapses to ``[1.0]``), so the
+    special case is dropped to keep one code path under test.
     """
     x = np.asarray(x, dtype=np.float64).ravel()
     n = x.size
@@ -22,8 +24,6 @@ def project_simplex(x: np.ndarray) -> np.ndarray:
         return x
     if not np.all(np.isfinite(x)):
         raise ValueError("project_simplex requires finite inputs; got NaN/Inf")
-    if n == 1:
-        return np.array([1.0])
     sorted_desc = np.sort(x)[::-1]
     cumulative = np.cumsum(sorted_desc)
     # Find the largest k where sorted_desc[k] + (1 - cumulative[k]) / (k+1) > 0.

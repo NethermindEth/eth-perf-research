@@ -57,10 +57,13 @@ class Observability:
     observed_flat_bytes: int = 0
     coeffs_before: dict[str, dict[str, float]] = field(default_factory=dict)
     coeffs_after: dict[str, dict[str, float]] = field(default_factory=dict)
-    # Per-(verb, axis) α — preferred over the scalar alpha_current for resume.
+    # Per-(verb, axis) α — authoritative for resume state reconstruction.
+    # ``alpha_current`` is a display-only scalar mean of this field, kept for
+    # back-compat with plotters / dashboards that pre-date per-verb α. On write,
+    # both are populated consistently; on resume, ``alpha_state`` wins.
     alpha_state: dict[str, dict[str, float]] = field(default_factory=dict)
     sigma_innov: dict[str, dict[str, float]] = field(default_factory=dict)
-    alpha_current: float = 0.0
+    alpha_current: float = 0.0  # display-only: mean of alpha_state.values()
     innovation_ratio: float = 0.0
     residual_norm: float = 0.0
     # Null (not absent) on sensor_wait_timeout — preserves chain-hash determinism.

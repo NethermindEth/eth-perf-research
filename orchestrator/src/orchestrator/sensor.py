@@ -47,8 +47,9 @@ class StateObservation:
 class SensorClient:
     """Polls `statecomp_get` over JSON-RPC and extracts three byte counters.
 
-    `statecomp_get` lives on the public RPC port and needs no JWT. `jwt_path` is accepted
-    for parity with engine-port clients and is read lazily on the first request if present.
+    ``statecomp_get`` lives on the public RPC port and needs no JWT, so the sensor
+    client deliberately does not accept a ``jwt_path``. Engine-port (JWT-protected)
+    access is handled by ``orchestrator.rpc.RpcClient`` instead.
     """
 
     POLL_INTERVAL_S = 0.1

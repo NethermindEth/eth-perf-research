@@ -54,6 +54,7 @@ from .manifest import (
     Session,
     compute_composition_hash,
     compute_journal_sha256,
+    replay_context_matches,
 )
 from .payloads import ExecutionPayloadV3, PayloadStreamWriter
 from .probe import ProbeExecutor, run_probe, seed_state_from_probe
@@ -125,6 +126,7 @@ def resolve_startup_mode(
     *,
     rpc: RpcClient | None = None,
     facade_ctx: FacadeContext | None = None,
+    replay_context: ReplayContext | None = None,
 ) -> StartupDecision:
     """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch.
 
@@ -165,6 +167,17 @@ def resolve_startup_mode(
             raise ResumeRefused(
                 f"composition_hash mismatch: manifest={prior.composition_hash[:8]}… "
                 f"current={composition_hash[:8]}…"
+            )
+        # composition_hash covers target+env per design §7. Tx-signing identity
+        # lives in replay_context; check it separately so a changed signer / chain
+        # between runs refuses resume even when target.yaml is unchanged.
+        if replay_context is not None and not replay_context_matches(
+            prior.replay_context, replay_context
+        ):
+            raise ResumeRefused(
+                "manifest.replay_context (base_address / revision / chain_id / "
+                "gas_limit / signer) does not match the current FacadeContext; "
+                "archive state/ and restart fresh"
             )
 
     reader = JournalReader(journal)
@@ -464,6 +477,7 @@ def _run_locked(
         head_block,
         rpc=rpc,
         facade_ctx=preflight_ctx,
+        replay_context=replay_context,
     )
 
     ctx = preflight_ctx
