@@ -18,7 +18,7 @@ import platform
 import signal
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,7 +85,7 @@ class RunAlreadyActive(Exception):
 
 
 @contextlib.contextmanager
-def _state_dir_lock(state_dir: Path) -> Iterator[None]:
+def _state_dir_lock(state_dir: Path) -> Generator[None, None, None]:
     """Exclusive lock on ``state_dir/orchestrator.lock`` with NFS-safety probe.
 
     ``fcntl.flock`` is advisory-only on NFSv3 / SMB / some overlayfs setups and
@@ -945,7 +945,7 @@ def _now_iso() -> str:
 
 
 @contextlib.contextmanager
-def _signal_handlers() -> Iterator[threading.Event]:
+def _signal_handlers() -> Generator[threading.Event, None, None]:
     """Install SIGINT/SIGTERM handlers that set a ``threading.Event``; restore on exit.
 
     Previous version replaced the process-wide SIGINT handler and never restored
