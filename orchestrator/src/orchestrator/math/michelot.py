@@ -11,11 +11,17 @@ import numpy as np
 
 
 def project_simplex(x: np.ndarray) -> np.ndarray:
-    """Project a vector onto the unit simplex. Returns a new array."""
+    """Project a vector onto the unit simplex. Returns a new array.
+
+    Raises ValueError on NaN/Inf input — corrupt controller inputs must not silently
+    produce a numerically-plausible simplex point. The n==1 branch returns ``[1.0]``.
+    """
     x = np.asarray(x, dtype=np.float64).ravel()
     n = x.size
     if n == 0:
         return x
+    if not np.all(np.isfinite(x)):
+        raise ValueError("project_simplex requires finite inputs; got NaN/Inf")
     if n == 1:
         return np.array([1.0])
     sorted_desc = np.sort(x)[::-1]

@@ -134,7 +134,8 @@ def test_probe_sanity_gate_fires_on_outlier(reference_f) -> None:
         run_probe(reference_f, qp, bad_executor)
 
 
-def test_overshoot_fires_after_3_consecutive(reference_f, target) -> None:
+def test_overshoot_fires_in_windowed_detector(reference_f, target) -> None:
+    """H3: a sustained overshoot run trips the 4-of-6 windowed detector."""
     state = init_state(reference_f, target.qp_scenarios)
     ctrl = Controller(state)
     # Advance batch_id past the grace period without overshooting.
@@ -149,16 +150,42 @@ def test_overshoot_fires_after_3_consecutive(reference_f, target) -> None:
         )
         ctrl.apply_observation(_obs(), post, plan, tx_count=tx_count)
 
-    # Now feed observed that is wildly larger than F × tx_count.
+    # Feed explosive observations: each one saturates the ratio; window trips at 4/6.
     with pytest.raises(ControllerInstability):
-        for _ in range(3):
+        for _ in range(10):
             plan = ctrl.pick_next_batch(_obs(), target)
-            explosive_post = _obs(
-                acc=10_000_000,
-                st=10_000_000,
-                co=10_000_000,
-            )
+            explosive_post = _obs(acc=10_000_000, st=10_000_000, co=10_000_000)
             ctrl.apply_observation(_obs(), explosive_post, plan, tx_count=tx_count)
+
+
+def test_overshoot_detects_sawtooth_oscillation(reference_f, target) -> None:
+    """H3: an alternating [bad, bad, ok, bad, bad, ok, …] pattern must eventually trip."""
+    state = init_state(reference_f, target.qp_scenarios)
+    ctrl = Controller(state)
+    tx_count = 100
+
+    def clean_post(plan):
+        ref = reference_f.per_scenario(plan.verb)
+        return _obs(
+            acc=int(ref["accounts"] * tx_count),
+            st=int(ref["storage"] * tx_count),
+            co=int(ref["code"] * tx_count),
+        )
+
+    # Past the grace period without overshoot.
+    for _ in range(OVERSHOOT_GRACE_BATCHES):
+        plan = ctrl.pick_next_batch(_obs(), target)
+        ctrl.apply_observation(_obs(), clean_post(plan), plan, tx_count=tx_count)
+
+    with pytest.raises(ControllerInstability):
+        # Sawtooth: 2 bad, 1 clean, repeat.
+        for cycle in range(12):
+            plan = ctrl.pick_next_batch(_obs(), target)
+            if cycle % 3 == 2:
+                post = clean_post(plan)
+            else:
+                post = _obs(acc=10_000_000, st=10_000_000, co=10_000_000)
+            ctrl.apply_observation(_obs(), post, plan, tx_count=tx_count)
 
 
 def test_reference_f_version_recorded(reference_f) -> None:
@@ -199,6 +226,32 @@ def test_rehydrate_state_restores_f_sigma_alpha(reference_f) -> None:
     assert state.F["deploytx"]["code"] == pytest.approx(
         reference_f.per_scenario("deploytx")["code"]
     )
-    assert state.alpha == pytest.approx(0.187)
+    # α is now per-(verb, axis); legacy scalar alpha_current broadcasts to every slot.
+    assert state.alpha["eoatx"]["accounts"] == pytest.approx(0.187)
+    assert state.alpha["deploytx"]["storage"] == pytest.approx(0.187)
     assert state.batch_id == 43  # last + 1
     assert state.sigma["eoatx"]["accounts"] == pytest.approx(10.0)
+
+
+def test_per_verb_alpha_updates_independently(reference_f, target) -> None:
+    """MEDIUM: α must be tracked per-(verb, axis), not globally (spec §2.4)."""
+    state = init_state(reference_f, target.qp_scenarios)
+    ctrl = Controller(state)
+    tx_count = 100
+
+    plan = ctrl.pick_next_batch(_obs(), target)
+    ref = reference_f.per_scenario(plan.verb)
+    # Wildly off-model observation → α for this (verb, axis) should ramp up.
+    post = _obs(
+        acc=int(ref["accounts"] * tx_count * 10),
+        st=int(ref["storage"] * tx_count),
+        co=int(ref["code"] * tx_count),
+    )
+    ctrl.apply_observation(_obs(), post, plan, tx_count=tx_count)
+
+    # Another verb that was not touched should retain its A_MIN.
+    untouched_verbs = [v for v in target.qp_scenarios if v != plan.verb]
+    assert untouched_verbs
+    untouched = untouched_verbs[0]
+    from orchestrator.math.adaptive_alpha import A_MIN
+    assert state.alpha[untouched]["accounts"] == pytest.approx(A_MIN)

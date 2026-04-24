@@ -43,6 +43,11 @@ def update_coeff(
     eps: float = EPS,
 ) -> AlphaUpdate:
     """Apply the adaptive-α innovation update for a single (axis, verb) coefficient."""
+    if sigma_floor <= 0.0:
+        raise ValueError("sigma_floor must be > 0 to avoid division by zero in tanh arg")
+    for label, value in (("f_hat", f_hat), ("observed", observed), ("sigma", sigma), ("alpha", alpha)):
+        if not math.isfinite(value):
+            raise ValueError(f"update_coeff({label}) must be finite, got {value}")
     raw = observed - f_hat
     denom = max(sigma, sigma_floor)
     sat = sigma * math.tanh(raw / denom)

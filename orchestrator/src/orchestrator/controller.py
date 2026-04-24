@@ -5,14 +5,17 @@ Lifecycle:
     2. `pick_next_batch(observation, target)` computes a `BatchPlan`.
     3. `apply_observation(observation, plan)` updates F, σ, α in-place.
 
-Overshoot detection fires `ControllerInstability` if the L2 norm-ratio between
-commanded and observed bytes stays > 0.20 for 3 consecutive batches after batch 5.
+Overshoot detection uses a rolling window: fires ``ControllerInstability`` when
+at least ``OVERSHOOT_WINDOW_TRIPS`` of the last ``OVERSHOOT_WINDOW`` batches (after
+the grace period) had a residual-norm ratio exceeding ``OVERSHOOT_THRESHOLD``. A
+single clean batch no longer resets the counter — previously that let a perfect
+sawtooth oscillation run forever.
 """
 from __future__ import annotations
 
-import math
+from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Deque, Iterable
 
 import numpy as np
 
@@ -27,8 +30,10 @@ if TYPE_CHECKING:
 
 
 OVERSHOOT_THRESHOLD = 0.20
-OVERSHOOT_CONSECUTIVE = 3
+OVERSHOOT_WINDOW = 6
+OVERSHOOT_WINDOW_TRIPS = 4
 OVERSHOOT_GRACE_BATCHES = 5
+_RESIDUAL_NORM_FLOOR = 1024.0
 
 
 class ControllerInstability(Exception):
@@ -46,11 +51,16 @@ class BatchPlan:
 class ControllerState:
     F: dict[str, dict[str, float]]
     sigma: dict[str, dict[str, float]]
-    alpha: float = A_MIN
+    alpha: dict[str, dict[str, float]] = field(default_factory=dict)
     batch_id: int = 0
-    overshoot_streak: int = 0
+    overshoot_window: Deque[bool] = field(default_factory=lambda: deque(maxlen=OVERSHOOT_WINDOW))
     last_observation: StateObservation | None = None
     reference_f_version: str = ""
+
+    def alpha_mean(self) -> float:
+        """Scalar summary for the journal's legacy ``alpha_current`` field."""
+        all_vals = [v for per in self.alpha.values() for v in per.values()]
+        return sum(all_vals) / len(all_vals) if all_vals else A_MIN
 
 
 def init_state(
@@ -61,13 +71,15 @@ def init_state(
     scenarios = list(qp_scenarios)
     F: dict[str, dict[str, float]] = {}
     sigma: dict[str, dict[str, float]] = {}
+    alpha: dict[str, dict[str, float]] = {}
     for verb in scenarios:
         F[verb] = dict(reference_f.per_scenario(verb))
         sigma[verb] = {axis: 1.0 for axis in AXES}
+        alpha[verb] = {axis: A_MIN for axis in AXES}
     return ControllerState(
         F=F,
         sigma=sigma,
-        alpha=A_MIN,
+        alpha=alpha,
         batch_id=0,
         reference_f_version=reference_f.version,
     )
@@ -85,13 +97,17 @@ def rehydrate_state(
     from REFERENCE_F — otherwise every resume is a cold start and multi-session journals
     diverge from an uninterrupted run's ``final_state_root`` (spec §C.1).
 
-    Fallback behavior when a QP scenario is absent from the tail (e.g. `qp_scenarios`
-    was changed between sessions): that verb's F/σ reset to REFERENCE_F seeds and we
-    emit a warning via the returned state. The operator is expected to notice the
-    ``reference_f_version`` on shutdown and refuse such a run in review.
+    Per-(verb, axis) α is stored in ``Observability.alpha_state``; on legacy journals
+    where that field is absent we broadcast the scalar ``alpha_current`` to every slot.
     """
     scenarios = list(qp_scenarios)
     state = init_state(reference_f, scenarios)
+    scalar_alpha = (
+        float(tail_observability.alpha_current)
+        if tail_observability.alpha_current
+        else A_MIN
+    )
+    alpha_state = getattr(tail_observability, "alpha_state", {}) or {}
     for verb in scenarios:
         coeffs = tail_observability.coeffs_after.get(verb)
         if coeffs is not None and all(axis in coeffs for axis in AXES):
@@ -99,7 +115,11 @@ def rehydrate_state(
         sigma = tail_observability.sigma_innov.get(verb)
         if sigma is not None and all(axis in sigma for axis in AXES):
             state.sigma[verb] = {axis: float(sigma[axis]) for axis in AXES}
-    state.alpha = float(tail_observability.alpha_current) if tail_observability.alpha_current else A_MIN
+        per_verb = alpha_state.get(verb)
+        if per_verb and all(axis in per_verb for axis in AXES):
+            state.alpha[verb] = {axis: float(per_verb[axis]) for axis in AXES}
+        else:
+            state.alpha[verb] = {axis: scalar_alpha for axis in AXES}
     state.batch_id = last_batch_id + 1
     return state
 
@@ -157,31 +177,33 @@ class Controller:
         coeffs_before = dict(self.state.F[verb])
         max_abs_ratio = 0.0
         for axis in AXES:
-            # Update F on per-tx scale — observed_per_tx = observed / tx_count.
+            # Per-(verb, axis) α per design §2.4: "rule applied per-column of F".
             result = update_coeff(
                 self.state.F[verb][axis],
                 observed[axis] / tx_count,
                 self.state.sigma[verb][axis],
-                self.state.alpha,
+                self.state.alpha[verb][axis],
             )
             self.state.F[verb][axis] = result.f_new
             self.state.sigma[verb][axis] = result.sigma_new
-            self.state.alpha = result.alpha_new
+            self.state.alpha[verb][axis] = result.alpha_new
             max_abs_ratio = max(max_abs_ratio, result.abs_ratio)
-        self._check_overshoot(plan, observed, tx_count)
+        # L2 norm-ratio of the residual vector; matches design §4 semantics.
+        commanded_vec = np.array(
+            [self.state.F[verb][axis] * tx_count for axis in AXES], dtype=np.float64
+        )
+        obs_vec = np.array([observed[axis] for axis in AXES], dtype=np.float64)
+        residual_norm = float(np.linalg.norm(obs_vec - commanded_vec))
+        self._check_overshoot(residual_norm, commanded_vec)
         self.state.batch_id += 1
         self.state.last_observation = post
-        commanded_norm = math.sqrt(
-            sum(self.state.F[verb][axis] ** 2 for axis in AXES)
-        )
-        observed_norm = math.sqrt(sum(observed[axis] ** 2 for axis in AXES))
-        residual_norm = abs(observed_norm - commanded_norm)
         return {
             "observed_flat_bytes": int(sum(observed.values())),
             "coeffs_before": {verb: coeffs_before},
             "coeffs_after": {verb: dict(self.state.F[verb])},
             "sigma_innov": {verb: dict(self.state.sigma[verb])},
-            "alpha_current": self.state.alpha,
+            "alpha_current": self.state.alpha_mean(),
+            "alpha_state": {verb: dict(self.state.alpha[verb])},
             "innovation_ratio": max_abs_ratio,
             "residual_norm": residual_norm,
         }
@@ -203,24 +225,26 @@ class Controller:
             rows.append([self.state.F[v][axis] for v in verbs])
         return np.array(rows, dtype=np.float64)
 
-    def _check_overshoot(
-        self, plan: BatchPlan, observed: dict[str, float], tx_count: int
-    ) -> None:
+    def _check_overshoot(self, residual_norm: float, commanded: np.ndarray) -> None:
+        """Windowed overshoot detector (H3).
+
+        A single clean batch no longer resets the trip counter — a sawtooth
+        oscillation with pattern [bad, bad, ok, bad, bad, ok, …] will saturate
+        the window after ~9 batches and fire. The detector is gated by the
+        grace period so probe-era transients don't trip it.
+        """
         if self.state.batch_id < OVERSHOOT_GRACE_BATCHES:
-            self.state.overshoot_streak = 0
             return
-        # Scale per-tx F to batch-total so the comparison is apples-to-apples.
-        commanded = np.array(
-            [self.state.F[plan.verb][a] * tx_count for a in AXES], dtype=np.float64
-        )
-        obs_vec = np.array([observed[a] for a in AXES], dtype=np.float64)
-        denom = max(float(np.linalg.norm(commanded)), 1024.0)
-        ratio = float(np.linalg.norm(obs_vec - commanded) / denom)
-        if ratio > OVERSHOOT_THRESHOLD:
-            self.state.overshoot_streak += 1
-        else:
-            self.state.overshoot_streak = 0
-        if self.state.overshoot_streak >= OVERSHOOT_CONSECUTIVE:
+        denom = max(float(np.linalg.norm(commanded)), _RESIDUAL_NORM_FLOOR)
+        ratio = residual_norm / denom
+        tripped = ratio > OVERSHOOT_THRESHOLD
+        self.state.overshoot_window.append(tripped)
+        trips = sum(self.state.overshoot_window)
+        if (
+            len(self.state.overshoot_window) == OVERSHOOT_WINDOW
+            and trips >= OVERSHOOT_WINDOW_TRIPS
+        ):
             raise ControllerInstability(
-                f"overshoot norm-ratio {ratio:.3f} × {self.state.overshoot_streak} consecutive batches"
+                f"overshoot: {trips}/{OVERSHOOT_WINDOW} recent batches over "
+                f"threshold={OVERSHOOT_THRESHOLD} (latest ratio {ratio:.3f})"
             )

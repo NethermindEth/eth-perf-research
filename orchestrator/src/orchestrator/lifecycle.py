@@ -453,7 +453,8 @@ def _run_one_batch(
             "coeffs_before": {plan.verb: dict(controller.F[plan.verb])},
             "coeffs_after": {plan.verb: dict(controller.F[plan.verb])},
             "sigma_innov": {plan.verb: dict(controller.state.sigma[plan.verb])},
-            "alpha_current": controller.state.alpha,
+            "alpha_current": controller.state.alpha_mean(),
+            "alpha_state": {plan.verb: dict(controller.state.alpha[plan.verb])},
             "innovation_ratio": 0.0,
             "residual_norm": 0.0,
         }
@@ -477,6 +478,7 @@ def _run_one_batch(
             observed_flat_bytes=int(obs_diag["observed_flat_bytes"]),
             coeffs_before=obs_diag["coeffs_before"],
             coeffs_after=obs_diag["coeffs_after"],
+            alpha_state=obs_diag.get("alpha_state", {}),
             sigma_innov=obs_diag["sigma_innov"],
             alpha_current=float(obs_diag["alpha_current"]),
             innovation_ratio=float(obs_diag["innovation_ratio"]),

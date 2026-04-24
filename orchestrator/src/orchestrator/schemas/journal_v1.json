@@ -61,6 +61,7 @@
         "observed_flat_bytes": { "type": "integer" },
         "coeffs_before": { "type": "object" },
         "coeffs_after": { "type": "object" },
+        "alpha_state": { "type": "object" },
         "sigma_innov": { "type": "object" },
         "alpha_current": { "type": "number" },
         "innovation_ratio": { "type": "number" },

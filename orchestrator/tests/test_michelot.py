@@ -40,3 +40,13 @@ def test_random_vectors_land_on_simplex(seed: int) -> None:
 def test_uniform_vector_stays_uniform() -> None:
     out = project_simplex(np.full(5, 0.2))
     np.testing.assert_allclose(out, np.full(5, 0.2), atol=1e-12)
+
+
+def test_rejects_nan() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        project_simplex(np.array([0.5, float("nan"), 0.5]))
+
+
+def test_rejects_inf() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        project_simplex(np.array([float("inf"), 0.0, 0.0]))

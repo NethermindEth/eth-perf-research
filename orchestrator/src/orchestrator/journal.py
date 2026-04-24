@@ -57,6 +57,8 @@ class Observability:
     observed_flat_bytes: int = 0
     coeffs_before: dict[str, dict[str, float]] = field(default_factory=dict)
     coeffs_after: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Per-(verb, axis) α — preferred over the scalar alpha_current for resume.
+    alpha_state: dict[str, dict[str, float]] = field(default_factory=dict)
     sigma_innov: dict[str, dict[str, float]] = field(default_factory=dict)
     alpha_current: float = 0.0
     innovation_ratio: float = 0.0

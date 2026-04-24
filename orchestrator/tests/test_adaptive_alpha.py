@@ -1,6 +1,8 @@
 """Adaptive-α update tests."""
 from __future__ import annotations
 
+import pytest
+
 from orchestrator.math.adaptive_alpha import (
     A_MAX,
     A_MIN,
@@ -47,3 +49,18 @@ def test_sigma_floor_honored_on_small_sigma() -> None:
     result = update_coeff(100.0, 101.0, 0.0, 0.1)
     assert result.sigma_new > 0  # running EWMA lifts it off zero
     assert abs(result.saturated_innovation) < SIGMA_FLOOR  # sigma=0 pins output at 0
+
+
+def test_rejects_zero_sigma_floor() -> None:
+    with pytest.raises(ValueError, match="sigma_floor"):
+        update_coeff(100.0, 101.0, 5.0, 0.1, sigma_floor=0.0)
+
+
+def test_rejects_nan_observed() -> None:
+    with pytest.raises(ValueError, match="observed"):
+        update_coeff(100.0, float("nan"), 5.0, 0.1)
+
+
+def test_rejects_inf_f_hat() -> None:
+    with pytest.raises(ValueError, match="f_hat"):
+        update_coeff(float("inf"), 100.0, 5.0, 0.1)
