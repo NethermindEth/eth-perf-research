@@ -6,11 +6,15 @@ is assembled later in `manifest.py` — this loader just produces a `TargetConfi
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+_BASE_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{1,40}$")
 
 
 DEFAULT_QP_SCENARIOS = (
@@ -51,13 +55,15 @@ def load_target(path: Path | str) -> TargetConfig:
     body = yaml.safe_load(raw_bytes) or {}
     mainnet = body.get("mainnet_target") or DEFAULT_MAINNET_TARGET
     _validate_mainnet_target(mainnet)
-    base_addr_hex = body.get("base_address", "0x1000")
-    base_addr = bytes.fromhex(base_addr_hex.removeprefix("0x")).rjust(20, b"\x00")
+    base_addr = _parse_base_address(body.get("base_address", "0x1000"))
+    revision = int(body.get("revision", 0))
+    if revision < 0 or revision >= (1 << 80):
+        raise ValueError(f"revision out of range: {revision}")
     return TargetConfig(
         mainnet_target={k: float(v) for k, v in mainnet.items()},
         target_total_bytes=int(body.get("target_total_bytes", 1_000_000_000_000)),
         base_address=base_addr,
-        revision=int(body.get("revision", 0)),
+        revision=revision,
         qp_scenarios=tuple(body.get("qp_scenarios", DEFAULT_QP_SCENARIOS)),
         reference_f_path=Path(body["reference_f_path"]) if body.get("reference_f_path") else None,
         total_batch_bytes=int(body.get("total_batch_bytes", 10_000_000)),
@@ -65,6 +71,17 @@ def load_target(path: Path | str) -> TargetConfig:
         raw=body,
         source_sha256=hashlib.sha256(raw_bytes).hexdigest(),
     )
+
+
+def _parse_base_address(value: Any) -> bytes:
+    """Parse ``0x``-prefixed hex into a 20-byte big-endian address. Rejects oversize input."""
+    if not isinstance(value, str) or not _BASE_ADDRESS_RE.fullmatch(value):
+        raise ValueError(f"base_address must match ^0x[0-9a-fA-F]{{1,40}}$, got {value!r}")
+    try:
+        raw = bytes.fromhex(value.removeprefix("0x"))
+    except ValueError as exc:
+        raise ValueError(f"base_address hex parse failed: {exc}") from exc
+    return raw.rjust(20, b"\x00")
 
 
 def _validate_mainnet_target(mainnet: dict[str, float]) -> None:

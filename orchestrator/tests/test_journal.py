@@ -12,12 +12,14 @@ import pytest
 from orchestrator.journal import (
     ChainHashMismatch,
     JournalReader,
+    JournalSchemaError,
     JournalWriter,
     Observability,
     Record,
     ReplayCore,
     load_schema,
     serialize_replay_core,
+    validate_record_dict,
 )
 
 
@@ -166,6 +168,73 @@ def test_unknown_status_rejected_by_schema(tmp_path: Path) -> None:
     line = json.loads(journal.read_text().strip())
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(instance=line, schema=schema)
+
+
+def test_reader_rejects_oversized_address(tmp_path: Path) -> None:
+    """Crafted >40-hex address would DoS replay.int() — schema must reject."""
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_make_record(0))
+    lines = journal.read_text().splitlines()
+    body = json.loads(lines[0])
+    body["replay_core"]["start_address"] = "0x" + ("f" * 1_000_000)
+    lines[0] = json.dumps(body, separators=(",", ":"))
+    journal.write_text("\n".join(lines) + "\n")
+
+    with pytest.raises(JournalSchemaError) as excinfo:
+        list(JournalReader(journal))
+    assert excinfo.value.batch_id == 0
+
+
+def test_reader_rejects_malformed_json(tmp_path: Path) -> None:
+    journal = tmp_path / "j.jsonl"
+    journal.write_text('{"schema": 1, "incomplete":\n')
+    with pytest.raises(JournalSchemaError):
+        list(JournalReader(journal))
+
+
+def test_reader_rejects_missing_required_field(tmp_path: Path) -> None:
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_make_record(0))
+    body = json.loads(journal.read_text().strip())
+    del body["replay_core"]["block_hash"]
+    journal.write_text(json.dumps(body, separators=(",", ":")) + "\n")
+    with pytest.raises(JournalSchemaError):
+        list(JournalReader(journal))
+
+
+def test_validate_record_dict_rejects_bad_status() -> None:
+    from orchestrator.journal import JournalSchemaError
+
+    bad = {
+        "schema": 1,
+        "session_id": 1,
+        "ts_iso": "2026-04-24T00:00:00Z",
+        "batch_id": 0,
+        "replay_core": {
+            "verb": "eoatx",
+            "deadline_bytes": 1000,
+            "start_address": "0x00",
+            "end_address": "0x01",
+            "status": "garbage",
+            "block_hash": "0x" + "bb" * 32,
+            "block_number": 100,
+            "chain_hash": "0" * 64,
+        },
+        "observability": {
+            "observed_flat_bytes": 0,
+            "coeffs_before": {},
+            "coeffs_after": {},
+            "sigma_innov": {},
+            "alpha_current": 0.0,
+            "innovation_ratio": 0.0,
+            "residual_norm": 0.0,
+            "statecomp_snapshot": None,
+        },
+    }
+    with pytest.raises(JournalSchemaError):
+        validate_record_dict(bad)
 
 
 def test_serialize_replay_core_excludes_chain_hash() -> None:

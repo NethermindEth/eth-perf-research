@@ -32,15 +32,15 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "verb": { "type": "string" },
-        "deadline_bytes": { "type": "integer", "minimum": 0 },
-        "start_address": { "type": "string", "pattern": "^0x[0-9a-fA-F]+$" },
-        "end_address": { "type": "string", "pattern": "^0x[0-9a-fA-F]+$" },
+        "verb": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "deadline_bytes": { "type": "integer", "minimum": 0, "maximum": 268435456 },
+        "start_address": { "type": "string", "pattern": "^0x[0-9a-fA-F]{1,40}$" },
+        "end_address": { "type": "string", "pattern": "^0x[0-9a-fA-F]{1,40}$" },
         "status": {
           "type": "string",
           "enum": ["ok", "aborted", "controller_instability", "sensor_wait_timeout"]
         },
-        "block_hash": { "type": "string" },
+        "block_hash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
         "block_number": { "type": "integer", "minimum": 0 },
         "chain_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }

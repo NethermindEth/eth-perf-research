@@ -34,6 +34,50 @@ revision: 0
     assert len(cfg.qp_scenarios) == 9
 
 
+def test_load_target_rejects_oversized_base_address(tmp_path: Path) -> None:
+    path = tmp_path / "target.yaml"
+    path.write_text(
+        "mainnet_target:\n  accounts: 0.141\n  storage: 0.817\n  code: 0.042\n"
+        "target_total_bytes: 1000\n"
+        'base_address: "0x' + 'f' * 60 + '"\n'
+    )
+    with pytest.raises(ValueError, match="base_address"):
+        load_target(path)
+
+
+def test_load_target_rejects_non_hex_base_address(tmp_path: Path) -> None:
+    path = _write_target(
+        tmp_path,
+        """
+mainnet_target:
+  accounts: 0.141
+  storage: 0.817
+  code: 0.042
+target_total_bytes: 1000
+base_address: "not-hex"
+""",
+    )
+    with pytest.raises(ValueError, match="base_address"):
+        load_target(path)
+
+
+def test_load_target_rejects_negative_revision(tmp_path: Path) -> None:
+    path = _write_target(
+        tmp_path,
+        """
+mainnet_target:
+  accounts: 0.141
+  storage: 0.817
+  code: 0.042
+target_total_bytes: 1000
+base_address: "0x1000"
+revision: -1
+""",
+    )
+    with pytest.raises(ValueError, match="revision"):
+        load_target(path)
+
+
 def test_load_target_rejects_unnormalized_mainnet(tmp_path: Path) -> None:
     path = _write_target(
         tmp_path,

@@ -10,12 +10,15 @@ differ between identical replay-valid runs (timestamps, innovation coefficients,
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
+
+import jsonschema
 
 
 SCHEMA_VERSION = 1
@@ -24,6 +27,17 @@ _CHAIN_HASH_GENESIS = "0" * 64
 
 class ChainHashMismatch(Exception):
     """Raised when `verify_chain` detects a tampered record."""
+
+
+class JournalSchemaError(ValueError):
+    """Raised when a journal line fails schema validation.
+
+    Carries the offending batch_id (if present) so operators can locate the row.
+    """
+
+    def __init__(self, message: str, batch_id: int | None = None) -> None:
+        super().__init__(message)
+        self.batch_id = batch_id
 
 
 @dataclass
@@ -138,12 +152,26 @@ class JournalReader:
         self.path = Path(path)
 
     def __iter__(self) -> Iterator[Record]:
+        validator = _journal_validator()
         with self.path.open("r", encoding="utf-8") as f:
-            for raw in f:
+            for line_no, raw in enumerate(f, start=1):
                 raw = raw.strip()
                 if not raw:
                     continue
-                yield _dict_to_record(json.loads(raw))
+                try:
+                    body = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise JournalSchemaError(
+                        f"line {line_no}: malformed JSON ({exc.msg})"
+                    ) from exc
+                errors = sorted(validator.iter_errors(body), key=lambda e: e.path)
+                if errors:
+                    first = errors[0]
+                    raise JournalSchemaError(
+                        f"line {line_no}: schema violation at {list(first.path)}: {first.message}",
+                        batch_id=body.get("batch_id") if isinstance(body, dict) else None,
+                    )
+                yield _dict_to_record(body)
 
     def tail(self) -> Record | None:
         last: Record | None = None
@@ -178,7 +206,27 @@ def _dict_to_record(d: dict[str, Any]) -> Record:
     )
 
 
+@functools.cache
 def load_schema() -> dict[str, Any]:
     """Return the JSON Schema for a journal record (cached read)."""
     schema_path = Path(__file__).parent / "schemas" / "journal_v1.json"
     return json.loads(schema_path.read_text(encoding="utf-8"))
+
+
+@functools.cache
+def _journal_validator() -> jsonschema.Draft202012Validator:
+    """Compiled validator — reused across all journal reads."""
+    return jsonschema.Draft202012Validator(load_schema())
+
+
+def validate_record_dict(body: dict[str, Any]) -> None:
+    """Public entry — validate a single journal record dict or raise ``JournalSchemaError``."""
+    validator = _journal_validator()
+    errors = sorted(validator.iter_errors(body), key=lambda e: e.path)
+    if not errors:
+        return
+    first = errors[0]
+    raise JournalSchemaError(
+        f"schema violation at {list(first.path)}: {first.message}",
+        batch_id=body.get("batch_id") if isinstance(body, dict) else None,
+    )
