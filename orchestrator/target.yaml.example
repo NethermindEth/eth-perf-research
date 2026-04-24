@@ -1,0 +1,37 @@
+# Example orchestrator target configuration.
+# Copy to target.yaml and tune for your environment.
+
+# Mainnet composition fractions (from Paradigm 2024 — reth @ 245.5 GiB snapshot).
+mainnet_target:
+  accounts: 0.141
+  storage:  0.817
+  code:     0.042
+
+# Absolute byte target — 1 TB is the v1 grant milestone.
+target_total_bytes: 1_000_000_000_000
+
+# Address derivation: base + revision * stride + cursor.
+base_address: "0x100000"
+revision:      0
+
+# Chain id for signing txs (must match Nethermind's chainspec).
+chain_id: 1337
+gas_limit: 30_000_000
+
+# Budget per batch (tx-RLP bytes).
+total_batch_bytes: 10_000_000
+
+# QP verb set — defaults to the 9 design-v3 scenarios.
+# qp_scenarios:
+#   - eoatx
+#   - calltx
+#   - deploytx
+#   - factorydeploytx
+#   - storagespam
+#   - erc20_bloater
+#   - erc20tx
+#   - uniswap_swaps
+#   - storagerefundtx
+
+# Projection step η (tune down if overshoot fires).
+projection_eta: 0.5

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+state/
+*.rlp
+*.jsonl
+run-manifest.json
+.omc/
+target.yaml

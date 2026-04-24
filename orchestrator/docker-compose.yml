@@ -1,0 +1,71 @@
+services:
+  nethermind:
+    image: nethermind:pr-A-dev
+    network_mode: bridge
+    read_only: true
+    volumes:
+      - type: bind
+        source: ./nethermind-data
+        target: /nethermind/db
+      - type: tmpfs
+        target: /run/jwt
+    command:
+      - --JsonRpc.Host=0.0.0.0
+      - --JsonRpc.Port=8545
+      - --JsonRpc.EnabledModules=Eth,Net,Web3,StateComposition
+      - --JsonRpc.AdditionalRpcUrls=http://127.0.0.1:8547|http|Admin;Debug;Trace;Personal;Testing;TxPool
+      - --Testing.Enabled=true
+      - --StateComposition.Enabled=true
+      - --StateComposition.RpcAccessLevel=loopback
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl -sf -H 'content-type: application/json' --data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_syncing\",\"id\":1,\"params\":[]}' http://localhost:8545 || exit 1"
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+  jwt-init:
+    image: alpine:3.20
+    entrypoint: ["/bin/sh", "/scripts/gen-jwt.sh"]
+    volumes:
+      - type: tmpfs
+        target: /run/jwt
+      - type: bind
+        source: ./scripts
+        target: /scripts
+        read_only: true
+    restart: "no"
+
+  orchestrator:
+    build: .
+    depends_on:
+      nethermind:
+        condition: service_healthy
+      jwt-init:
+        condition: service_completed_successfully
+    environment:
+      - NODE_RPC=http://nethermind:8545
+      - ENGINE_RPC=http://nethermind:8551
+      - JWT_PATH=/run/jwt/jwt.hex
+      - STATE_DIR=/app/state
+    volumes:
+      - type: tmpfs
+        target: /run/jwt
+      - type: bind
+        source: ./state
+        target: /app/state
+      - type: bind
+        source: ./target.yaml
+        target: /app/target.yaml
+        read_only: true
+    command:
+      - --rpc-url=${NODE_RPC:-http://nethermind:8545}
+      - --state-dir=/app/state
+      - --target-yaml=/app/target.yaml
+
+volumes:
+  jwt:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
