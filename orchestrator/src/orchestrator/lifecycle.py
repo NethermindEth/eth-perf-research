@@ -254,6 +254,16 @@ def resolve_startup_mode(
             facade_ctx=facade_ctx,
             resume_session_id=resume_session_id,
         )
+    if head_block < tail.replay_core.block_number:
+        # Spec §1 assumes reorg-free by construction; head cannot regress. If it
+        # did, we're pointed at the wrong data dir, the DB rolled back, or the
+        # reorg-free invariant was violated externally. Surface that instead of
+        # the generic "not in {N, N+1}" message (design-compliance #5).
+        raise ResumeRefused(
+            f"Nethermind head {head_block} < journal tail {tail.replay_core.block_number}; "
+            f"spec §1 reorg-free invariant violated (corruption, wrong data dir, "
+            f"or external DB rollback). Archive state/ before restart."
+        )
     if head_block not in (tail.replay_core.block_number, tail.replay_core.block_number + 1):
         raise ResumeRefused(
             f"Nethermind head {head_block} not in "
@@ -283,6 +293,13 @@ def _reconcile_pending(
       with ``status="reconciled_unobserved"``, append it, then drop the sidecar.
     Anything else: refuse — the state on disk is ambiguous.
     """
+    # Pending == tail.batch_id means the journal append succeeded but the
+    # clear_pending call failed (disk full, ENOSPC after fsync, etc). The
+    # batch is already durable in the journal; just drop the stale sidecar
+    # and continue (skeptic F-9).
+    if pending.batch_id == tail.batch_id:
+        clear_pending(state_dir)
+        return tail
     # Pending is always for the batch immediately after the journal tail.
     if pending.batch_id != tail.batch_id + 1:
         raise ResumeRefused(

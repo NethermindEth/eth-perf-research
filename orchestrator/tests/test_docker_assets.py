@@ -46,11 +46,18 @@ def test_compose_orchestrator_depends_on_healthy_nethermind() -> None:
 
 
 def test_compose_tmpfs_jwt_shared() -> None:
+    """security L-COMPOSE: /run/jwt must be a SHARED named volume, not per-service tmpfs."""
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    # Named volume must be declared with a tmpfs backend.
+    assert "jwt" in compose.get("volumes", {})
     for svc in ("nethermind", "orchestrator", "jwt-init"):
         volumes = compose["services"][svc]["volumes"]
-        targets = [v.get("target") for v in volumes]
-        assert "/run/jwt" in targets, f"{svc}: no tmpfs at /run/jwt"
+        jwt_mount = next((v for v in volumes if v.get("target") == "/run/jwt"), None)
+        assert jwt_mount is not None, f"{svc}: no /run/jwt mount"
+        # Reject the old per-service `type: tmpfs` isolation (gen-jwt would write
+        # into its own tmpfs and nethermind would see nothing).
+        assert jwt_mount.get("type") == "volume", f"{svc}: /run/jwt must share the named volume"
+        assert jwt_mount.get("source") == "jwt", f"{svc}: /run/jwt source must be named 'jwt'"
 
 
 def test_dockerignore_excludes_state_and_tests() -> None:

@@ -7,7 +7,12 @@ services:
       - type: bind
         source: ./nethermind-data
         target: /nethermind/db
-      - type: tmpfs
+      # Shared tmpfs-backed volume (declared below). Using a named volume
+      # lets jwt-init, nethermind, and orchestrator see the SAME file —
+      # per-service `type: tmpfs` mounts are isolated per container and would
+      # leave Nethermind reading an empty /run/jwt (security L-COMPOSE).
+      - type: volume
+        source: jwt
         target: /run/jwt
     command:
       - --JsonRpc.Host=0.0.0.0
@@ -29,7 +34,8 @@ services:
     image: alpine:3.20
     entrypoint: ["/bin/sh", "/scripts/gen-jwt.sh"]
     volumes:
-      - type: tmpfs
+      - type: volume
+        source: jwt
         target: /run/jwt
       - type: bind
         source: ./scripts
@@ -50,7 +56,8 @@ services:
       - JWT_PATH=/run/jwt/jwt.hex
       - STATE_DIR=/app/state
     volumes:
-      - type: tmpfs
+      - type: volume
+        source: jwt
         target: /run/jwt
       - type: bind
         source: ./state

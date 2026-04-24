@@ -480,6 +480,48 @@ def test_signal_handlers_restore_previous(tmp_path: Path) -> None:
         signal.signal(signal.SIGTERM, prior_sigterm)
 
 
+def test_refuse_when_head_regresses(tmp_path: Path) -> None:
+    """Spec §1 reorg-free invariant violation — head < tail.block_number."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    with pytest.raises(ResumeRefused, match="§1"):
+        resolve_startup_mode(tmp_path, composition_hash=comp, head_block=50)
+
+
+def test_pending_batch_id_equal_to_tail_treats_as_already_journaled(tmp_path: Path) -> None:
+    """Skeptic F-9: if clear_pending failed after successful journal append, recover gracefully."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=5, block_number=105))
+    # Stale pending: tail and pending share the same batch_id, meaning the
+    # append succeeded on the prior run but the sidecar was never cleared.
+    write_pending(
+        tmp_path,
+        PendingBatch(
+            session_id=1,
+            resumed_from_batch=None,
+            batch_id=5,
+            verb="eoatx",
+            deadline_bytes=1000,
+            start_address="0x" + (1).to_bytes(20, "big").hex(),
+            end_address="0x" + (2).to_bytes(20, "big").hex(),
+            ts_iso="2026-04-24T00:01:00Z",
+            pre_block_number=100,
+            composition_hash=comp,
+        ),
+    )
+    decision = resolve_startup_mode(tmp_path, composition_hash=comp, head_block=105)
+    assert decision.mode is StartupMode.RESUME
+    assert not (tmp_path / "orchestrator.journal.pending").exists()
+
+
 def test_refuse_when_head_is_unknown(tmp_path: Path) -> None:
     """H2: RPC unreachable must not silently allow resume."""
     target = _target()
