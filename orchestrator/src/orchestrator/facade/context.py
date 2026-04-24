@@ -18,13 +18,14 @@ LAB_ALLOWED_CHAIN_IDS = frozenset({1337, 31337})
 _ADDRESS_SPACE = 1 << 160
 
 
-@dataclass
+@dataclass(slots=True)
 class SignedTransaction:
     """Wrapped signed tx — carries both RLP bytes (for size/commit) and metadata.
 
     Adapters return these; the orchestrator takes `rlp` for `testing_commitBlockV1` and
     reads `fields` for diagnostics. `kind` records the verb that produced the tx so
-    downstream tooling can filter without re-decoding.
+    downstream tooling can filter without re-decoding. ``slots=True`` keeps the
+    per-tx footprint small on the hot loop (100s of instances per batch).
     """
 
     rlp: bytes

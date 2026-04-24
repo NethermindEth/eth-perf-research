@@ -13,6 +13,11 @@ dependencies = [
     "pyyaml>=6.0",
     "rlp>=4.0",
     "eth-account>=0.11",
+    # Pin coincurve explicitly: eth-account uses it as a fast secp256k1 backend
+    # when present and silently falls back to the ~100× slower pure-Python
+    # `eth-keys` path when it's missing. An explicit pin prevents a resolver
+    # hiccup from degrading per-tx signing throughput.
+    "coincurve>=19",
     "typer>=0.12",
     "jsonschema>=4.21",
 ]

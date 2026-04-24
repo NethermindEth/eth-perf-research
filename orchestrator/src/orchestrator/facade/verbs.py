@@ -181,7 +181,13 @@ def _fuzz_diag(_ctx: FacadeContext, idx: int) -> dict[str, Any]:
     return {"fuzz_seed": idx}
 
 
-VERB_SPECS: list[VerbSpec] = [
+def _gasburner_diag(_ctx: FacadeContext, _idx: int) -> dict[str, Any]:
+    return {"compute_only": True}
+
+
+# Tuple (not list) so ``VERB_SPECS.append(...)`` can't silently extend the registry
+# at runtime. Treat the set of verbs as a compile-time property of the package.
+VERB_SPECS: tuple[VerbSpec, ...] = (
     VerbSpec("eoatx", 21_000, _eoatx_to, _noop_data, _eoatx_diag, value=1),
     VerbSpec("calltx", 40_000, _calltx_to, _calltx_data, _calltx_diag),
     VerbSpec("deploytx", 300_000, _deploy_to, _deploy_data, _deploy_diag),
@@ -198,10 +204,10 @@ VERB_SPECS: list[VerbSpec] = [
     VerbSpec("erc20tx", 60_000, _zero_to, _erc20tx_data, _erc20tx_diag),
     VerbSpec("uniswap_swaps", 250_000, _pool_to, _swap_data, _swap_diag),
     VerbSpec("storagerefundtx", 80_000, _zero_to, _storagerefund_data, _storagerefund_diag),
-    VerbSpec("gasburnertx", 1_500_000, _zero_to, _gasburner_data, _gasburner_diag := lambda *_: {"compute_only": True}),
+    VerbSpec("gasburnertx", 1_500_000, _zero_to, _gasburner_data, _gasburner_diag),
     VerbSpec("blob_combined", 200_000, _zero_to, _blob_data, _blob_diag),
     VerbSpec("evm_fuzz", 300_000, _zero_to, _fuzz_data, _fuzz_diag),
-]
+)
 
 
 def build_adapter(spec: VerbSpec) -> Callable[[int, FacadeContext], list[SignedTransaction]]:
