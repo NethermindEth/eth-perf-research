@@ -25,7 +25,10 @@ class ProbeResult:
 
 
 ProbeExecutor = Callable[[str, int], tuple[StateObservation, StateObservation]]
-"""Signature: (verb, tx_count) -> (pre, post); caller runs the batch and returns the observations."""
+"""Signature: (verb, tx_count) -> (pre, post).
+
+The caller runs the batch and returns the pre/post observations.
+"""
 
 
 def run_probe(

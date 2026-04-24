@@ -60,7 +60,12 @@ packages = ["src/orchestrator"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers --strict-config"
+# Any warning (deprecation, resource, etc.) from our code or our deps fails
+# the test, so dependency bumps that introduce noise get caught in CI.
+filterwarnings = [
+    "error",
+]
 
 [tool.ruff]
 line-length = 100

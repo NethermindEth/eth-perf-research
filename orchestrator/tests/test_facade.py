@@ -67,7 +67,8 @@ def test_deploytx_produces_contract_creation() -> None:
     assert first.rlp[0] == 0x02, "deploytx must be EIP-1559"
     assert first.fields.get("is_deploy") is True
     decoded = rlp.decode(first.rlp[1:])
-    # Field ordering for EIP-1559: [chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList, v, r, s]
+    # EIP-1559 field order:
+    # [chainId, nonce, maxPrio, maxFee, gas, to, value, data, accessList, v, r, s]
     to_field = decoded[5]
     assert to_field == b"", "deploy tx has empty `to`"
 
