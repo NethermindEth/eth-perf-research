@@ -38,7 +38,13 @@
         "end_address": { "type": "string", "pattern": "^0x[0-9a-fA-F]{1,40}$" },
         "status": {
           "type": "string",
-          "enum": ["ok", "aborted", "controller_instability", "sensor_wait_timeout"]
+          "enum": [
+            "ok",
+            "aborted",
+            "controller_instability",
+            "sensor_wait_timeout",
+            "reconciled_unobserved"
+          ]
         },
         "block_hash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
         "block_number": { "type": "integer", "minimum": 0 },

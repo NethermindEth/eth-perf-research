@@ -182,8 +182,56 @@ def test_reconcile_pending_synthesizes_record_when_head_advanced(tmp_path: Path)
     assert len(records) == 2
     assert records[1].batch_id == 1
     assert records[1].replay_core.block_hash == "0x" + "cc" * 32
-    assert records[1].replay_core.status == "aborted"
+    assert records[1].replay_core.status == "reconciled_unobserved"
     assert not (tmp_path / "orchestrator.journal.pending").exists()
+
+
+def test_reconcile_preserves_tail_observability(tmp_path: Path) -> None:
+    """C-OBS: synthesized reconcile record must carry forward tail's F/σ/α."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    rich_obs = Observability(
+        coeffs_before={"eoatx": {"accounts": 100.0, "storage": 0.0, "code": 0.0}},
+        coeffs_after={"eoatx": {"accounts": 155.5, "storage": 1.5, "code": 0.0}},
+        alpha_state={"eoatx": {"accounts": 0.17, "storage": 0.05, "code": 0.02}},
+        sigma_innov={"eoatx": {"accounts": 8.0, "storage": 1.0, "code": 1.0}},
+        alpha_current=0.08,
+        innovation_ratio=0.05,
+        residual_norm=2.0,
+        statecomp_snapshot={"blockNumber": 100},
+    )
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100, observability=rich_obs))
+    write_pending(
+        tmp_path,
+        PendingBatch(
+            session_id=1,
+            resumed_from_batch=None,
+            batch_id=1,
+            verb="eoatx",
+            deadline_bytes=1000,
+            start_address="0x" + (1).to_bytes(20, "big").hex(),
+            end_address="0x" + (2).to_bytes(20, "big").hex(),
+            ts_iso="2026-04-24T00:01:00Z",
+            pre_block_number=100,
+        ),
+    )
+
+    class _Rpc:
+        def eth_get_block_by_number(self, number, full=False):
+            return {"hash": "0x" + "cc" * 32}
+
+        def close(self) -> None: ...
+
+    resolve_startup_mode(tmp_path, composition_hash=comp, head_block=101, rpc=_Rpc())
+    records = list(JournalReader(journal))
+    synthesized = records[1]
+    # F, σ, α all carried forward from the tail — next resume must not cold-start.
+    assert synthesized.observability.coeffs_after == rich_obs.coeffs_after
+    assert synthesized.observability.alpha_state == rich_obs.alpha_state
+    assert synthesized.observability.sigma_innov == rich_obs.sigma_innov
 
 
 def test_signal_handlers_restore_previous(tmp_path: Path) -> None:
@@ -303,7 +351,12 @@ def test_run_with_max_batches_writes_manifest(tmp_path: Path, monkeypatch: pytes
     assert len(lines) == 3
 
 
-def _record(batch_id: int, *, block_number: int = 100) -> Record:
+def _record(
+    batch_id: int,
+    *,
+    block_number: int = 100,
+    observability: Observability | None = None,
+) -> Record:
     return Record(
         session_id=1,
         resumed_from_batch=None,
@@ -318,5 +371,6 @@ def _record(batch_id: int, *, block_number: int = 100) -> Record:
             block_hash="0x" + ("bb" * 32),
             block_number=block_number,
         ),
-        observability=Observability(statecomp_snapshot={"blockNumber": block_number}),
+        observability=observability
+        or Observability(statecomp_snapshot={"blockNumber": block_number}),
     )

@@ -90,5 +90,8 @@ def _validate_mainnet_target(mainnet: dict[str, float]) -> None:
     if missing:
         raise ValueError(f"mainnet_target missing axes: {sorted(missing)}")
     total = sum(float(mainnet[a]) for a in required)
-    if abs(total - 1.0) > 1e-6:
+    # Spec §B.3 fractions (0.141/0.817/0.043) sum to 1.001 due to rounding in the
+    # Paradigm 2024 report; accept any rounding noise up to 1 pp. Larger skews are
+    # genuine misconfiguration and still raise.
+    if abs(total - 1.0) > 0.01:
         raise ValueError(f"mainnet_target axes must sum to 1.0 (got {total:.6f})")

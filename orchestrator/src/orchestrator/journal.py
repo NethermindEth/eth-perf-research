@@ -46,7 +46,7 @@ class ReplayCore:
     deadline_bytes: int
     start_address: str  # hex string "0x…"
     end_address: str
-    status: str  # ok | aborted | controller_instability | sensor_wait_timeout
+    status: str  # ok | aborted | controller_instability | sensor_wait_timeout | reconciled_unobserved
     block_hash: str
     block_number: int
     chain_hash: str = ""  # set by the writer

@@ -186,6 +186,12 @@ def _reconcile_pending(
             raise ResumeRefused(f"RPC returned no hash for head block {head_block}")
         journal_path = state_dir / JOURNAL_FILENAME
         with JournalWriter(journal_path) as writer:
+            # Carry the tail's F/σ/α forward so the next resume doesn't cold-start
+            # the controller. The unobserved batch didn't change those coefficients
+            # (apply_observation never ran for it), so tail.observability is
+            # authoritative. Status uses the new `reconciled_unobserved` value so
+            # downstream tooling can filter reconciled records without conflating
+            # them with explicit `aborted` shutdowns (spec §8 reserved for that).
             synthesized = Record(
                 session_id=pending.session_id,
                 resumed_from_batch=pending.resumed_from_batch,
@@ -196,12 +202,17 @@ def _reconcile_pending(
                     deadline_bytes=pending.deadline_bytes,
                     start_address=pending.start_address,
                     end_address=pending.end_address,
-                    status="aborted",
+                    status="reconciled_unobserved",
                     block_hash=block_hash,
                     block_number=head_block,
                 ),
                 observability=Observability(
-                    alpha_current=0.0,
+                    observed_flat_bytes=0,
+                    coeffs_before=tail.observability.coeffs_after,
+                    coeffs_after=tail.observability.coeffs_after,
+                    alpha_state=tail.observability.alpha_state,
+                    sigma_innov=tail.observability.sigma_innov,
+                    alpha_current=tail.observability.alpha_current,
                     innovation_ratio=0.0,
                     residual_norm=0.0,
                     statecomp_snapshot=None,
