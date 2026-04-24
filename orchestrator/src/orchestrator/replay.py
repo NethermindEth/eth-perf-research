@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 
 from .facade import FacadeContext, UnknownVerb, dispatch
-from .journal import ChainHashMismatch, JournalReader, JournalSchemaError
+from .journal import ChainHashMismatch, JournalReader, JournalSchemaError, Record
 from .manifest import Manifest
 from .rpc import RpcClient
 
@@ -74,25 +74,9 @@ def replay(
             return EXIT_MANIFEST
 
         for record in reader:
-            rc = record.replay_core
-            ctx.address_cursor = int(rc.start_address, 16)
-            try:
-                txs = dispatch(rc.verb, rc.deadline_bytes, ctx)
-            except (UnknownVerb, KeyError):
-                return EXIT_FACADE
-
-            end_after = int(rc.end_address, 16)
-            if ctx.address_cursor != end_after:
-                return EXIT_FACADE
-
-            # H4: verify block_hash regardless of status. A tampered journal with
-            # status="sensor_wait_timeout" must not bypass block identity.
-            try:
-                block_hash = rpc.testing_commit_block_v1([tx.rlp for tx in txs])
-            except (httpx.HTTPError, ConnectionError, TimeoutError, RuntimeError):
-                return EXIT_FACADE
-            if block_hash != rc.block_hash:
-                return EXIT_BLOCK_HASH
+            exit_code = _replay_one_record(record, ctx, rpc)
+            if exit_code != EXIT_OK:
+                return exit_code
 
         if manifest.final_state_root is not None:
             latest = rpc.eth_get_block_by_number("latest")
@@ -102,6 +86,32 @@ def replay(
         if own_rpc:
             rpc.close()
 
+    return EXIT_OK
+
+
+def _replay_one_record(record: Record, ctx: FacadeContext, rpc: RpcClient) -> int:
+    """Replay a single journal record against the live RPC.
+
+    Returns ``EXIT_OK`` on success, or one of the specific exit codes on the first
+    mismatch. H4: ``block_hash`` is verified regardless of ``status`` so a tampered
+    journal with ``status="sensor_wait_timeout"`` cannot bypass block identity.
+    """
+    rc = record.replay_core
+    ctx.address_cursor = int(rc.start_address, 16)
+    try:
+        txs = dispatch(rc.verb, rc.deadline_bytes, ctx)
+    except (UnknownVerb, KeyError):
+        return EXIT_FACADE
+
+    if ctx.address_cursor != int(rc.end_address, 16):
+        return EXIT_FACADE
+
+    try:
+        block_hash = rpc.testing_commit_block_v1([tx.rlp for tx in txs])
+    except (httpx.HTTPError, ConnectionError, TimeoutError, RuntimeError):
+        return EXIT_FACADE
+    if block_hash != rc.block_hash:
+        return EXIT_BLOCK_HASH
     return EXIT_OK
 
 

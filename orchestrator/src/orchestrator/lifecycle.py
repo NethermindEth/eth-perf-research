@@ -165,64 +165,12 @@ def resolve_startup_mode(
     """
     journal = state_dir / JOURNAL_FILENAME
     pending = read_pending(state_dir)
-    journal_empty = not journal.exists() or journal.stat().st_size == 0
 
-    if journal_empty:
-        # An empty / missing journal while the chain already advanced = operator
-        # intervention territory (review C-EMPTY-JOURNAL). Fresh-start would commit
-        # block N+1 against a stale parent.
-        if head_block and head_block > 0:
-            raise ResumeRefused(
-                f"journal empty but Nethermind head is {head_block}; archive "
-                f"state/ and restart fresh, or restore a backup"
-            )
-        if pending is not None:
-            raise ResumeRefused(
-                "journal empty but pending sidecar present — state ambiguous; "
-                f"archive {state_dir / PENDING_FILENAME} before restart"
-            )
-        return StartupDecision(StartupMode.FRESH, None, "no journal at state dir")
+    if not journal.exists() or journal.stat().st_size == 0:
+        return _handle_empty_journal(state_dir, head_block, pending)
 
-    manifest_path = state_dir / MANIFEST_FILENAME
-    prior: Manifest | None = None
-    if manifest_path.exists():
-        prior = Manifest.read(manifest_path)
-        if prior.composition_hash != composition_hash:
-            raise ResumeRefused(
-                f"composition_hash mismatch: manifest={prior.composition_hash[:8]}… "
-                f"current={composition_hash[:8]}…"
-            )
-        # composition_hash covers target+env per design §7. Tx-signing identity
-        # lives in replay_context; check it separately so a changed signer / chain
-        # between runs refuses resume even when target.yaml is unchanged.
-        if replay_context is not None and not replay_context_matches(
-            prior.replay_context, replay_context
-        ):
-            raise ResumeRefused(
-                "manifest.replay_context (base_address / revision / chain_id / "
-                "gas_limit / signer) does not match the current FacadeContext; "
-                "archive state/ and restart fresh"
-            )
-
-    reader = JournalReader(journal)
-    try:
-        # H7: if a prior manifest checkpoint exists, verify only the suffix past it.
-        if (
-            prior is not None
-            and prior.last_chain_hash_checkpoint
-            and prior.last_checkpoint_batch_id >= 0
-        ):
-            reader.verify_chain_from(
-                prev_hash=prior.last_chain_hash_checkpoint,
-                min_batch_id=prior.last_checkpoint_batch_id + 1,
-            )
-        else:
-            reader.verify_chain()
-        tail = reader.tail()
-    except JournalSchemaError as exc:
-        # Schema violation on resume is a specific ResumeRefused case, not an
-        # unhandled crash. Caller can instruct the operator to archive+restart.
-        raise ResumeRefused(f"journal schema violation on resume: {exc}") from exc
+    prior = _load_and_verify_prior_manifest(state_dir, composition_hash, replay_context)
+    tail = _read_verified_tail(journal, prior)
     if tail is None:
         return StartupDecision(StartupMode.FRESH, None, "journal empty after verify")
 
@@ -269,6 +217,82 @@ def resolve_startup_mode(
         )
 
     return StartupDecision(StartupMode.RESUME, tail, "valid journal + head aligned")
+
+
+def _handle_empty_journal(
+    state_dir: Path, head_block: int | None, pending: PendingBatch | None
+) -> StartupDecision:
+    """Resolve the empty-or-missing-journal case.
+
+    An empty journal while the chain already advanced = operator intervention
+    territory (review C-EMPTY-JOURNAL); fresh-start would commit block N+1 against
+    a stale parent. An empty journal with a pending sidecar is similarly ambiguous.
+    """
+    if head_block and head_block > 0:
+        raise ResumeRefused(
+            f"journal empty but Nethermind head is {head_block}; archive "
+            f"state/ and restart fresh, or restore a backup"
+        )
+    if pending is not None:
+        raise ResumeRefused(
+            "journal empty but pending sidecar present — state ambiguous; "
+            f"archive {state_dir / PENDING_FILENAME} before restart"
+        )
+    return StartupDecision(StartupMode.FRESH, None, "no journal at state dir")
+
+
+def _load_and_verify_prior_manifest(
+    state_dir: Path, composition_hash: str, replay_context: ReplayContext | None
+) -> Manifest | None:
+    """Read the prior manifest (if any) and cross-check it against current config.
+
+    ``composition_hash`` covers target+env per design §7. Tx-signing identity lives
+    in ``replay_context``; check it separately so a changed signer / chain between
+    runs refuses resume even when target.yaml is unchanged.
+    """
+    manifest_path = state_dir / MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return None
+    prior = Manifest.read(manifest_path)
+    if prior.composition_hash != composition_hash:
+        raise ResumeRefused(
+            f"composition_hash mismatch: manifest={prior.composition_hash[:8]}… "
+            f"current={composition_hash[:8]}…"
+        )
+    if replay_context is not None and not replay_context_matches(
+        prior.replay_context, replay_context
+    ):
+        raise ResumeRefused(
+            "manifest.replay_context (base_address / revision / chain_id / "
+            "gas_limit / signer) does not match the current FacadeContext; "
+            "archive state/ and restart fresh"
+        )
+    return prior
+
+
+def _read_verified_tail(journal: Path, prior: Manifest | None) -> Record | None:
+    """Verify the journal chain hash and return the tail record (or None if empty).
+
+    H7: if a prior manifest checkpoint exists, verify only the suffix past it;
+    otherwise verify the whole chain. Schema violation on resume is translated to
+    ``ResumeRefused`` so the caller can instruct the operator to archive+restart.
+    """
+    reader = JournalReader(journal)
+    try:
+        if (
+            prior is not None
+            and prior.last_chain_hash_checkpoint
+            and prior.last_checkpoint_batch_id >= 0
+        ):
+            reader.verify_chain_from(
+                prev_hash=prior.last_chain_hash_checkpoint,
+                min_batch_id=prior.last_checkpoint_batch_id + 1,
+            )
+        else:
+            reader.verify_chain()
+        return reader.tail()
+    except JournalSchemaError as exc:
+        raise ResumeRefused(f"journal schema violation on resume: {exc}") from exc
 
 
 def _reconcile_pending(
