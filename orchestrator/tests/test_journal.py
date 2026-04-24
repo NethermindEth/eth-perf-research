@@ -277,6 +277,31 @@ def test_verify_chain_from_checkpoint(tmp_path: Path) -> None:
     reader.verify_chain_from(checkpoint.replay_core.chain_hash, min_batch_id=3)
 
 
+def test_trailing_partial_line_raises_schema_error(tmp_path: Path) -> None:
+    """W1: a mid-write crash leaves an unterminated last line — refuse, don't stale-hash."""
+    from orchestrator.journal import _read_last_chain_hash
+
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_make_record(0))
+    # Simulate a partial next-record append (no newline, invalid JSON tail).
+    with open(journal, "ab") as f:
+        f.write(b'{"partial":')
+    with pytest.raises(JournalSchemaError, match="trailing partial record"):
+        _read_last_chain_hash(journal)
+
+
+def test_reader_tail_uses_reverse_seek(tmp_path: Path) -> None:
+    """H7: tail() must not re-iterate the entire file."""
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        for i in range(25):
+            w.append(_make_record(i))
+    tail = JournalReader(journal).tail()
+    assert tail is not None
+    assert tail.batch_id == 24
+
+
 def test_verify_chain_from_detects_tamper_in_suffix(tmp_path: Path) -> None:
     journal = tmp_path / "j.jsonl"
     with JournalWriter(journal) as w:

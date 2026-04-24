@@ -140,6 +140,7 @@ def test_reconcile_pending_clears_when_head_matches_tail(tmp_path: Path) -> None
             end_address="0x" + (2).to_bytes(20, "big").hex(),
             ts_iso="2026-04-24T00:01:00Z",
             pre_block_number=100,
+            composition_hash=comp,
         ),
     )
     decision = resolve_startup_mode(tmp_path, composition_hash=comp, head_block=100)
@@ -195,6 +196,7 @@ def test_reconcile_refuses_on_tx_set_mismatch(tmp_path: Path) -> None:
             end_address="0x" + (0).to_bytes(20, "big").hex(),
             ts_iso="2026-04-24T00:01:00Z",
             pre_block_number=100,
+            composition_hash=comp,
         ),
     )
 
@@ -213,6 +215,47 @@ def test_reconcile_refuses_on_tx_set_mismatch(tmp_path: Path) -> None:
             head_block=101,
             rpc=_AutoMinedEmpty(),
             facade_ctx=ctx,
+        )
+
+
+def test_pending_composition_hash_mismatch_refused(tmp_path: Path) -> None:
+    """H-PENDING-CH: sidecar from a different composition must not be trusted."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    write_pending(
+        tmp_path,
+        PendingBatch(
+            session_id=1,
+            resumed_from_batch=None,
+            batch_id=1,
+            verb="eoatx",
+            deadline_bytes=1000,
+            start_address="0x" + (1).to_bytes(20, "big").hex(),
+            end_address="0x" + (2).to_bytes(20, "big").hex(),
+            ts_iso="2026-04-24T00:01:00Z",
+            pre_block_number=100,
+            composition_hash="d" * 64,  # DIFFERENT composition
+        ),
+    )
+    with pytest.raises(ResumeRefused, match="composition_hash"):
+        resolve_startup_mode(tmp_path, composition_hash=comp, head_block=100)
+
+
+def test_resume_refuses_on_journal_schema_violation(tmp_path: Path) -> None:
+    """H-SCHEMA: journal schema errors on resume must map to ResumeRefused."""
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    # Truncate the last line mid-JSON to simulate a partial-write scenario.
+    raw = journal.read_bytes()
+    journal.write_bytes(raw[:-10])  # drop newline + trailing bytes
+    with pytest.raises(ResumeRefused, match="schema violation"):
+        resolve_startup_mode(
+            tmp_path, composition_hash="c" * 64, head_block=100
         )
 
 
@@ -244,6 +287,7 @@ def test_reconcile_pending_synthesizes_record_when_head_advanced(tmp_path: Path)
             end_address="0x" + (2).to_bytes(20, "big").hex(),
             ts_iso="2026-04-24T00:01:00Z",
             pre_block_number=100,
+            composition_hash=comp,
         ),
     )
 
@@ -295,6 +339,7 @@ def test_reconcile_preserves_tail_observability(tmp_path: Path) -> None:
             end_address="0x" + (2).to_bytes(20, "big").hex(),
             ts_iso="2026-04-24T00:01:00Z",
             pre_block_number=100,
+            composition_hash=comp,
         ),
     )
 

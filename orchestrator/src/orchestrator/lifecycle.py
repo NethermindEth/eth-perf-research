@@ -37,6 +37,7 @@ from .facade import FacadeContext, dispatch
 from .journal import (
     PENDING_FILENAME,
     JournalReader,
+    JournalSchemaError,
     JournalWriter,
     Observability,
     PendingBatch,
@@ -167,15 +168,24 @@ def resolve_startup_mode(
             )
 
     reader = JournalReader(journal)
-    # H7: if a prior manifest checkpoint exists, verify only the suffix past it.
-    if prior is not None and prior.last_chain_hash_checkpoint and prior.last_checkpoint_batch_id >= 0:
-        reader.verify_chain_from(
-            prev_hash=prior.last_chain_hash_checkpoint,
-            min_batch_id=prior.last_checkpoint_batch_id + 1,
-        )
-    else:
-        reader.verify_chain()
-    tail = reader.tail()
+    try:
+        # H7: if a prior manifest checkpoint exists, verify only the suffix past it.
+        if (
+            prior is not None
+            and prior.last_chain_hash_checkpoint
+            and prior.last_checkpoint_batch_id >= 0
+        ):
+            reader.verify_chain_from(
+                prev_hash=prior.last_chain_hash_checkpoint,
+                min_batch_id=prior.last_checkpoint_batch_id + 1,
+            )
+        else:
+            reader.verify_chain()
+        tail = reader.tail()
+    except JournalSchemaError as exc:
+        # Schema violation on resume is a specific ResumeRefused case, not an
+        # unhandled crash. Caller can instruct the operator to archive+restart.
+        raise ResumeRefused(f"journal schema violation on resume: {exc}") from exc
     if tail is None:
         return StartupDecision(StartupMode.FRESH, None, "journal empty after verify")
 
@@ -186,6 +196,16 @@ def resolve_startup_mode(
         )
 
     if pending is not None:
+        # Pending sidecar must belong to the SAME run, not a stale one left by a
+        # prior composition. Empty composition_hash in the pending = legacy file
+        # from before this check existed; reject it too rather than silently
+        # accepting (operator should archive).
+        if pending.composition_hash != composition_hash:
+            raise ResumeRefused(
+                f"pending sidecar composition_hash "
+                f"{pending.composition_hash[:8] or '(empty)'}… does not match current "
+                f"{composition_hash[:8]}…; archive {state_dir / PENDING_FILENAME}"
+            )
         tail = _reconcile_pending(
             state_dir=state_dir,
             tail=tail,
@@ -499,6 +519,7 @@ def _run_locked(
                     journal_writer=jw,
                     payload_writer=pw,
                     state_dir=state_dir,
+                    composition_hash=composition_hash,
                     session_id=session_id,
                     resumed_from_batch=resumed_from_batch,
                     batch_id=batch_id,
@@ -552,6 +573,7 @@ def _run_one_batch(
     journal_writer: JournalWriter,
     payload_writer: PayloadStreamWriter,
     state_dir: Path,
+    composition_hash: str,
     session_id: int,
     resumed_from_batch: int | None,
     batch_id: int,
@@ -577,6 +599,7 @@ def _run_one_batch(
             batch_id=batch_id,
             verb=plan.verb,
             deadline_bytes=plan.deadline_bytes,
+            composition_hash=composition_hash,
             start_address=start_addr,
             end_address=end_addr,
             ts_iso=ts_iso,
@@ -742,11 +765,28 @@ def _load_prior_sessions(manifest_path: Path) -> list[Session]:
 
 
 def _extract_last_session_id(state_dir: Path) -> int:
+    """Return ``max(manifest_sessions, journal_tail.session_id)``.
+
+    If the last session's manifest write failed (disk full, crash after fsync),
+    the manifest is one session behind the journal. Falling back to the manifest
+    alone would recycle a session_id that already appears in the journal, which
+    breaks per-session filtering in downstream analytics.
+    """
     manifest_path = state_dir / MANIFEST_FILENAME
-    if not manifest_path.exists():
-        return 0
-    prior = Manifest.read(manifest_path)
-    return max((s.session_id for s in prior.sessions), default=0)
+    journal_path = state_dir / JOURNAL_FILENAME
+    manifest_sid = 0
+    if manifest_path.exists():
+        prior = Manifest.read(manifest_path)
+        manifest_sid = max((s.session_id for s in prior.sessions), default=0)
+    journal_sid = 0
+    if journal_path.exists() and journal_path.stat().st_size > 0:
+        try:
+            tail = JournalReader(journal_path).tail()
+        except JournalSchemaError:
+            tail = None
+        if tail is not None:
+            journal_sid = tail.session_id
+    return max(manifest_sid, journal_sid)
 
 
 def _now_iso() -> str:

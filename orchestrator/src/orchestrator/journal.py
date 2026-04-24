@@ -139,15 +139,16 @@ class JournalWriter:
         return _read_last_chain_hash(self.path)
 
 
-def _read_last_chain_hash(path: Path) -> str:
-    """Reverse-seek the last ``\\n``-terminated record and extract its chain_hash.
+def _read_last_line_bytes(path: Path) -> bytes | None:
+    """Return the last newline-delimited line of ``path`` in constant time.
 
-    Linear scan from EOF — constant time regardless of journal length. Tolerates a
-    missing trailing newline (still reads the final record). A partially-written
-    last line (incomplete JSON after last ``\\n``) propagates as JSONDecodeError;
-    callers on the resume path are expected to archive+restart in that case.
+    Reverse-seeks in 4 KiB chunks, finds the last internal ``\\n``, returns the
+    bytes after it. Returns None for empty files. Tolerates a missing trailing
+    newline — the final line is returned whether or not it ends in ``\\n``.
     """
     size = path.stat().st_size
+    if size == 0:
+        return None
     chunk_size = 4096
     buffer = bytearray()
     with path.open("rb") as f:
@@ -158,17 +159,30 @@ def _read_last_chain_hash(path: Path) -> str:
             f.seek(pos)
             chunk = f.read(step)
             buffer[:0] = chunk
-            # Find a non-terminal newline (i.e. a boundary between records, not the EOF \n).
             stripped = bytes(buffer).rstrip(b"\n")
             nl = stripped.rfind(b"\n")
             if nl != -1:
-                last_line = stripped[nl + 1 :]
-                return json.loads(last_line.decode("utf-8"))["replay_core"]["chain_hash"]
-    # Single record, no leading newlines.
+                return stripped[nl + 1 :]
     stripped = bytes(buffer).strip()
-    if not stripped:
+    return stripped if stripped else None
+
+
+def _read_last_chain_hash(path: Path) -> str:
+    """Reverse-seek the last record and extract its chain_hash.
+
+    Constant time regardless of journal length. A partially-written last line
+    (incomplete JSON) is treated as corruption and raises ``JournalSchemaError``
+    so the resume path refuses rather than silently returning a stale prior hash.
+    """
+    last = _read_last_line_bytes(path)
+    if last is None:
         return _CHAIN_HASH_GENESIS
-    return json.loads(stripped.decode("utf-8"))["replay_core"]["chain_hash"]
+    try:
+        return json.loads(last.decode("utf-8"))["replay_core"]["chain_hash"]
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError) as exc:
+        raise JournalSchemaError(
+            f"trailing partial record in {path}; archive state/ and restart"
+        ) from exc
 
 
 class JournalReader:
@@ -200,10 +214,25 @@ class JournalReader:
                 yield _dict_to_record(body)
 
     def tail(self) -> Record | None:
-        last: Record | None = None
-        for record in self:
-            last = record
-        return last
+        """Return the last record in the journal, O(1) via reverse-seek.
+
+        Validates the last line against the schema — a partial or tampered last
+        record raises ``JournalSchemaError`` just like ``__iter__`` would. Does
+        NOT re-verify the chain; callers must call ``verify_chain*`` separately.
+        """
+        if not self.path.exists():
+            return None
+        last = _read_last_line_bytes(self.path)
+        if last is None:
+            return None
+        try:
+            body = json.loads(last.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise JournalSchemaError(
+                f"trailing partial record in {self.path}; archive state/ and restart"
+            ) from exc
+        validate_record_dict(body)
+        return _dict_to_record(body)
 
     def verify_chain(self) -> None:
         self.verify_chain_from(_CHAIN_HASH_GENESIS, min_batch_id=0)
@@ -253,6 +282,11 @@ class PendingBatch:
     If the orchestrator crashes between commit and journal append, the resume path
     sees this sidecar and reconciles with Nethermind's head to synthesize the
     missing record — closing the atomicity gap flagged by review C3.
+
+    ``composition_hash`` ties the sidecar to the exact run that wrote it. An
+    operator who changes ``target.yaml`` between ``compose down`` and ``compose
+    up`` would get a mismatched hash and the reconcile refuses rather than
+    replaying under the wrong code path.
     """
 
     session_id: int
@@ -264,6 +298,7 @@ class PendingBatch:
     end_address: str
     ts_iso: str
     pre_block_number: int
+    composition_hash: str = ""
 
 
 def write_pending(state_dir: Path | str, pending: PendingBatch) -> None:
