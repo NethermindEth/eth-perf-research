@@ -6,7 +6,7 @@ import rlp
 
 from orchestrator.facade import VERBS, UnknownVerb, dispatch
 from orchestrator.facade.context import FacadeContext
-from orchestrator.facade.verbs.storagerefundtx import SSTORE_TO_ZERO_MARKER
+from orchestrator.facade.verbs import SSTORE_TO_ZERO_MARKER
 
 
 EXPECTED_VERBS = {

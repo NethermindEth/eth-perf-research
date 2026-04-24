@@ -13,20 +13,20 @@ from __future__ import annotations
 
 from typing import Callable
 
-from eth_account import Account
-from eth_account.typed_transactions import DynamicFeeTransaction
-
 from .context import FacadeContext, SignedTransaction
 
 
 def _sign(tx_fields: dict, context: FacadeContext) -> bytes:
-    """Sign an EIP-1559 tx and return its network RLP bytes."""
-    # eth-account requires chain_id + nonce + gas params; we always emit type-2 txs.
+    """Sign an EIP-1559 tx via the cached LocalAccount on the context.
+
+    Reusing ``context.account`` avoids per-call key derivation; over a multi-day
+    run at ~100 txs/batch this is the dominant CPU cost. Review finding H8.
+    """
     tx_fields.setdefault("chainId", context.chain_id)
     tx_fields.setdefault("maxFeePerGas", 2_000_000_000)
     tx_fields.setdefault("maxPriorityFeePerGas", 1_000_000_000)
     tx_fields.setdefault("accessList", [])
-    signed = Account.sign_transaction(tx_fields, context.deploy_private_key)
+    signed = context.account.sign_transaction(tx_fields)
     return bytes(signed.raw_transaction)
 
 

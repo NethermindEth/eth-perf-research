@@ -5,6 +5,9 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
+from eth_account import Account
+from eth_account.signers.local import LocalAccount
+
 
 # A deterministic, well-known key used by tests and by lab runs. If it's ever seen
 # alongside a production ``chain_id`` we refuse to construct the context — txs
@@ -50,6 +53,17 @@ class FacadeContext:
     gas_limit: int = 30_000_000
     deploy_private_key: bytes = _LAB_PRIVATE_KEY
     address_stride: int = 1 << 40
+    # Cached LocalAccount reused across every signing call — avoids re-derivation
+    # on the hot tx-generation path. Populated lazily on first `account` access.
+    _account: LocalAccount | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def account(self) -> LocalAccount:
+        """Cached LocalAccount for this context's deploy key."""
+        if self._account is None:
+            # Field is assigned via object.__setattr__ to work under frozen=True too.
+            object.__setattr__(self, "_account", Account.from_key(self.deploy_private_key))
+        return self._account  # type: ignore[return-value]
 
     def __post_init__(self) -> None:
         if self.deploy_private_key == _LAB_PRIVATE_KEY and self.chain_id in PROD_CHAIN_IDS:

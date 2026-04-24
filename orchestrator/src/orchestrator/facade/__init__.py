@@ -1,10 +1,10 @@
-"""Facade: 12-verb registry + `dispatch` entry.
+"""Facade: 12-verb data-driven registry + `dispatch` entry.
 
 ```python
 txs = dispatch("eoatx", deadline_bytes=9_500_000, context=ctx)
 ```
 
-The returned list's cumulative RLP byte length is ≤ `deadline_bytes` (except the
+The returned list's cumulative RLP byte length is ≤ ``deadline_bytes`` (except the
 degenerate case where a single tx is already larger than the budget — forward
 progress beats strict budget adherence).
 """
@@ -13,39 +13,13 @@ from __future__ import annotations
 from typing import Callable
 
 from .context import FacadeContext, SignedTransaction
-from .verbs import (
-    blob_combined,
-    calltx,
-    deploytx,
-    eoatx,
-    erc20_bloater,
-    erc20tx,
-    evm_fuzz,
-    factorydeploytx,
-    gasburnertx,
-    storagerefundtx,
-    storagespam,
-    uniswap_swaps,
-)
+from .verbs import VERB_SPECS, build_adapter
 
 
 Adapter = Callable[[int, FacadeContext], list[SignedTransaction]]
 
 
-VERBS: dict[str, Adapter] = {
-    "eoatx": eoatx.adapter,
-    "calltx": calltx.adapter,
-    "deploytx": deploytx.adapter,
-    "factorydeploytx": factorydeploytx.adapter,
-    "storagespam": storagespam.adapter,
-    "erc20_bloater": erc20_bloater.adapter,
-    "erc20tx": erc20tx.adapter,
-    "uniswap_swaps": uniswap_swaps.adapter,
-    "storagerefundtx": storagerefundtx.adapter,
-    "gasburnertx": gasburnertx.adapter,
-    "blob_combined": blob_combined.adapter,
-    "evm_fuzz": evm_fuzz.adapter,
-}
+VERBS: dict[str, Adapter] = {spec.name: build_adapter(spec) for spec in VERB_SPECS}
 
 
 class UnknownVerb(KeyError):
@@ -64,6 +38,7 @@ def dispatch(
 
 __all__ = [
     "VERBS",
+    "VERB_SPECS",
     "dispatch",
     "FacadeContext",
     "SignedTransaction",
