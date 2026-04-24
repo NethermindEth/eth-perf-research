@@ -1,4 +1,12 @@
-"""Typer CLI: `orchestrator [run|--replay PATH]`."""
+"""Typer CLI: `orchestrator [run|--replay PATH]`.
+
+All operator-level inputs (RPC URL, state dir, target YAML, environment fingerprint
+fields) are required. Silent defaults are a footgun: they produce runs whose identity
+(composition_hash, manifest env fields) quietly diverges from what the operator thinks
+they're launching. Fields that are *legitimately* optional — e.g. ``--max-batches``
+(None = run until goal), ``--jwt-path`` (only needed on the engine port),
+``--sensor-rpc-url`` (override of --rpc-url) — stay optional.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +28,40 @@ app = typer.Typer(add_completion=False, help="Bloating feedback-loop orchestrato
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
+    rpc_url: str = typer.Option(..., "--rpc-url", help="Nethermind JSON-RPC endpoint."),
+    state_dir: Path = typer.Option(
+        ...,
+        "--state-dir",
+        help="Directory for journal, manifest, payloads, and pending sidecar.",
+    ),
+    target_yaml: Path | None = typer.Option(
+        None,
+        "--target-yaml",
+        help="Path to target.yaml (required when running; ignored under --replay).",
+    ),
+    genesis_sha256: str = typer.Option(
+        ...,
+        "--genesis-sha256",
+        help="Hex sha256 of genesis.json; pins the chain identity in the manifest.",
+    ),
+    plugin_git_sha: str = typer.Option(
+        ...,
+        "--plugin-git-sha",
+        help="Git SHA of the Nethermind statecomp plugin build.",
+    ),
+    nethermind_commit_sha: str = typer.Option(
+        ...,
+        "--nethermind-commit-sha",
+        help="Git SHA of the Nethermind commit this run targeted.",
+    ),
+    dotnet_runtime_major: int = typer.Option(
+        ...,
+        "--dotnet-runtime-major",
+        help="Major .NET runtime version Nethermind is running under.",
+    ),
     replay: Path | None = typer.Option(
         None, "--replay", help="Replay a journal; no controller, no sensor."
     ),
-    rpc_url: str = typer.Option("http://localhost:8545", "--rpc-url"),
     sensor_rpc_url: str | None = typer.Option(
         None,
         "--sensor-rpc-url",
@@ -35,15 +73,9 @@ def main(
         envvar="JWT_PATH",
         help="Path to the 64-hex JWT for engine-protected RPC ports.",
     ),
-    state_dir: Path = typer.Option(Path("./state"), "--state-dir"),
-    target_yaml: Path = typer.Option(Path("./target.yaml"), "--target-yaml"),
     reference_f_path: Path | None = typer.Option(None, "--reference-f"),
     manifest_path: Path | None = typer.Option(None, "--manifest"),
     max_batches: int | None = typer.Option(None, "--max-batches"),
-    genesis_sha256: str = typer.Option("", "--genesis-sha256"),
-    plugin_git_sha: str = typer.Option("", "--plugin-git-sha"),
-    nethermind_commit_sha: str = typer.Option("", "--nethermind-commit-sha"),
-    dotnet_runtime_major: int = typer.Option(10, "--dotnet-runtime-major"),
 ) -> None:
     if replay is not None:
         # Replay requires a manifest to reconstruct the signer + chain context;
@@ -63,6 +95,9 @@ def main(
         )
         raise typer.Exit(code=exit_code)
 
+    if target_yaml is None:
+        typer.echo("--target-yaml is required when not running --replay", err=True)
+        raise typer.Exit(code=2)
     if not target_yaml.exists():
         typer.echo(f"target.yaml not found at {target_yaml}", err=True)
         raise typer.Exit(code=2)

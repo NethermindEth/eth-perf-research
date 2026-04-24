@@ -45,7 +45,20 @@ def _target() -> TargetConfig:
         target_total_bytes=1_000_000_000,
         base_address=(0x10_00).to_bytes(20, "big"),
         revision=0,
+        qp_scenarios=(
+            "eoatx",
+            "calltx",
+            "deploytx",
+            "factorydeploytx",
+            "storagespam",
+            "erc20_bloater",
+            "erc20tx",
+            "uniswap_swaps",
+            "storagerefundtx",
+        ),
         total_batch_bytes=500_000,
+        projection_eta=0.5,
+        raw={},
         source_sha256="t" * 64,
     )
 

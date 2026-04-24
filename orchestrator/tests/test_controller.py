@@ -32,7 +32,21 @@ def target():
         target_total_bytes=10_000_000_000,
         base_address=b"\x00" * 20,
         revision=0,
+        qp_scenarios=(
+            "eoatx",
+            "calltx",
+            "deploytx",
+            "factorydeploytx",
+            "storagespam",
+            "erc20_bloater",
+            "erc20tx",
+            "uniswap_swaps",
+            "storagerefundtx",
+        ),
         total_batch_bytes=1_000_000,
+        projection_eta=0.5,
+        raw={},
+        source_sha256="t" * 64,
     )
 
 
@@ -70,6 +84,9 @@ def test_closed_loop_convergence_single_axis(reference_f) -> None:
         revision=0,
         qp_scenarios=("storagespam",),
         total_batch_bytes=1_000_000,
+        projection_eta=0.5,
+        raw={},
+        source_sha256="t" * 64,
     )
     state = init_state(reference_f, target.qp_scenarios)
     ctrl = Controller(state)
