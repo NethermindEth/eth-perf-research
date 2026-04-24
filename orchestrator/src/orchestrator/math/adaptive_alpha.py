@@ -19,7 +19,7 @@ SIGMA_EWMA_DECAY = 0.9
 ALPHA_EWMA_DECAY = 0.7
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AlphaUpdate:
     f_new: float
     sigma_new: float

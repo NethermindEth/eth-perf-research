@@ -40,7 +40,7 @@ class ControllerInstability(Exception):
     """Raised when the overshoot trigger fires; run should abort."""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class BatchPlan:
     verb: str
     deadline_bytes: int

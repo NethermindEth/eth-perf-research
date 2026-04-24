@@ -35,7 +35,7 @@ class SensorWaitTimeout(Exception):
         self.last_seen_block = last_seen_block
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StateObservation:
     block_number: int
     account_bytes: int
