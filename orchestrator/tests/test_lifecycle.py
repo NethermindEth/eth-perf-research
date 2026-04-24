@@ -8,10 +8,13 @@ import pytest
 
 from orchestrator.facade import FacadeContext
 from orchestrator.journal import (
+    JournalReader,
     JournalWriter,
     Observability,
+    PendingBatch,
     Record,
     ReplayCore,
+    write_pending,
 )
 from orchestrator.lifecycle import (
     LifecycleDeps,
@@ -113,6 +116,74 @@ def test_refuse_when_head_drifted(tmp_path: Path) -> None:
         w.append(_record(batch_id=0, block_number=100))
     with pytest.raises(ResumeRefused):
         resolve_startup_mode(tmp_path, composition_hash=comp, head_block=105)
+
+
+def test_reconcile_pending_clears_when_head_matches_tail(tmp_path: Path) -> None:
+    """C3: crash between pending and commit — block never made it on-chain."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    write_pending(
+        tmp_path,
+        PendingBatch(
+            session_id=1,
+            resumed_from_batch=None,
+            batch_id=1,
+            verb="eoatx",
+            deadline_bytes=1000,
+            start_address="0x" + (1).to_bytes(20, "big").hex(),
+            end_address="0x" + (2).to_bytes(20, "big").hex(),
+            ts_iso="2026-04-24T00:01:00Z",
+            pre_block_number=100,
+        ),
+    )
+    decision = resolve_startup_mode(tmp_path, composition_hash=comp, head_block=100)
+    assert decision.mode is StartupMode.RESUME
+    assert not (tmp_path / "orchestrator.journal.pending").exists()
+
+
+def test_reconcile_pending_synthesizes_record_when_head_advanced(tmp_path: Path) -> None:
+    """C3: crash between commit and journal append — replay missing record from pending."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    write_pending(
+        tmp_path,
+        PendingBatch(
+            session_id=1,
+            resumed_from_batch=None,
+            batch_id=1,
+            verb="eoatx",
+            deadline_bytes=1000,
+            start_address="0x" + (1).to_bytes(20, "big").hex(),
+            end_address="0x" + (2).to_bytes(20, "big").hex(),
+            ts_iso="2026-04-24T00:01:00Z",
+            pre_block_number=100,
+        ),
+    )
+
+    class _Rpc:
+        def eth_get_block_by_number(self, number, full=False):
+            return {"hash": "0x" + "cc" * 32, "stateRoot": "0x00"}
+
+        def close(self) -> None: ...
+
+    decision = resolve_startup_mode(
+        tmp_path, composition_hash=comp, head_block=101, rpc=_Rpc()
+    )
+    assert decision.mode is StartupMode.RESUME
+    records = list(JournalReader(journal))
+    assert len(records) == 2
+    assert records[1].batch_id == 1
+    assert records[1].replay_core.block_hash == "0x" + "cc" * 32
+    assert records[1].replay_core.status == "aborted"
+    assert not (tmp_path / "orchestrator.journal.pending").exists()
 
 
 def test_refuse_when_head_is_unknown(tmp_path: Path) -> None:

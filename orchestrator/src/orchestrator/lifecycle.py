@@ -34,8 +34,12 @@ from .journal import (
     JournalReader,
     JournalWriter,
     Observability,
+    PendingBatch,
     Record,
     ReplayCore,
+    clear_pending,
+    read_pending,
+    write_pending,
 )
 from .manifest import (
     EnvInfo,
@@ -77,14 +81,25 @@ def resolve_startup_mode(
     state_dir: Path,
     composition_hash: str,
     head_block: int | None,
+    *,
+    rpc: RpcClient | None = None,
 ) -> StartupDecision:
     """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch.
 
     ``head_block`` is required when a journal exists: ``None`` means the RPC check
     failed, and we refuse rather than silently skip the alignment assertion.
+
+    If a pending-batch sidecar is present (crash between commit and journal append),
+    we reconcile with Nethermind head to synthesize the missing record and clear
+    the sidecar. Requires ``rpc`` to be non-None on that path.
     """
     journal = state_dir / JOURNAL_FILENAME
+    pending = read_pending(state_dir)
+
     if not journal.exists() or journal.stat().st_size == 0:
+        if pending is not None:
+            # Fresh start with leftover pending = aborted before first commit. Safe to drop.
+            clear_pending(state_dir)
         return StartupDecision(StartupMode.FRESH, None, "no journal at state dir")
 
     manifest_path = state_dir / MANIFEST_FILENAME
@@ -107,6 +122,15 @@ def resolve_startup_mode(
             "Nethermind head unknown (RPC unreachable or returned null) — "
             "refuse to resume without head alignment check"
         )
+
+    if pending is not None:
+        tail = _reconcile_pending(
+            state_dir=state_dir,
+            tail=tail,
+            pending=pending,
+            head_block=head_block,
+            rpc=rpc,
+        )
     if head_block not in (tail.replay_core.block_number, tail.replay_core.block_number + 1):
         raise ResumeRefused(
             f"Nethermind head {head_block} not in "
@@ -114,6 +138,74 @@ def resolve_startup_mode(
         )
 
     return StartupDecision(StartupMode.RESUME, tail, "valid journal + head aligned")
+
+
+def _reconcile_pending(
+    *,
+    state_dir: Path,
+    tail: Record,
+    pending: PendingBatch,
+    head_block: int,
+    rpc: RpcClient | None,
+) -> Record:
+    """Resolve an orphan pending-batch sidecar.
+
+    Two legal shapes:
+    - ``head == tail.block_number``: the commit never fired. Drop the sidecar.
+    - ``head == tail.block_number + 1``: the commit happened but the journal append
+      did not. Fetch the real block, synthesize a record with ``status="aborted"``
+      (sensor state was lost), append it, then drop the sidecar.
+    Anything else: refuse — the state on disk is ambiguous.
+    """
+    # Pending is always for the batch immediately after the journal tail.
+    if pending.batch_id != tail.batch_id + 1:
+        raise ResumeRefused(
+            f"pending sidecar batch_id={pending.batch_id} inconsistent with "
+            f"journal tail batch_id={tail.batch_id}; archive state/ and restart fresh"
+        )
+
+    if head_block == tail.replay_core.block_number:
+        clear_pending(state_dir)
+        return tail
+
+    if head_block == tail.replay_core.block_number + 1:
+        if rpc is None:
+            raise ResumeRefused("reconcile needs RPC but none supplied")
+        block = rpc.eth_get_block_by_number(head_block, full=False)
+        block_hash = block.get("hash")
+        if not isinstance(block_hash, str):
+            raise ResumeRefused(f"RPC returned no hash for head block {head_block}")
+        journal_path = state_dir / JOURNAL_FILENAME
+        with JournalWriter(journal_path) as writer:
+            synthesized = Record(
+                session_id=pending.session_id,
+                resumed_from_batch=pending.resumed_from_batch,
+                ts_iso=pending.ts_iso,
+                batch_id=pending.batch_id,
+                replay_core=ReplayCore(
+                    verb=pending.verb,
+                    deadline_bytes=pending.deadline_bytes,
+                    start_address=pending.start_address,
+                    end_address=pending.end_address,
+                    status="aborted",
+                    block_hash=block_hash,
+                    block_number=head_block,
+                ),
+                observability=Observability(
+                    alpha_current=0.0,
+                    innovation_ratio=0.0,
+                    residual_norm=0.0,
+                    statecomp_snapshot=None,
+                ),
+            )
+            writer.append(synthesized)
+        clear_pending(state_dir)
+        return synthesized
+
+    raise ResumeRefused(
+        f"pending sidecar + head {head_block} not reconcilable against tail block "
+        f"{tail.replay_core.block_number}"
+    )
 
 
 def _fetch_head_block(rpc: RpcClient) -> int | None:
@@ -176,7 +268,9 @@ def run(
     probe_exec = deps.probe_executor if deps else None
 
     head_block = _fetch_head_block(rpc)
-    decision = resolve_startup_mode(state_dir, composition_hash, head_block)
+    decision = resolve_startup_mode(
+        state_dir, composition_hash, head_block, rpc=rpc
+    )
 
     ctx = build_facade_context(target)
     if decision.mode == StartupMode.RESUME and decision.last_record is not None:
@@ -227,6 +321,7 @@ def run(
                     facade_ctx=ctx,
                     journal_writer=jw,
                     payload_writer=pw,
+                    state_dir=state_dir,
                     session_id=session_id,
                     resumed_from_batch=resumed_from_batch,
                     batch_id=batch_id,
@@ -278,6 +373,7 @@ def _run_one_batch(
     facade_ctx: FacadeContext,
     journal_writer: JournalWriter,
     payload_writer: PayloadStreamWriter,
+    state_dir: Path,
     session_id: int,
     resumed_from_batch: int | None,
     batch_id: int,
@@ -291,6 +387,24 @@ def _run_one_batch(
     # remains uniform and replay can recover them with a single int() call.
     start_addr = "0x" + start_cursor.to_bytes(20, "big").hex()
     end_addr = "0x" + end_cursor.to_bytes(20, "big").hex()
+
+    # C3: write a pending-batch sidecar BEFORE the commit. If we crash between
+    # commit and journal append, resume uses this to synthesize the missing record.
+    ts_iso = _now_iso()
+    write_pending(
+        state_dir,
+        PendingBatch(
+            session_id=session_id,
+            resumed_from_batch=resumed_from_batch,
+            batch_id=batch_id,
+            verb=plan.verb,
+            deadline_bytes=plan.deadline_bytes,
+            start_address=start_addr,
+            end_address=end_addr,
+            ts_iso=ts_iso,
+            pre_block_number=pre_observation.block_number,
+        ),
+    )
 
     block_hash = rpc.testing_commit_block_v1([tx.rlp for tx in txs])
     block = rpc.eth_get_block_by_hash(block_hash, full=True)
@@ -323,7 +437,7 @@ def _run_one_batch(
         schema=1,
         session_id=session_id,
         resumed_from_batch=resumed_from_batch,
-        ts_iso=_now_iso(),
+        ts_iso=ts_iso,
         batch_id=batch_id,
         replay_core=ReplayCore(
             verb=plan.verb,
@@ -346,6 +460,8 @@ def _run_one_batch(
         ),
     )
     journal_writer.append(record)
+    # Pending sidecar is only meaningful while journal append is incomplete.
+    clear_pending(state_dir)
     return status, post
 
 

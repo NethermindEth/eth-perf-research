@@ -206,6 +206,62 @@ def _dict_to_record(d: dict[str, Any]) -> Record:
     )
 
 
+PENDING_FILENAME = "orchestrator.journal.pending"
+
+
+@dataclass
+class PendingBatch:
+    """Intent record written BEFORE `testing_commit_block_v1`.
+
+    If the orchestrator crashes between commit and journal append, the resume path
+    sees this sidecar and reconciles with Nethermind's head to synthesize the
+    missing record — closing the atomicity gap flagged by review C3.
+    """
+
+    session_id: int
+    resumed_from_batch: int | None
+    batch_id: int
+    verb: str
+    deadline_bytes: int
+    start_address: str
+    end_address: str
+    ts_iso: str
+    pre_block_number: int
+
+
+def write_pending(state_dir: Path | str, pending: PendingBatch) -> None:
+    """Atomically write the pending-batch sidecar with fsync."""
+    path = Path(state_dir) / PENDING_FILENAME
+    tmp = path.with_suffix(".tmp")
+    data = (json.dumps(asdict(pending), separators=(",", ":")) + "\n").encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    dir_fd = os.open(str(Path(state_dir)), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def read_pending(state_dir: Path | str) -> PendingBatch | None:
+    path = Path(state_dir) / PENDING_FILENAME
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    body = json.loads(path.read_text(encoding="utf-8"))
+    return PendingBatch(**body)
+
+
+def clear_pending(state_dir: Path | str) -> None:
+    path = Path(state_dir) / PENDING_FILENAME
+    if path.exists():
+        path.unlink()
+
+
 @functools.cache
 def load_schema() -> dict[str, Any]:
     """Return the JSON Schema for a journal record (cached read)."""

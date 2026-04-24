@@ -90,6 +90,30 @@ def test_replay_happy_path(tmp_path: Path) -> None:
     assert rc == EXIT_OK
 
 
+def test_replay_still_verifies_block_hash_when_status_is_sensor_wait_timeout(
+    tmp_path: Path,
+) -> None:
+    """H4: a tampered journal with status=sensor_wait_timeout must not bypass block-hash check."""
+    import hashlib
+
+    journal, _ = _seed_journal(tmp_path, n=2)
+    lines = journal.read_text().splitlines()
+    body = json.loads(lines[1])
+    body["replay_core"]["status"] = "sensor_wait_timeout"
+    body["replay_core"]["block_hash"] = "0x" + "aa" * 32  # forged
+    # Recompute chain hash so we don't short-circuit on EXIT_CHAIN_HASH.
+    prev = json.loads(lines[0])["replay_core"]["chain_hash"]
+    rc = dict(body["replay_core"])
+    rc.pop("chain_hash")
+    rc_bytes = json.dumps(rc, sort_keys=True, separators=(",", ":")).encode()
+    body["replay_core"]["chain_hash"] = hashlib.sha256(prev.encode() + rc_bytes).hexdigest()
+    lines[1] = json.dumps(body, separators=(",", ":"))
+    journal.write_text("\n".join(lines) + "\n")
+
+    rc_exit = replay(journal, "http://stub", rpc=_StubRpc())
+    assert rc_exit == EXIT_BLOCK_HASH
+
+
 def test_replay_chain_hash_mismatch_exits_1(tmp_path: Path) -> None:
     journal, _ = _seed_journal(tmp_path)
     lines = journal.read_text().splitlines()
