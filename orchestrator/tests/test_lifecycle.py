@@ -186,6 +186,32 @@ def test_reconcile_pending_synthesizes_record_when_head_advanced(tmp_path: Path)
     assert not (tmp_path / "orchestrator.journal.pending").exists()
 
 
+def test_signal_handlers_restore_previous(tmp_path: Path) -> None:
+    """H6: entering/exiting the signal-handler context must not leak onto the process."""
+    import signal
+
+    from orchestrator.lifecycle import _signal_handlers
+
+    sentinel_called = {"count": 0}
+
+    def sentinel(*_: object) -> None:
+        sentinel_called["count"] += 1
+
+    prior_sigint = signal.signal(signal.SIGINT, sentinel)
+    prior_sigterm = signal.signal(signal.SIGTERM, sentinel)
+    try:
+        with _signal_handlers() as stop:
+            # Inside the context, our flag is what handles signals.
+            assert not stop.requested
+            assert signal.getsignal(signal.SIGINT) is not sentinel
+        # After the context exits, the previous handlers must be back in place.
+        assert signal.getsignal(signal.SIGINT) is sentinel
+        assert signal.getsignal(signal.SIGTERM) is sentinel
+    finally:
+        signal.signal(signal.SIGINT, prior_sigint)
+        signal.signal(signal.SIGTERM, prior_sigterm)
+
+
 def test_refuse_when_head_is_unknown(tmp_path: Path) -> None:
     """H2: RPC unreachable must not silently allow resume."""
     target = _target()

@@ -6,15 +6,15 @@ always finishes cleanly to avoid partial journal writes.
 """
 from __future__ import annotations
 
+import contextlib
 import enum
 import logging
 import signal
-import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Iterator
 
 import httpx
 
@@ -326,13 +326,16 @@ def run(
     payload_path = state_dir / PAYLOAD_FILENAME
     manifest_path = state_dir / MANIFEST_FILENAME
 
-    stop = _install_signal_handlers()
     session_started = _now_iso()
     last_observation = sensor.read()
     stop_reason = "max_batches"
 
     try:
-        with JournalWriter(journal_path) as jw, PayloadStreamWriter(payload_path) as pw:
+        with (
+            _signal_handlers() as stop,
+            JournalWriter(journal_path) as jw,
+            PayloadStreamWriter(payload_path) as pw,
+        ):
             completed = 0
             while not stop.requested:
                 if max_batches is not None and completed >= max_batches:
@@ -589,23 +592,39 @@ def _now_iso() -> str:
 
 
 class _StopFlag:
+    """Small mutable flag that signal handlers flip and the loop observes."""
+
     def __init__(self) -> None:
         self.requested = False
 
-    def set(self) -> None:
-        self.requested = True
 
+@contextlib.contextmanager
+def _signal_handlers() -> "Iterator[_StopFlag]":
+    """Install SIGINT/SIGTERM handlers that set the flag; restore prior handlers on exit.
 
-def _install_signal_handlers() -> _StopFlag:
+    Previous version replaced the process-wide SIGINT handler and never restored it,
+    which made pytest's own Ctrl-C trap permanently vanish for any test that invoked
+    ``run()`` on the main thread (review H6).
+    """
     flag = _StopFlag()
 
     def _handle(*_: Any) -> None:
-        flag.set()
+        flag.requested = True
 
+    prior: dict[int, Any] = {}
+    signals = (signal.SIGINT, signal.SIGTERM)
     try:
-        signal.signal(signal.SIGINT, _handle)
-        signal.signal(signal.SIGTERM, _handle)
-    except ValueError:
-        # Not in main thread (e.g. inside pytest) — callers handle stop differently.
-        pass
-    return flag
+        for sig in signals:
+            try:
+                prior[sig] = signal.signal(sig, _handle)
+            except ValueError:
+                # Not in the main thread (pytest worker, etc.). Skip, but remember
+                # we did not install so the restore loop is a no-op for this sig.
+                prior.pop(sig, None)
+        yield flag
+    finally:
+        for sig, handler in prior.items():
+            try:
+                signal.signal(sig, handler)
+            except ValueError:
+                pass
