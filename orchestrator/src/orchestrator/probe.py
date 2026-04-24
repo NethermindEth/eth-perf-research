@@ -1,8 +1,9 @@
 """Probe sequence — 100-tx batch per scenario to seed controller F."""
+
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Iterable
 
 from .controller import ControllerState
 from .reference_f import AXES, ReferenceF

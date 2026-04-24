@@ -5,6 +5,7 @@ Complexity: O(n log n).
 
 Reference: final-design-v3.md §A.1 and math-explained.md §5.
 """
+
 from __future__ import annotations
 
 import numpy as np

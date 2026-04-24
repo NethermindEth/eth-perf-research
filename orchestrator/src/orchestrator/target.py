@@ -3,6 +3,7 @@
 Defines the mainnet-composition target, byte budget, and QP verb set. `composition_hash`
 is assembled later in `manifest.py` — this loader just produces a `TargetConfig`.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -12,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 _BASE_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{1,40}$")
 

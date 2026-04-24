@@ -8,6 +8,7 @@ Exit codes (design §C.2):
     4 — facade dispatch error (unknown verb, cursor drift, invalid manifest, …)
     5 — missing / invalid manifest (required for context reconstruction)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,21 +20,12 @@ from .journal import ChainHashMismatch, JournalReader, JournalSchemaError
 from .manifest import Manifest
 from .rpc import RpcClient
 
-
 EXIT_OK = 0
 EXIT_CHAIN_HASH = 1
 EXIT_BLOCK_HASH = 2
 EXIT_STATE_ROOT = 3
 EXIT_FACADE = 4
 EXIT_MANIFEST = 5
-
-
-class _BlockHashMismatch(Exception):
-    pass
-
-
-class _CursorDrift(Exception):
-    pass
 
 
 def replay(

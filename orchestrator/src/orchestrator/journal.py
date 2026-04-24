@@ -7,19 +7,20 @@ differ between identical replay-valid runs (timestamps, innovation coefficients,
 
 `os.fsync` is called on every append: lost-record recovery relies on fsync durability.
 """
+
 from __future__ import annotations
 
-import dataclasses
+import contextlib
 import functools
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import jsonschema
-
 
 SCHEMA_VERSION = 1
 _CHAIN_HASH_GENESIS = "0" * 64
@@ -46,7 +47,9 @@ class ReplayCore:
     deadline_bytes: int
     start_address: str  # hex string "0x…"
     end_address: str
-    status: str  # ok | aborted | controller_instability | sensor_wait_timeout | reconciled_unobserved
+    status: (
+        str  # ok | aborted | controller_instability | sensor_wait_timeout | reconciled_unobserved
+    )
     block_hash: str
     block_number: int
     chain_hash: str = ""  # set by the writer
@@ -164,9 +167,7 @@ class JournalWriter:
     def append(self, record: Record) -> str:
         """Compute chain hash, write the record, fsync. Returns the new chain hash."""
         rc_bytes = serialize_replay_core(record.replay_core)
-        new_hash = hashlib.sha256(
-            self._prev_chain_hash.encode("ascii") + rc_bytes
-        ).hexdigest()
+        new_hash = hashlib.sha256(self._prev_chain_hash.encode("ascii") + rc_bytes).hexdigest()
         # Mutate the record in-place so downstream code (manifest writer) sees the hash.
         record.replay_core.chain_hash = new_hash
         line = json.dumps(_record_to_dict(record), separators=(",", ":")) + "\n"
@@ -252,9 +253,7 @@ class JournalReader:
                 try:
                     body = json.loads(raw)
                 except json.JSONDecodeError as exc:
-                    raise JournalSchemaError(
-                        f"line {line_no}: malformed JSON ({exc.msg})"
-                    ) from exc
+                    raise JournalSchemaError(f"line {line_no}: malformed JSON ({exc.msg})") from exc
                 # Materialize only the first error — ``sorted(iter_errors(...))``
                 # walks the full schema twice per record. On a 50k-record journal
                 # this is 2-3× the overall validation cost.
@@ -364,24 +363,19 @@ def write_pending(state_dir: Path | str, pending: PendingBatch) -> None:
     """
     path = Path(state_dir) / PENDING_FILENAME
     tmp = path.with_suffix(".tmp")
-    try:
+    with contextlib.suppress(FileNotFoundError):
         tmp.unlink()
-    except FileNotFoundError:
-        pass
     data = (json.dumps(asdict(pending), separators=(",", ":")) + "\n").encode("utf-8")
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(tmp, flags, 0o600)
     try:
         os.write(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
-    os.replace(tmp, path)
+    # `os.replace` keeps the atomic-rename semantics we want; `Path.replace` wraps
+    # it and loses nothing but the linter would flag it (PTH105).
+    os.replace(tmp, path)  # noqa: PTH105
     dir_fd = os.open(str(Path(state_dir)), os.O_RDONLY)
     try:
         os.fsync(dir_fd)

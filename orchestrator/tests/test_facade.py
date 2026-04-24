@@ -1,4 +1,5 @@
 """Facade registry + per-verb tests."""
+
 from __future__ import annotations
 
 import pytest
@@ -7,7 +8,6 @@ import rlp
 from orchestrator.facade import VERBS, UnknownVerb, dispatch
 from orchestrator.facade.context import FacadeContext
 from orchestrator.facade.verbs import SSTORE_TO_ZERO_MARKER
-
 
 EXPECTED_VERBS = {
     "eoatx",

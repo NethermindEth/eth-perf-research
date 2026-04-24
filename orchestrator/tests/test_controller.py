@@ -1,16 +1,13 @@
 """Controller closed-loop tests."""
-from __future__ import annotations
 
-import math
-from pathlib import Path
+from __future__ import annotations
 
 import pytest
 
 from orchestrator.controller import (
+    OVERSHOOT_GRACE_BATCHES,
     Controller,
     ControllerInstability,
-    OVERSHOOT_GRACE_BATCHES,
-    BatchPlan,
     init_state,
 )
 from orchestrator.probe import (
@@ -55,6 +52,7 @@ def test_pick_next_batch_returns_valid_plan(reference_f, target) -> None:
 
 def test_pick_next_batch_fast(reference_f, target) -> None:
     import time
+
     state = init_state(reference_f, target.qp_scenarios)
     ctrl = Controller(state)
     started = time.perf_counter()
@@ -254,4 +252,5 @@ def test_per_verb_alpha_updates_independently(reference_f, target) -> None:
     assert untouched_verbs
     untouched = untouched_verbs[0]
     from orchestrator.math.adaptive_alpha import A_MIN
+
     assert state.alpha[untouched]["accounts"] == pytest.approx(A_MIN)

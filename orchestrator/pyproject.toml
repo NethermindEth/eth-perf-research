@@ -27,7 +27,25 @@ dev = [
     "pytest>=8.0",
     "pytest-httpx>=0.30",
     "ruff>=0.5",
+    "mypy>=1.11",
+    "bandit>=1.7",
+    "types-PyYAML>=6.0",
+    "types-jsonschema>=4.21",
 ]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+# Baseline: only complain about real defects. Tighten to --strict in CI later.
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[tool.bandit]
+# B101 assert_used: pytest test asserts are expected; `# noqa` for any intentional
+# runtime assert in non-test code.
+# B404/B603/B607 subprocess: the orchestrator doesn't run subprocesses.
+exclude_dirs = ["tests", ".venv", ".pytest_cache"]
+skips = ["B101"]
 
 [project.scripts]
 orchestrator = "orchestrator.cli:app"
@@ -47,3 +65,38 @@ addopts = "-ra --strict-markers"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear (real bugs)
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade (modernize syntax)
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+    "PTH", # pathlib over os.path
+    "RET", # flake8-return
+    "ARG", # unused arguments
+]
+ignore = [
+    "E501",    # line-too-long — the formatter handles real code; long URLs in
+               # docstrings would false-positive.
+    "RUF001",  # ambiguous unicode in strings (§, ×, …) — intentional in spec
+               # cross-refs and operator-facing error messages.
+    "RUF002",  # ambiguous unicode in docstrings — same as above.
+    "RUF003",  # ambiguous unicode in comments — same as above.
+    "B008",    # `typer.Option(...)` in defaults is the canonical Typer pattern.
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "ARG001",  # unused fixture args are idiomatic pytest
+    "ARG002",
+    "B011",    # assert False in test helpers
+]
+"src/orchestrator/cli.py" = [
+    "ARG001",  # Typer callback receives ctx even when unused
+]

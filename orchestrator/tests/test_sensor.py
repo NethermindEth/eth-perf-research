@@ -1,4 +1,5 @@
 """Sensor client tests with a fake httpx transport."""
+
 from __future__ import annotations
 
 import time
@@ -25,7 +26,9 @@ def _report(block_number: int, *, account: int = 10, storage: int = 20, code: in
 class _FakeTransport(httpx.BaseTransport):
     """Serves `statecomp_get` from a scripted queue of block numbers."""
 
-    def __init__(self, block_numbers: list[int], *, account: int = 10, storage: int = 20, code: int = 30):
+    def __init__(
+        self, block_numbers: list[int], *, account: int = 10, storage: int = 20, code: int = 30
+    ):
         self.block_numbers = list(block_numbers)
         self.calls = 0
         self._account = account
@@ -67,9 +70,8 @@ def test_polls_until_block_catches_up() -> None:
 def test_timeout_raises() -> None:
     transport = _FakeTransport([99] * 10)
     started = time.monotonic()
-    with _sensor(transport) as sensor:
-        with pytest.raises(SensorWaitTimeout) as excinfo:
-            sensor.read(expected_block=100, timeout_s=0.3)
+    with _sensor(transport) as sensor, pytest.raises(SensorWaitTimeout) as excinfo:
+        sensor.read(expected_block=100, timeout_s=0.3)
     elapsed = time.monotonic() - started
     assert excinfo.value.expected_block == 100
     assert excinfo.value.last_seen_block == 99

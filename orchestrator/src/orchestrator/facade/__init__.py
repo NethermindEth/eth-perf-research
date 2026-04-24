@@ -8,13 +8,13 @@ The returned list's cumulative RLP byte length is ≤ ``deadline_bytes`` (except
 degenerate case where a single tx is already larger than the budget — forward
 progress beats strict budget adherence).
 """
+
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from .context import FacadeContext, SignedTransaction
 from .verbs import VERB_SPECS, build_adapter
-
 
 Adapter = Callable[[int, FacadeContext], list[SignedTransaction]]
 
@@ -26,9 +26,7 @@ class UnknownVerb(KeyError):
     """Raised by `dispatch` when the verb is not registered."""
 
 
-def dispatch(
-    verb: str, deadline_bytes: int, context: FacadeContext
-) -> list[SignedTransaction]:
+def dispatch(verb: str, deadline_bytes: int, context: FacadeContext) -> list[SignedTransaction]:
     try:
         adapter = VERBS[verb]
     except KeyError as exc:
@@ -39,8 +37,8 @@ def dispatch(
 __all__ = [
     "VERBS",
     "VERB_SPECS",
-    "dispatch",
     "FacadeContext",
     "SignedTransaction",
     "UnknownVerb",
+    "dispatch",
 ]

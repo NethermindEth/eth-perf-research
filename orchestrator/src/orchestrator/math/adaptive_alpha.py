@@ -2,11 +2,11 @@
 
 See final-design-v3.md §2.4 for the exact formula. Per-axis, per-verb.
 """
+
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-
 
 # Design-v3 defaults (§4).
 A_MIN = 0.02
@@ -45,7 +45,12 @@ def update_coeff(
     """Apply the adaptive-α innovation update for a single (axis, verb) coefficient."""
     if sigma_floor <= 0.0:
         raise ValueError("sigma_floor must be > 0 to avoid division by zero in tanh arg")
-    for label, value in (("f_hat", f_hat), ("observed", observed), ("sigma", sigma), ("alpha", alpha)):
+    for label, value in (
+        ("f_hat", f_hat),
+        ("observed", observed),
+        ("sigma", sigma),
+        ("alpha", alpha),
+    ):
         if not math.isfinite(value):
             raise ValueError(f"update_coeff({label}) must be finite, got {value}")
     raw = observed - f_hat

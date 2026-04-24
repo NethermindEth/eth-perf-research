@@ -4,6 +4,7 @@ Entry point is `run(target, state_dir, rpc_url, ...)`. The lifecycle is signal-s
 SIGINT/SIGTERM flip a `stop` flag that is checked between batches; the current batch
 always finishes cleanly to avoid partial journal writes.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -17,21 +18,17 @@ import platform
 import signal
 import threading
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import httpx
 
-
-_log = logging.getLogger(__name__)
-
 from .controller import (
-    BatchPlan,
     Controller,
     ControllerInstability,
-    ControllerState,
     init_state,
     rehydrate_state,
 )
@@ -60,10 +57,12 @@ from .manifest import (
 )
 from .payloads import ExecutionPayloadV3, PayloadStreamWriter
 from .probe import ProbeExecutor, run_probe, seed_state_from_probe
-from .reference_f import ReferenceF, load_reference_f, default_reference_f_path
+from .reference_f import ReferenceF, default_reference_f_path, load_reference_f
 from .rpc import RpcClient
 from .sensor import SensorClient, SensorWaitTimeout, StateObservation
 from .target import TargetConfig
+
+_log = logging.getLogger(__name__)
 
 
 JOURNAL_FILENAME = "orchestrator.journal.jsonl"
@@ -130,10 +129,8 @@ def _state_dir_lock(state_dir: Path) -> Iterator[None]:
         try:
             yield
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
     finally:
         os.close(lock_fd)
 
@@ -376,9 +373,7 @@ def _reconcile_pending(
     )
 
 
-def _verify_reconciled_tx_set(
-    ctx: FacadeContext, pending: PendingBatch, block: dict
-) -> None:
+def _verify_reconciled_tx_set(ctx: FacadeContext, pending: PendingBatch, block: dict) -> None:
     """Refuse reconcile if the head block's tx set differs from what we would dispatch.
 
     Replays the facade deterministically with ``pending.start_address`` as the
@@ -403,7 +398,7 @@ def _verify_reconciled_tx_set(
             f"verb={pending.verb!r} deadline_bytes={pending.deadline_bytes} "
             f"would produce {len(txs)}; refuse to trust the RPC — archive state/"
         )
-    for i, (dispatched, chain_tx) in enumerate(zip(txs, chain_txs)):
+    for i, (dispatched, chain_tx) in enumerate(zip(txs, chain_txs, strict=False)):
         expected = "0x" + keccak(dispatched.rlp).hex()
         chain_hash = chain_tx if isinstance(chain_tx, str) else chain_tx.get("hash")
         if not isinstance(chain_hash, str) or chain_hash.lower() != expected.lower():
@@ -674,15 +669,15 @@ def _run_locked(
         reference_f_version=ref_f.version,
         env=env,
         replay_context=replay_context,
-        sessions=_load_prior_sessions(manifest_path)
-        + [
+        sessions=[
+            *_load_prior_sessions(manifest_path),
             Session(
                 session_id=session_id,
                 started_at=session_started,
                 stopped_at=_now_iso(),
                 last_batch_id=batch_id - 1 if batch_id > 0 else None,
                 stop_reason=stop_reason,
-            )
+            ),
         ],
         journal_path=journal_path,
         rpc=rpc if not own_deps else None,
@@ -748,7 +743,7 @@ def _run_one_batch(
         status = "sensor_wait_timeout"
 
     if status == "ok":
-        obs_diag = controller.apply_observation(
+        obs_diag: dict[str, Any] = controller.apply_observation(
             pre_observation, post, plan, tx_count=max(len(txs), 1)
         )
     else:
@@ -776,7 +771,9 @@ def _run_one_batch(
             end_address=end_addr,
             status=status,
             block_hash=block_hash,
-            block_number=int(block["number"], 16) if isinstance(block.get("number"), str) else int(block.get("number", 0)),
+            block_number=int(block["number"], 16)
+            if isinstance(block.get("number"), str)
+            else int(block.get("number", 0)),
         ),
         observability=Observability(
             observed_flat_bytes=int(obs_diag["observed_flat_bytes"]),
@@ -918,11 +915,11 @@ def _extract_last_session_id(state_dir: Path) -> int:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @contextlib.contextmanager
-def _signal_handlers() -> "Iterator[threading.Event]":
+def _signal_handlers() -> Iterator[threading.Event]:
     """Install SIGINT/SIGTERM handlers that set a ``threading.Event``; restore on exit.
 
     Previous version replaced the process-wide SIGINT handler and never restored
@@ -936,7 +933,7 @@ def _signal_handlers() -> "Iterator[threading.Event]":
     def _handle(*_: Any) -> None:
         flag.set()
 
-    prior: dict[int, Any] = {}
+    prior: dict[signal.Signals, Any] = {}
     signals = (signal.SIGINT, signal.SIGTERM)
     try:
         for sig in signals:
@@ -949,7 +946,5 @@ def _signal_handlers() -> "Iterator[threading.Event]":
         yield flag
     finally:
         for sig, handler in prior.items():
-            try:
+            with contextlib.suppress(ValueError):
                 signal.signal(sig, handler)
-            except ValueError:
-                pass

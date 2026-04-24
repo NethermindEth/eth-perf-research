@@ -9,14 +9,15 @@ When the upstream EELS port (``execution-specs feat/spamoor-to-est``) becomes
 pip-installable each entry's ``make_data`` / ``make_to`` is a drop-in replacement for the
 upstream helper with no change to the registry's shape.
 """
+
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from ._builder import pack_until_deadline
 from .context import FacadeContext, SignedTransaction
-
 
 # Well-known byte constants reused by a couple of verbs.
 _DEPLOY_RUNTIME = bytes.fromhex("60006000f3")
@@ -94,11 +95,7 @@ def _factory_data(ctx: FacadeContext, _idx: int) -> bytes:
 
 
 def _storagespam_data(_ctx: FacadeContext, idx: int) -> bytes:
-    return (
-        _STORAGESPAM_SELECTOR
-        + idx.to_bytes(32, "big")
-        + (16).to_bytes(32, "big")
-    )
+    return _STORAGESPAM_SELECTOR + idx.to_bytes(32, "big") + (16).to_bytes(32, "big")
 
 
 def _erc20_bloater_data(ctx: FacadeContext, idx: int) -> bytes:

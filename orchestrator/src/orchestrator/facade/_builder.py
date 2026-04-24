@@ -9,9 +9,10 @@ Every adapter obeys the deadline-bytes budget by packing until the next tx would
 the cumulative RLP size over the limit — at least one tx is always returned to ensure
 forward progress.
 """
+
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from .context import FacadeContext, SignedTransaction
 

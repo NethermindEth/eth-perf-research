@@ -1,4 +1,5 @@
 """Payload stream round-trip test."""
+
 from __future__ import annotations
 
 import os
@@ -48,9 +49,7 @@ def test_payload_stream_round_trip(tmp_path: Path) -> None:
         assert int.from_bytes(decoded[6], "big") == i
 
 
-def test_payload_stream_fsync_per_append(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_payload_stream_fsync_per_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     real_fsync = os.fsync
     monkeypatch.setattr(os, "fsync", lambda fd: calls.append(fd) or real_fsync(fd))

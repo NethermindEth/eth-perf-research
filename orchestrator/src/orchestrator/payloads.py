@@ -6,13 +6,14 @@ integer giving RLP byte length) followed by the RLP-encoded payload. fsync after
 The RLP layout is the canonical `ExecutionPayloadV3` encoding used across all EL clients —
 `geth import`, `besu blocks import`, `erigon import`, `reth import` all accept it.
 """
+
 from __future__ import annotations
 
 import os
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 import rlp
 

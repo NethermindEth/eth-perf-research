@@ -1,7 +1,7 @@
 """RpcClient tests: JWT validation, engine-port guard, error handling, SSRF guard."""
+
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import httpx
@@ -27,7 +27,7 @@ def _client(transport: _Transport) -> httpx.Client:
 
 def _write_jwt(path: Path, value: str, *, mode: int = 0o600) -> Path:
     path.write_text(value)
-    os.chmod(path, mode)
+    path.chmod(mode)
     return path
 
 
@@ -71,9 +71,7 @@ def test_rejects_group_readable_jwt(tmp_path: Path) -> None:
 def test_jwt_sent_as_bearer(tmp_path: Path) -> None:
     jwt = _write_jwt(tmp_path / "jwt.hex", "a" * 64)
     transport = _Transport({"jsonrpc": "2.0", "id": 1, "result": {"number": "0x0"}})
-    rpc = RpcClient(
-        "http://nethermind:8551", jwt_path=jwt, client=_client(transport)
-    )
+    rpc = RpcClient("http://nethermind:8551", jwt_path=jwt, client=_client(transport))
     rpc.eth_get_block_by_number("latest")
     assert transport.captured_auth == "Bearer " + "a" * 64
 

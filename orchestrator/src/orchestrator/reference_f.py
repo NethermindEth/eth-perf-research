@@ -1,10 +1,10 @@
 """REFERENCE_F loader — version-stamped seed coefficients (bytes per tx, per axis)."""
+
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
-
 
 AXES = ("accounts", "storage", "code")
 

@@ -1,4 +1,5 @@
 """Run manifest — records environment, session log, and final state root."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -7,7 +8,6 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-
 
 MANIFEST_SCHEMA = 1
 
@@ -85,7 +85,7 @@ class Manifest:
         )
 
     @classmethod
-    def read(cls, path: Path | str) -> "Manifest":
+    def read(cls, path: Path | str) -> Manifest:
         body = json.loads(Path(path).read_text(encoding="utf-8"))
         sessions = [Session(**s) for s in body.pop("sessions", [])]
         replay_raw = body.pop("replay_context", None)
@@ -150,7 +150,7 @@ def compute_journal_sha256(journal_path: Path | str) -> str:
     Matches design §7's "hash over all replay_core bytes" so replay can re-derive
     and match without re-reading observability fields.
     """
-    from .journal import serialize_replay_core, JournalReader
+    from .journal import JournalReader, serialize_replay_core
 
     digest = hashlib.sha256()
     for record in JournalReader(journal_path):

@@ -1,9 +1,9 @@
 """Lifecycle tests: auto-detect startup, resume guard, main loop control flow."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import httpx
 import pytest
 
 from orchestrator.facade import FacadeContext
@@ -26,8 +26,6 @@ from orchestrator.lifecycle import (
     run,
 )
 from orchestrator.manifest import EnvInfo, Manifest, compute_composition_hash
-from orchestrator.rpc import RpcClient
-from orchestrator.sensor import SensorClient
 from orchestrator.target import TargetConfig
 
 
@@ -217,7 +215,7 @@ def test_reconcile_refuses_on_tx_hash_mismatch(tmp_path: Path) -> None:
         def close(self) -> None: ...
 
     ctx = FacadeContext(base_address=target.base_address, revision=target.revision)
-    with pytest.raises(ResumeRefused, match="tx .* hash mismatch"):
+    with pytest.raises(ResumeRefused, match=r"tx .* hash mismatch"):
         resolve_startup_mode(
             tmp_path,
             composition_hash=comp,
@@ -305,17 +303,13 @@ def test_resume_refuses_on_journal_schema_violation(tmp_path: Path) -> None:
     raw = journal.read_bytes()
     journal.write_bytes(raw[:-10])  # drop newline + trailing bytes
     with pytest.raises(ResumeRefused, match="schema violation"):
-        resolve_startup_mode(
-            tmp_path, composition_hash="c" * 64, head_block=100
-        )
+        resolve_startup_mode(tmp_path, composition_hash="c" * 64, head_block=100)
 
 
 def test_state_dir_lock_refuses_second_holder(tmp_path: Path) -> None:
     """C-NO-LOCK: two orchestrators on the same state dir must not both start."""
-    with _state_dir_lock(tmp_path):
-        with pytest.raises(RunAlreadyActive):
-            with _state_dir_lock(tmp_path):
-                pass  # unreachable
+    with _state_dir_lock(tmp_path), pytest.raises(RunAlreadyActive), _state_dir_lock(tmp_path):
+        pass  # unreachable
 
 
 def test_reconcile_synthesized_record_uses_new_session_id(tmp_path: Path) -> None:
@@ -393,9 +387,7 @@ def test_reconcile_pending_synthesizes_record_when_head_advanced(tmp_path: Path)
 
         def close(self) -> None: ...
 
-    decision = resolve_startup_mode(
-        tmp_path, composition_hash=comp, head_block=101, rpc=_Rpc()
-    )
+    decision = resolve_startup_mode(tmp_path, composition_hash=comp, head_block=101, rpc=_Rpc())
     assert decision.mode is StartupMode.RESUME
     records = list(JournalReader(journal))
     assert len(records) == 2
@@ -534,7 +526,9 @@ def test_refuse_when_head_is_unknown(tmp_path: Path) -> None:
         resolve_startup_mode(tmp_path, composition_hash=comp, head_block=None)
 
 
-def test_run_with_max_batches_writes_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_with_max_batches_writes_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = _target()
     env = _env()
 
@@ -545,6 +539,7 @@ def test_run_with_max_batches_writes_manifest(tmp_path: Path, monkeypatch: pytes
 
         def read(self, expected_block=None, timeout_s=5.0):
             from orchestrator.sensor import StateObservation
+
             if expected_block is not None:
                 self._block = expected_block
             else:

@@ -1,4 +1,5 @@
 """Journal writer/reader tests: chain-hash, fsync, resume, schema."""
+
 from __future__ import annotations
 
 import hashlib
@@ -21,7 +22,6 @@ from orchestrator.journal import (
     serialize_replay_core,
     validate_record_dict,
 )
-
 
 _MISSING: object = object()
 
@@ -285,7 +285,7 @@ def test_trailing_partial_line_raises_schema_error(tmp_path: Path) -> None:
     with JournalWriter(journal) as w:
         w.append(_make_record(0))
     # Simulate a partial next-record append (no newline, invalid JSON tail).
-    with open(journal, "ab") as f:
+    with journal.open("ab") as f:
         f.write(b'{"partial":')
     with pytest.raises(JournalSchemaError, match="trailing partial record"):
         _read_last_chain_hash(journal)
@@ -315,9 +315,7 @@ def test_verify_chain_from_detects_tamper_in_suffix(tmp_path: Path) -> None:
     reader = JournalReader(journal)
     records = list(reader)
     with pytest.raises(ChainHashMismatch):
-        reader.verify_chain_from(
-            records[2].replay_core.chain_hash, min_batch_id=3
-        )
+        reader.verify_chain_from(records[2].replay_core.chain_hash, min_batch_id=3)
 
 
 def test_serialize_replay_core_excludes_chain_hash() -> None:

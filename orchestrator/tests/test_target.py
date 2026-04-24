@@ -1,4 +1,5 @@
 """TargetConfig loader tests."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -39,7 +40,7 @@ def test_load_target_rejects_oversized_base_address(tmp_path: Path) -> None:
     path.write_text(
         "mainnet_target:\n  accounts: 0.141\n  storage: 0.817\n  code: 0.042\n"
         "target_total_bytes: 1000\n"
-        'base_address: "0x' + 'f' * 60 + '"\n'
+        'base_address: "0x' + "f" * 60 + '"\n'
     )
     with pytest.raises(ValueError, match="base_address"):
         load_target(path)

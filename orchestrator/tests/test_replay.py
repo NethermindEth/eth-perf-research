@@ -1,12 +1,11 @@
 """Replay mode tests — exercises exit codes 0–5."""
+
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 from orchestrator.facade import FacadeContext, dispatch
 from orchestrator.journal import (
@@ -42,7 +41,9 @@ class _StubRpc:
     def eth_get_block_by_hash(self, block_hash: str, full: bool = True) -> dict[str, Any]:
         return {"hash": block_hash}
 
-    def eth_get_block_by_number(self, number: str | int = "latest", full: bool = False) -> dict[str, Any]:
+    def eth_get_block_by_number(
+        self, number: str | int = "latest", full: bool = False
+    ) -> dict[str, Any]:
         return {"stateRoot": "0x" + "aa" * 32}
 
     def close(self) -> None: ...
@@ -92,9 +93,7 @@ def _seed_journal(
         nethermind_commit_sha="n" * 40,
         dotnet_runtime_major=10,
         cpu_arch="x86_64",
-        replay_context=build_replay_context(
-            FacadeContext(base_address=b"\x00" * 20, revision=0)
-        ),
+        replay_context=build_replay_context(FacadeContext(base_address=b"\x00" * 20, revision=0)),
         final_state_root=state_root,
     )
     manifest.write(manifest_path)

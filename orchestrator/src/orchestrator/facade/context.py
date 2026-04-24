@@ -1,4 +1,5 @@
 """Shared facade context: cursors + chain metadata passed to every adapter."""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +8,6 @@ from typing import Any
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
-
 
 # A deterministic, well-known key used by tests and by lab runs. Because its bytes
 # are checked into this repository, it must only ever sign transactions on
@@ -94,15 +94,8 @@ class FacadeContext:
         base_int = int.from_bytes(self.base_address, "big") if self.base_address else 0
         addr_int = base_int + self.revision * self.address_stride + index
         if addr_int >= _ADDRESS_SPACE:
-            raise ValueError(
-                f"address derivation overflows 20 bytes at index {index}"
-            )
+            raise ValueError(f"address derivation overflows 20 bytes at index {index}")
         return addr_int.to_bytes(20, "big")
-
-    def next_address(self) -> bytes:
-        addr = self.derive_address(self.address_cursor)
-        self.address_cursor += 1
-        return addr
 
     def next_salt(self) -> bytes:
         salt = self.salt_cursor.to_bytes(32, "big")

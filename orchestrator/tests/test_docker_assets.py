@@ -1,10 +1,10 @@
 """Static checks on Docker assets — run without a Docker daemon."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parent.parent
 

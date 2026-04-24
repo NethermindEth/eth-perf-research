@@ -15,6 +15,7 @@ require the JWT; plain public-port usage does not. SSRF guard: the URL's hostnam
 is resolved once at construction, and private / loopback / link-local / CGNAT IPs
 are refused unless the caller passes ``allow_private=True``.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -28,7 +29,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-
 
 _JWT_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _ENGINE_PORTS = frozenset({8551, 8552})  # default JWT-protected ports
@@ -62,17 +62,14 @@ def _load_jwt(path: Path) -> str:
     # is functionally the same as a leaked JWT; refuse at load time.
     if mode & 0o077:
         raise JwtConfigError(
-            f"jwt file at {path} has lax permissions {stat.filemode(mode)}; "
-            f"chmod 0600 before reuse"
+            f"jwt file at {path} has lax permissions {stat.filemode(mode)}; chmod 0600 before reuse"
         )
     try:
         raw = path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise JwtConfigError(f"jwt file at {path} not readable: {exc}") from exc
     if not _JWT_HEX_RE.fullmatch(raw):
-        raise JwtConfigError(
-            f"jwt file at {path} must be exactly 64 hex characters"
-        )
+        raise JwtConfigError(f"jwt file at {path} must be exactly 64 hex characters")
     return raw
 
 
@@ -141,9 +138,7 @@ class RpcClient:
                 f"supply jwt_path or set require_jwt_for_engine_port=False"
             )
         limits = httpx.Limits(max_keepalive_connections=4, keepalive_expiry=600.0)
-        self._client = (
-            client if client is not None else httpx.Client(timeout=30.0, limits=limits)
-        )
+        self._client = client if client is not None else httpx.Client(timeout=30.0, limits=limits)
         self._owns_client = client is None
         self._request_id = 0
 

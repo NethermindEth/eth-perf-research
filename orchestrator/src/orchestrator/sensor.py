@@ -15,6 +15,7 @@ The plugin on master returns the `StateCompositionReport` shape (camelCase JSON)
 
 Only three byte counters feed the controller; the rest travels into the journal via `raw`.
 """
+
 from __future__ import annotations
 
 import time
@@ -28,9 +29,7 @@ class SensorWaitTimeout(Exception):
     """Raised when `blockNumber` fails to catch up to `expected_block` within the deadline."""
 
     def __init__(self, expected_block: int, last_seen_block: int) -> None:
-        super().__init__(
-            f"sensor: expected block {expected_block}, last seen {last_seen_block}"
-        )
+        super().__init__(f"sensor: expected block {expected_block}, last seen {last_seen_block}")
         self.expected_block = expected_block
         self.last_seen_block = last_seen_block
 
@@ -63,9 +62,7 @@ class SensorClient:
     ) -> None:
         self._rpc_url = rpc_url
         limits = httpx.Limits(max_keepalive_connections=2, keepalive_expiry=600.0)
-        self._client = (
-            client if client is not None else httpx.Client(timeout=10.0, limits=limits)
-        )
+        self._client = client if client is not None else httpx.Client(timeout=10.0, limits=limits)
         self._owns_client = client is None
         self._request_id = 0
 

@@ -1,22 +1,23 @@
 """Manifest writer + composition-hash tests."""
+
 from __future__ import annotations
 
 import dataclasses
 import json
 from pathlib import Path
 
+from orchestrator.journal import (
+    JournalWriter,
+    Observability,
+    Record,
+    ReplayCore,
+)
 from orchestrator.manifest import (
     EnvInfo,
     Manifest,
     Session,
     compute_composition_hash,
     compute_journal_sha256,
-)
-from orchestrator.journal import (
-    JournalWriter,
-    Observability,
-    Record,
-    ReplayCore,
 )
 
 

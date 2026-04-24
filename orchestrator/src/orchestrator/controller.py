@@ -11,11 +11,13 @@ the grace period) had a residual-norm ratio exceeding ``OVERSHOOT_THRESHOLD``. A
 single clean batch no longer resets the counter — previously that let a perfect
 sawtooth oscillation run forever.
 """
+
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Deque, Iterable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -53,7 +55,7 @@ class ControllerState:
     sigma: dict[str, dict[str, float]]
     alpha: dict[str, dict[str, float]] = field(default_factory=dict)
     batch_id: int = 0
-    overshoot_window: Deque[bool] = field(default_factory=lambda: deque(maxlen=OVERSHOOT_WINDOW))
+    overshoot_window: deque[bool] = field(default_factory=lambda: deque(maxlen=OVERSHOOT_WINDOW))
     last_observation: StateObservation | None = None
     reference_f_version: str = ""
 
@@ -74,8 +76,8 @@ def init_state(
     alpha: dict[str, dict[str, float]] = {}
     for verb in scenarios:
         F[verb] = dict(reference_f.per_scenario(verb))
-        sigma[verb] = {axis: 1.0 for axis in AXES}
-        alpha[verb] = {axis: A_MIN for axis in AXES}
+        sigma[verb] = dict.fromkeys(AXES, 1.0)
+        alpha[verb] = dict.fromkeys(AXES, A_MIN)
     return ControllerState(
         F=F,
         sigma=sigma,
@@ -88,7 +90,7 @@ def init_state(
 def rehydrate_state(
     reference_f: ReferenceF,
     qp_scenarios: Iterable[str],
-    tail_observability: "Observability",
+    tail_observability: Observability,
     last_batch_id: int,
 ) -> ControllerState:
     """Rebuild controller state from the last journal record's observability block.
@@ -103,9 +105,7 @@ def rehydrate_state(
     scenarios = list(qp_scenarios)
     state = init_state(reference_f, scenarios)
     scalar_alpha = (
-        float(tail_observability.alpha_current)
-        if tail_observability.alpha_current
-        else A_MIN
+        float(tail_observability.alpha_current) if tail_observability.alpha_current else A_MIN
     )
     alpha_state = getattr(tail_observability, "alpha_state", {}) or {}
     for verb in scenarios:
@@ -119,7 +119,7 @@ def rehydrate_state(
         if per_verb and all(axis in per_verb for axis in AXES):
             state.alpha[verb] = {axis: float(per_verb[axis]) for axis in AXES}
         else:
-            state.alpha[verb] = {axis: scalar_alpha for axis in AXES}
+            state.alpha[verb] = dict.fromkeys(AXES, scalar_alpha)
     state.batch_id = last_batch_id + 1
     return state
 
@@ -132,9 +132,7 @@ class Controller:
     def F(self) -> dict[str, dict[str, float]]:
         return self.state.F
 
-    def pick_next_batch(
-        self, observation: StateObservation, target: TargetConfig
-    ) -> BatchPlan:
+    def pick_next_batch(self, observation: StateObservation, target: TargetConfig) -> BatchPlan:
         """Project the desired scenario mix onto the simplex and pick the top verb."""
         verbs = list(target.qp_scenarios)
         residual = self._residual(observation, target)  # shape (3,)
@@ -150,7 +148,7 @@ class Controller:
         top_verb = verbs[top_index]
         weight = float(x_proj[top_index])
         deadline = max(1, int(target.total_batch_bytes * weight))
-        mix = {v: float(w) for v, w in zip(verbs, x_proj)}
+        mix = {v: float(w) for v, w in zip(verbs, x_proj, strict=False)}
         return BatchPlan(verb=top_verb, deadline_bytes=deadline, mix=mix)
 
     def apply_observation(
@@ -160,7 +158,7 @@ class Controller:
         plan: BatchPlan,
         *,
         tx_count: int = 1,
-    ) -> dict[str, float]:
+    ) -> dict[str, Any]:
         """Apply the adaptive-α update; returns a diagnostic dict for the journal.
 
         `tx_count` scales F (bytes per tx) to batch-total bytes for both the per-axis
@@ -240,10 +238,7 @@ class Controller:
         tripped = ratio > OVERSHOOT_THRESHOLD
         self.state.overshoot_window.append(tripped)
         trips = sum(self.state.overshoot_window)
-        if (
-            len(self.state.overshoot_window) == OVERSHOOT_WINDOW
-            and trips >= OVERSHOOT_WINDOW_TRIPS
-        ):
+        if len(self.state.overshoot_window) == OVERSHOOT_WINDOW and trips >= OVERSHOOT_WINDOW_TRIPS:
             raise ControllerInstability(
                 f"overshoot: {trips}/{OVERSHOOT_WINDOW} recent batches over "
                 f"threshold={OVERSHOOT_THRESHOLD} (latest ratio {ratio:.3f})"
