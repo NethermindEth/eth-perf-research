@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 
@@ -21,6 +21,9 @@ from .math.michelot import project_simplex
 from .reference_f import AXES, ReferenceF
 from .sensor import StateObservation
 from .target import TargetConfig
+
+if TYPE_CHECKING:
+    from .journal import Observability
 
 
 OVERSHOOT_THRESHOLD = 0.20
@@ -68,6 +71,37 @@ def init_state(
         batch_id=0,
         reference_f_version=reference_f.version,
     )
+
+
+def rehydrate_state(
+    reference_f: ReferenceF,
+    qp_scenarios: Iterable[str],
+    tail_observability: "Observability",
+    last_batch_id: int,
+) -> ControllerState:
+    """Rebuild controller state from the last journal record's observability block.
+
+    Design §C.3 step 6 requires F/σ/α to be reconstructed from the tail, not re-seeded
+    from REFERENCE_F — otherwise every resume is a cold start and multi-session journals
+    diverge from an uninterrupted run's ``final_state_root`` (spec §C.1).
+
+    Fallback behavior when a QP scenario is absent from the tail (e.g. `qp_scenarios`
+    was changed between sessions): that verb's F/σ reset to REFERENCE_F seeds and we
+    emit a warning via the returned state. The operator is expected to notice the
+    ``reference_f_version`` on shutdown and refuse such a run in review.
+    """
+    scenarios = list(qp_scenarios)
+    state = init_state(reference_f, scenarios)
+    for verb in scenarios:
+        coeffs = tail_observability.coeffs_after.get(verb)
+        if coeffs is not None and all(axis in coeffs for axis in AXES):
+            state.F[verb] = {axis: float(coeffs[axis]) for axis in AXES}
+        sigma = tail_observability.sigma_innov.get(verb)
+        if sigma is not None and all(axis in sigma for axis in AXES):
+            state.sigma[verb] = {axis: float(sigma[axis]) for axis in AXES}
+    state.alpha = float(tail_observability.alpha_current) if tail_observability.alpha_current else A_MIN
+    state.batch_id = last_batch_id + 1
+    return state
 
 
 class Controller:

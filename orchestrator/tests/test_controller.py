@@ -164,3 +164,41 @@ def test_overshoot_fires_after_3_consecutive(reference_f, target) -> None:
 def test_reference_f_version_recorded(reference_f) -> None:
     state = init_state(reference_f, reference_f.scenarios)
     assert state.reference_f_version == reference_f.version
+
+
+def test_rehydrate_state_restores_f_sigma_alpha(reference_f) -> None:
+    """C2: resume must seed F/σ/α from the journal tail — not re-init from REFERENCE_F."""
+    from orchestrator.controller import rehydrate_state
+    from orchestrator.journal import Observability
+
+    observability = Observability(
+        observed_flat_bytes=0,
+        coeffs_before={},
+        coeffs_after={
+            "eoatx": {"accounts": 222.5, "storage": 3.0, "code": 0.0},
+            "storagespam": {"accounts": 1.0, "storage": 400.0, "code": 0.0},
+        },
+        sigma_innov={
+            "eoatx": {"accounts": 10.0, "storage": 2.0, "code": 1.0},
+            "storagespam": {"accounts": 1.0, "storage": 50.0, "code": 1.0},
+        },
+        alpha_current=0.187,
+        innovation_ratio=0.1,
+        residual_norm=5.0,
+        statecomp_snapshot=None,
+    )
+    state = rehydrate_state(
+        reference_f,
+        ("eoatx", "storagespam", "deploytx"),
+        observability,
+        last_batch_id=42,
+    )
+    assert state.F["eoatx"]["accounts"] == pytest.approx(222.5)
+    assert state.F["storagespam"]["storage"] == pytest.approx(400.0)
+    # deploytx absent from tail → falls back to REFERENCE_F seed
+    assert state.F["deploytx"]["code"] == pytest.approx(
+        reference_f.per_scenario("deploytx")["code"]
+    )
+    assert state.alpha == pytest.approx(0.187)
+    assert state.batch_id == 43  # last + 1
+    assert state.sigma["eoatx"]["accounts"] == pytest.approx(10.0)

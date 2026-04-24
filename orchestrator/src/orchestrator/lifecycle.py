@@ -7,13 +7,19 @@ always finishes cleanly to avoid partial journal writes.
 from __future__ import annotations
 
 import enum
+import logging
 import signal
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
+
+import httpx
+
+
+_log = logging.getLogger(__name__)
 
 from .controller import (
     BatchPlan,
@@ -21,6 +27,7 @@ from .controller import (
     ControllerInstability,
     ControllerState,
     init_state,
+    rehydrate_state,
 )
 from .facade import FacadeContext, dispatch
 from .journal import (
@@ -71,7 +78,11 @@ def resolve_startup_mode(
     composition_hash: str,
     head_block: int | None,
 ) -> StartupDecision:
-    """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch."""
+    """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch.
+
+    ``head_block`` is required when a journal exists: ``None`` means the RPC check
+    failed, and we refuse rather than silently skip the alignment assertion.
+    """
     journal = state_dir / JOURNAL_FILENAME
     if not journal.exists() or journal.stat().st_size == 0:
         return StartupDecision(StartupMode.FRESH, None, "no journal at state dir")
@@ -91,14 +102,36 @@ def resolve_startup_mode(
     if tail is None:
         return StartupDecision(StartupMode.FRESH, None, "journal empty after verify")
 
-    if head_block is not None:
-        if head_block not in (tail.replay_core.block_number, tail.replay_core.block_number + 1):
-            raise ResumeRefused(
-                f"Nethermind head {head_block} not in "
-                f"{{{tail.replay_core.block_number}, {tail.replay_core.block_number + 1}}}"
-            )
+    if head_block is None:
+        raise ResumeRefused(
+            "Nethermind head unknown (RPC unreachable or returned null) — "
+            "refuse to resume without head alignment check"
+        )
+    if head_block not in (tail.replay_core.block_number, tail.replay_core.block_number + 1):
+        raise ResumeRefused(
+            f"Nethermind head {head_block} not in "
+            f"{{{tail.replay_core.block_number}, {tail.replay_core.block_number + 1}}}"
+        )
 
     return StartupDecision(StartupMode.RESUME, tail, "valid journal + head aligned")
+
+
+def _fetch_head_block(rpc: RpcClient) -> int | None:
+    """Best-effort head fetch for the resume pre-flight check.
+
+    Returns None only on transport errors — malformed responses propagate so the
+    operator sees the real problem. `resolve_startup_mode` refuses resume on None.
+    """
+    try:
+        block = rpc.eth_get_block_by_number("latest")
+    except (httpx.HTTPError, ConnectionError, TimeoutError) as exc:
+        _log.warning("head-block fetch failed: %s", exc)
+        return None
+    head = block.get("number")
+    if head is None:
+        _log.warning("head-block response missing `number` field")
+        return None
+    return int(head, 16) if isinstance(head, str) else int(head)
 
 
 def build_facade_context(target: TargetConfig) -> FacadeContext:
@@ -142,20 +175,21 @@ def run(
     rpc = deps.rpc if deps else RpcClient(rpc_url)
     probe_exec = deps.probe_executor if deps else None
 
-    try:
-        head = rpc.eth_get_block_by_number("latest").get("number")
-        head_block = int(head, 16) if isinstance(head, str) else head
-    except Exception:
-        head_block = None
-
+    head_block = _fetch_head_block(rpc)
     decision = resolve_startup_mode(state_dir, composition_hash, head_block)
 
     ctx = build_facade_context(target)
     if decision.mode == StartupMode.RESUME and decision.last_record is not None:
         session_id = _extract_last_session_id(state_dir) + 1
         resumed_from_batch = decision.last_record.batch_id
-        # TODO: proper F reconstruction from journal tail would read observability.coeffs_after.
-        state = init_state(ref_f, target.qp_scenarios)
+        # Spec §C.3 step 6: reconstruct F/σ/α from the journal tail so controller
+        # continuity survives resume. Without this every session is a cold start.
+        state = rehydrate_state(
+            ref_f,
+            target.qp_scenarios,
+            decision.last_record.observability,
+            decision.last_record.batch_id,
+        )
         batch_id = decision.last_record.batch_id + 1
         ctx.address_cursor = int(decision.last_record.replay_core.end_address, 16)
     else:

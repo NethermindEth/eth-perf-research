@@ -115,6 +115,18 @@ def test_refuse_when_head_drifted(tmp_path: Path) -> None:
         resolve_startup_mode(tmp_path, composition_hash=comp, head_block=105)
 
 
+def test_refuse_when_head_is_unknown(tmp_path: Path) -> None:
+    """H2: RPC unreachable must not silently allow resume."""
+    target = _target()
+    env = _env()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    with pytest.raises(ResumeRefused, match="head unknown"):
+        resolve_startup_mode(tmp_path, composition_hash=comp, head_block=None)
+
+
 def test_run_with_max_batches_writes_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = _target()
     env = _env()
