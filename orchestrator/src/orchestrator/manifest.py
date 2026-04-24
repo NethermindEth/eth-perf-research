@@ -125,13 +125,20 @@ def replay_context_matches(a: ReplayContext | None, b: ReplayContext | None) -> 
     """Resume-time compatibility check for two run contexts.
 
     Returns ``True`` iff every field that affects tx/block hashes is identical.
-    Equivalent to ``a == b`` for dataclass instances, but wrapped here so callers
-    can express intent clearly and so future fields get added in one place.
+
+    Tightened from round-2: the old "legacy-None is compatible with anything"
+    shim was an unauthenticated bypass — a manifest with ``replay_context: null``
+    could be dropped alongside a valid journal and silently skip the signer+chain
+    gate (review C2 / skeptic F-1 / security M-REPLAY-NULL-SKIP). Now:
+
+    - Both None → compatible (pre-ReplayContext journals replayed by old code).
+    - Both set → require structural equality.
+    - Exactly one set → incompatible; caller must raise ``ResumeRefused``.
     """
-    if a is None or b is None:
-        # A legacy manifest (pre-replay-context) is compatible with any current
-        # context — the operator already accepted this behavior by resuming.
+    if a is None and b is None:
         return True
+    if a is None or b is None:
+        return False
     return a == b
 
 

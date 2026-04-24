@@ -176,6 +176,57 @@ def test_refuse_when_journal_empty_but_pending_present(tmp_path: Path) -> None:
         resolve_startup_mode(tmp_path, composition_hash="c" * 64, head_block=0)
 
 
+def test_reconcile_refuses_on_tx_hash_mismatch(tmp_path: Path) -> None:
+    """C1: equal-count but different-signed tx set must be refused (TRIZ H1 / skeptic F-5)."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    write_pending(
+        tmp_path,
+        PendingBatch(
+            session_id=1,
+            resumed_from_batch=None,
+            batch_id=1,
+            verb="eoatx",
+            deadline_bytes=50_000,
+            start_address="0x" + (0).to_bytes(20, "big").hex(),
+            end_address="0x" + (0).to_bytes(20, "big").hex(),
+            ts_iso="2026-04-24T00:01:00Z",
+            pre_block_number=100,
+            composition_hash=comp,
+        ),
+    )
+
+    # Compute the real tx count for this (verb, deadline, ctx) so the count
+    # gate passes and the hash identity gate is what actually fires.
+    from orchestrator.facade import dispatch as _dispatch
+
+    probe = FacadeContext(base_address=target.base_address, revision=target.revision)
+    real_count = len(_dispatch("eoatx", 50_000, probe))
+
+    class _WrongHashRpc:
+        def eth_get_block_by_number(self, number, full=False):
+            return {
+                "hash": "0x" + "dd" * 32,
+                "transactions": [{"hash": "0x" + "ff" * 32} for _ in range(real_count)],
+            }
+
+        def close(self) -> None: ...
+
+    ctx = FacadeContext(base_address=target.base_address, revision=target.revision)
+    with pytest.raises(ResumeRefused, match="tx .* hash mismatch"):
+        resolve_startup_mode(
+            tmp_path,
+            composition_hash=comp,
+            head_block=101,
+            rpc=_WrongHashRpc(),
+            facade_ctx=ctx,
+        )
+
+
 def test_reconcile_refuses_on_tx_set_mismatch(tmp_path: Path) -> None:
     """C-RECONCILE-TRUST: a misreported head block must NOT be silently trusted."""
     env = _env()

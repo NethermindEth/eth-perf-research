@@ -13,6 +13,7 @@ import errno
 import fcntl
 import logging
 import os
+import platform
 import signal
 import uuid
 from dataclasses import dataclass
@@ -85,14 +86,22 @@ class RunAlreadyActive(Exception):
 
 @contextlib.contextmanager
 def _state_dir_lock(state_dir: Path) -> Iterator[None]:
-    """Exclusive advisory lock on ``state_dir/orchestrator.lock``.
+    """Exclusive lock on ``state_dir/orchestrator.lock`` with NFS-safety probe.
 
-    Prevents two orchestrator processes from racing on the same state dir — which
-    would let one commit a tx set that the other never journals (review C-NO-LOCK).
-    Uses ``fcntl.flock`` with ``LOCK_NB`` so we fail fast rather than hang.
+    ``fcntl.flock`` is advisory-only on NFSv3 / SMB / some overlayfs setups and
+    silently returns success without actually locking. After acquiring, we write
+    a unique identity token, ``os.fsync``, re-read, and compare. If the read-back
+    differs from what we wrote, two processes are colliding on a no-op lock and
+    we refuse (review C3 / skeptic F-2).
+
+    File is opened with ``O_NOFOLLOW`` + mode ``0o600`` so a pre-planted symlink
+    cannot redirect the lock write (security M-SYMLINK).
     """
     lock_path = state_dir / RUN_LOCK_FILENAME
-    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    # O_NOFOLLOW: refuse to open if the path is a symlink. The lock file must be
+    # a regular file controlled by the state dir's owner.
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(lock_path, flags, 0o600)
     try:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -102,12 +111,28 @@ def _state_dir_lock(state_dir: Path) -> Iterator[None]:
                     f"another orchestrator holds {lock_path}; refuse to start"
                 ) from exc
             raise
-        os.write(lock_fd, f"{os.getpid()}\n".encode())
+        token = f"{os.getpid()}:{platform.node()}:{uuid.uuid4().hex}\n".encode()
+        os.ftruncate(lock_fd, 0)
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        os.write(lock_fd, token)
         os.fsync(lock_fd)
+        os.lseek(lock_fd, 0, os.SEEK_SET)
+        readback = os.read(lock_fd, len(token) + 128)
+        if readback != token:
+            # A concurrent holder just overwrote us — our "exclusive" flock is a
+            # no-op (NFS without lockd, SMB without oplocks, etc.).
+            raise RunAlreadyActive(
+                f"lock identity read-back differs at {lock_path}: fcntl.flock may "
+                f"be advisory-only on this filesystem. Move state_dir off networked "
+                f"storage or pass --allow-networked-state-dir to opt in."
+            )
         try:
             yield
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
     finally:
         os.close(lock_fd)
 
@@ -329,25 +354,36 @@ def _verify_reconciled_tx_set(
     """Refuse reconcile if the head block's tx set differs from what we would dispatch.
 
     Replays the facade deterministically with ``pending.start_address`` as the
-    starting cursor; compares ``len(txs)`` to the block's transaction count. A
-    count mismatch means Nethermind is reporting a block we did not build — either
-    because it auto-mined empty or because a different tx set was committed.
-    Either way the journal would silently desync from the chain, breaking §C.1.
+    starting cursor and compares *every tx hash* (not just count) against the
+    head block's ``transactions[i].hash``. A count-only check lets a compromised
+    or misbehaving Nethermind pass by committing an equal-sized but differently-
+    signed tx set — the synthesized record would record the chain's block_hash
+    while replay on another client would produce a different block_hash,
+    violating §C.1 silently (round-3 C1 / skeptic F-5 / TRIZ H1).
     """
+    from eth_utils import keccak
+
     start_cursor = int(pending.start_address, 16)
     probe_ctx = dataclasses.replace(ctx, address_cursor=start_cursor, salt_cursor=0)
     txs = dispatch(pending.verb, pending.deadline_bytes, probe_ctx)
     chain_txs = block.get("transactions") or []
     if not isinstance(chain_txs, list):
-        raise ResumeRefused(
-            f"reconcile: RPC returned malformed `transactions` for head block"
-        )
+        raise ResumeRefused("reconcile: RPC returned malformed `transactions` for head block")
     if len(chain_txs) != len(txs):
         raise ResumeRefused(
             f"reconcile: head block has {len(chain_txs)} txs but pending "
             f"verb={pending.verb!r} deadline_bytes={pending.deadline_bytes} "
             f"would produce {len(txs)}; refuse to trust the RPC — archive state/"
         )
+    for i, (dispatched, chain_tx) in enumerate(zip(txs, chain_txs)):
+        expected = "0x" + keccak(dispatched.rlp).hex()
+        chain_hash = chain_tx if isinstance(chain_tx, str) else chain_tx.get("hash")
+        if not isinstance(chain_hash, str) or chain_hash.lower() != expected.lower():
+            raise ResumeRefused(
+                f"reconcile: tx {i} hash mismatch — dispatched {expected}, "
+                f"chain reports {chain_hash!r}; either Nethermind is misbehaving "
+                f"or state_dir has drifted. Archive state/ before restart."
+            )
 
 
 def _fetch_head_block(rpc: RpcClient) -> int | None:

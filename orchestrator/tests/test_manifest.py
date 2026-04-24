@@ -1,6 +1,7 @@
 """Manifest writer + composition-hash tests."""
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -27,6 +28,46 @@ def _env() -> EnvInfo:
         dotnet_runtime_major=10,
         cpu_arch="x86_64",
     )
+
+
+def test_replay_context_matches_both_none() -> None:
+    """Both-null (legacy manifests resuming under legacy code) remains compatible."""
+    from orchestrator.manifest import replay_context_matches
+
+    assert replay_context_matches(None, None)
+
+
+def test_replay_context_matches_refuses_legacy_one_sided() -> None:
+    """C2: manifest with null replay_context must NOT silently pass the signer gate."""
+    from orchestrator.manifest import ReplayContext, replay_context_matches
+
+    current = ReplayContext(
+        base_address="0x" + "00" * 20,
+        revision=0,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        address_stride=1 << 40,
+        deploy_pubkey_sha256="a" * 64,
+    )
+    # Attacker drops `"replay_context": null` → must now be rejected.
+    assert not replay_context_matches(None, current)
+    assert not replay_context_matches(current, None)
+
+
+def test_replay_context_matches_field_equality() -> None:
+    from orchestrator.manifest import ReplayContext, replay_context_matches
+
+    a = ReplayContext(
+        base_address="0x" + "00" * 20,
+        revision=0,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        address_stride=1 << 40,
+        deploy_pubkey_sha256="a" * 64,
+    )
+    b = dataclasses.replace(a, chain_id=11155111)
+    assert replay_context_matches(a, a)
+    assert not replay_context_matches(a, b)
 
 
 def test_composition_hash_is_deterministic() -> None:

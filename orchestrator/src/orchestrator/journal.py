@@ -308,11 +308,26 @@ class PendingBatch:
 
 
 def write_pending(state_dir: Path | str, pending: PendingBatch) -> None:
-    """Atomically write the pending-batch sidecar with fsync."""
+    """Atomically write the pending-batch sidecar with fsync.
+
+    Uses ``O_NOFOLLOW | O_EXCL`` on the tmp file so a pre-planted symlink cannot
+    redirect the write (security M-PENDING-SYMLINK). The tmp is unlinked and
+    re-created each call to keep O_EXCL meaningful.
+    """
     path = Path(state_dir) / PENDING_FILENAME
     tmp = path.with_suffix(".tmp")
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
     data = (json.dumps(asdict(pending), separators=(",", ":")) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd = os.open(tmp, flags, 0o600)
     try:
         os.write(fd, data)
         os.fsync(fd)
