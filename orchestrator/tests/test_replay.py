@@ -1,10 +1,7 @@
-"""Replay mode tests — exercises exit codes 0–4.
-
-Uses a stub RPC that returns deterministic block hashes so replay can re-commit
-without a real Nethermind.
-"""
+"""Replay mode tests — exercises exit codes 0–5."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -18,10 +15,13 @@ from orchestrator.journal import (
     Record,
     ReplayCore,
 )
+from orchestrator.lifecycle import build_replay_context
+from orchestrator.manifest import Manifest
 from orchestrator.replay import (
     EXIT_BLOCK_HASH,
     EXIT_CHAIN_HASH,
     EXIT_FACADE,
+    EXIT_MANIFEST,
     EXIT_OK,
     EXIT_STATE_ROOT,
     replay,
@@ -29,13 +29,12 @@ from orchestrator.replay import (
 
 
 class _StubRpc:
-    def __init__(self, *, hash_by_batch: dict[int, str] | None = None) -> None:
+    """Stub: deterministic block hash from sha256(concat(signed txs)); static state root."""
+
+    def __init__(self) -> None:
         self._call_idx = 0
-        self._hash_by_batch = hash_by_batch or {}
 
     def testing_commit_block_v1(self, signed_txs_rlp: list[bytes]) -> str:
-        import hashlib
-
         digest = hashlib.sha256(b"".join(signed_txs_rlp)).hexdigest()
         self._call_idx += 1
         return "0x" + digest
@@ -43,25 +42,26 @@ class _StubRpc:
     def eth_get_block_by_hash(self, block_hash: str, full: bool = True) -> dict[str, Any]:
         return {"hash": block_hash}
 
-    def eth_get_block_by_number(self, number="latest", full=False) -> dict[str, Any]:
+    def eth_get_block_by_number(self, number: str | int = "latest", full: bool = False) -> dict[str, Any]:
         return {"stateRoot": "0x" + "aa" * 32}
 
     def close(self) -> None: ...
 
 
-def _seed_journal(tmp_path: Path, *, verb: str = "eoatx", n: int = 3) -> tuple[Path, list[str]]:
-    """Generate a valid journal: dispatch each batch, record the RPC-produced block hash."""
+def _seed_journal(
+    tmp_path: Path, *, verb: str = "eoatx", n: int = 3, state_root: str | None = None
+) -> tuple[Path, Path]:
+    """Generate a valid journal + manifest pair that replay can consume."""
     ctx = FacadeContext(base_address=b"\x00" * 20, revision=0)
     rpc = _StubRpc()
     journal = tmp_path / "orchestrator.journal.jsonl"
-    block_hashes: list[str] = []
+    manifest_path = tmp_path / "run-manifest.json"
     with JournalWriter(journal) as w:
         for i in range(n):
             start = ctx.address_cursor
             txs = dispatch(verb, deadline_bytes=5_000, context=ctx)
             end = ctx.address_cursor
             block_hash = rpc.testing_commit_block_v1([tx.rlp for tx in txs])
-            block_hashes.append(block_hash)
             w.append(
                 Record(
                     session_id=1,
@@ -80,85 +80,104 @@ def _seed_journal(tmp_path: Path, *, verb: str = "eoatx", n: int = 3) -> tuple[P
                     observability=Observability(statecomp_snapshot={"x": i}),
                 )
             )
-    return journal, block_hashes
+    manifest = Manifest(
+        run_id="r",
+        target_yaml_sha256="t" * 64,
+        base_address="0x" + ctx.base_address.hex(),
+        revision=0,
+        genesis_sha256="g" * 64,
+        composition_hash="c" * 64,
+        reference_f_version="2026.04.23",
+        plugin_git_sha="p" * 40,
+        nethermind_commit_sha="n" * 40,
+        dotnet_runtime_major=10,
+        cpu_arch="x86_64",
+        replay_context=build_replay_context(
+            FacadeContext(base_address=b"\x00" * 20, revision=0)
+        ),
+        final_state_root=state_root,
+    )
+    manifest.write(manifest_path)
+    return journal, manifest_path
+
+
+def _recompute_chain_hash(lines: list[str], idx: int) -> list[str]:
+    """Re-chain from `idx` onwards after in-place replay_core edits so we don't exit 1."""
+    prev = "0" * 64 if idx == 0 else json.loads(lines[idx - 1])["replay_core"]["chain_hash"]
+    for i in range(idx, len(lines)):
+        body = json.loads(lines[i])
+        rc = dict(body["replay_core"])
+        rc.pop("chain_hash")
+        rc_bytes = json.dumps(rc, sort_keys=True, separators=(",", ":")).encode()
+        body["replay_core"]["chain_hash"] = hashlib.sha256(prev.encode() + rc_bytes).hexdigest()
+        lines[i] = json.dumps(body, separators=(",", ":"))
+        prev = body["replay_core"]["chain_hash"]
+    return lines
 
 
 def test_replay_happy_path(tmp_path: Path) -> None:
-    journal, _ = _seed_journal(tmp_path)
-    # Fresh stub RPC — deterministic hashes will match.
-    rc = replay(journal, "http://stub", rpc=_StubRpc())
+    journal, manifest = _seed_journal(tmp_path)
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_OK
 
 
 def test_replay_still_verifies_block_hash_when_status_is_sensor_wait_timeout(
     tmp_path: Path,
 ) -> None:
-    """H4: a tampered journal with status=sensor_wait_timeout must not bypass block-hash check."""
-    import hashlib
-
-    journal, _ = _seed_journal(tmp_path, n=2)
+    """H4: tampered journal with status=sensor_wait_timeout must not bypass block-hash check."""
+    journal, manifest = _seed_journal(tmp_path, n=2)
     lines = journal.read_text().splitlines()
     body = json.loads(lines[1])
     body["replay_core"]["status"] = "sensor_wait_timeout"
     body["replay_core"]["block_hash"] = "0x" + "aa" * 32  # forged
-    # Recompute chain hash so we don't short-circuit on EXIT_CHAIN_HASH.
-    prev = json.loads(lines[0])["replay_core"]["chain_hash"]
-    rc = dict(body["replay_core"])
-    rc.pop("chain_hash")
-    rc_bytes = json.dumps(rc, sort_keys=True, separators=(",", ":")).encode()
-    body["replay_core"]["chain_hash"] = hashlib.sha256(prev.encode() + rc_bytes).hexdigest()
     lines[1] = json.dumps(body, separators=(",", ":"))
+    lines = _recompute_chain_hash(lines, 1)
     journal.write_text("\n".join(lines) + "\n")
 
-    rc_exit = replay(journal, "http://stub", rpc=_StubRpc())
-    assert rc_exit == EXIT_BLOCK_HASH
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
+    assert rc == EXIT_BLOCK_HASH
 
 
 def test_replay_chain_hash_mismatch_exits_1(tmp_path: Path) -> None:
-    journal, _ = _seed_journal(tmp_path)
+    journal, manifest = _seed_journal(tmp_path)
     lines = journal.read_text().splitlines()
     mutated = json.loads(lines[1])
     mutated["replay_core"]["deadline_bytes"] = 999_999
     lines[1] = json.dumps(mutated, separators=(",", ":"))
     journal.write_text("\n".join(lines) + "\n")
 
-    rc = replay(journal, "http://stub", rpc=_StubRpc())
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_CHAIN_HASH
 
 
 def test_replay_block_hash_mismatch_exits_2(tmp_path: Path) -> None:
-    journal, _ = _seed_journal(tmp_path)
+    journal, manifest = _seed_journal(tmp_path)
 
     class _BadHash(_StubRpc):
         def testing_commit_block_v1(self, signed_txs_rlp):
-            return "0x" + "ff" * 32  # always the same bogus hash
+            return "0x" + "ff" * 32
 
-    rc = replay(journal, "http://stub", rpc=_BadHash())
+    rc = replay(journal, "http://stub", rpc=_BadHash(), manifest_path=manifest)
     assert rc == EXIT_BLOCK_HASH
 
 
 def test_replay_state_root_mismatch_exits_3(tmp_path: Path) -> None:
-    journal, _ = _seed_journal(tmp_path)
-    manifest = tmp_path / "run-manifest.json"
-    manifest.write_text(
-        json.dumps({"final_state_root": "0x" + "bb" * 32}), encoding="utf-8"
-    )
+    journal, manifest = _seed_journal(tmp_path, state_root="0x" + "bb" * 32)
     rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_STATE_ROOT
 
 
 def test_replay_state_root_match_exits_0(tmp_path: Path) -> None:
-    journal, _ = _seed_journal(tmp_path)
-    manifest = tmp_path / "run-manifest.json"
-    manifest.write_text(
-        json.dumps({"final_state_root": "0x" + "aa" * 32}), encoding="utf-8"
-    )
+    journal, manifest = _seed_journal(tmp_path, state_root="0x" + "aa" * 32)
     rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_OK
 
 
 def test_replay_unknown_verb_exits_4(tmp_path: Path) -> None:
+    # Seed a valid manifest so we get past EXIT_MANIFEST.
+    _, manifest = _seed_journal(tmp_path, n=1)
     journal = tmp_path / "orchestrator.journal.jsonl"
+    journal.unlink()
     with JournalWriter(journal) as w:
         w.append(
             Record(
@@ -178,13 +197,12 @@ def test_replay_unknown_verb_exits_4(tmp_path: Path) -> None:
                 observability=Observability(statecomp_snapshot={}),
             )
         )
-    rc = replay(journal, "http://stub", rpc=_StubRpc())
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_FACADE
 
 
 def test_replay_ignores_observability(tmp_path: Path) -> None:
-    journal, _ = _seed_journal(tmp_path)
-    # Zero out observability fields via line-by-line rewrite.
+    journal, manifest = _seed_journal(tmp_path)
     lines = journal.read_text().splitlines()
     rewritten = []
     for line in lines:
@@ -202,40 +220,50 @@ def test_replay_ignores_observability(tmp_path: Path) -> None:
         rewritten.append(json.dumps(body, separators=(",", ":")))
     journal.write_text("\n".join(rewritten) + "\n")
 
-    rc = replay(journal, "http://stub", rpc=_StubRpc())
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_OK
 
 
 def test_replay_empty_journal_exits_0(tmp_path: Path) -> None:
+    _, manifest = _seed_journal(tmp_path, n=1)
     journal = tmp_path / "empty.jsonl"
     journal.write_text("")
-    rc = replay(journal, "http://stub", rpc=_StubRpc())
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_OK
 
 
 def test_replay_cursor_drift_exits_4(tmp_path: Path) -> None:
-    journal, _ = _seed_journal(tmp_path)
+    journal, manifest = _seed_journal(tmp_path)
     lines = journal.read_text().splitlines()
     body = json.loads(lines[1])
-    # Tamper end_address so it no longer matches the adapter's expected cursor.
     body["replay_core"]["end_address"] = "0x" + (99999).to_bytes(20, "big").hex()
-    # Recompute chain hash so we don't fall into EXIT_CHAIN_HASH first.
-    import hashlib
-    prev = json.loads(lines[0])["replay_core"]["chain_hash"]
-    rc_for_hash = dict(body["replay_core"])
-    rc_for_hash.pop("chain_hash")
-    rc_bytes = json.dumps(rc_for_hash, sort_keys=True, separators=(",", ":")).encode()
-    body["replay_core"]["chain_hash"] = hashlib.sha256(prev.encode() + rc_bytes).hexdigest()
     lines[1] = json.dumps(body, separators=(",", ":"))
-    # Record 2 depends on record 1's chain_hash — recompute all subsequent hashes too.
-    chain = body["replay_core"]["chain_hash"]
-    if len(lines) > 2:
-        body2 = json.loads(lines[2])
-        rc2 = dict(body2["replay_core"])
-        rc2.pop("chain_hash")
-        rc2_bytes = json.dumps(rc2, sort_keys=True, separators=(",", ":")).encode()
-        body2["replay_core"]["chain_hash"] = hashlib.sha256(chain.encode() + rc2_bytes).hexdigest()
-        lines[2] = json.dumps(body2, separators=(",", ":"))
+    lines = _recompute_chain_hash(lines, 1)
     journal.write_text("\n".join(lines) + "\n")
-    rc = replay(journal, "http://stub", rpc=_StubRpc())
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest)
     assert rc == EXIT_FACADE
+
+
+def test_replay_missing_manifest_exits_5(tmp_path: Path) -> None:
+    """C1: replay without the manifest cannot reconstruct the facade context."""
+    journal, _ = _seed_journal(tmp_path)
+    rc = replay(
+        journal,
+        "http://stub",
+        rpc=_StubRpc(),
+        manifest_path=tmp_path / "does_not_exist.json",
+    )
+    assert rc == EXIT_MANIFEST
+
+
+def test_replay_refuses_on_signer_fingerprint_mismatch(tmp_path: Path) -> None:
+    """H1: a different signing key must not masquerade as the manifest's signer."""
+    journal, manifest = _seed_journal(tmp_path, n=1)
+    rc = replay(
+        journal,
+        "http://stub",
+        rpc=_StubRpc(),
+        manifest_path=manifest,
+        deploy_private_key=b"\x22" * 32,  # wrong key
+    )
+    assert rc == EXIT_MANIFEST

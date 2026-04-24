@@ -44,6 +44,7 @@ from .journal import (
 from .manifest import (
     EnvInfo,
     Manifest,
+    ReplayContext,
     Session,
     compute_composition_hash,
     compute_journal_sha256,
@@ -235,6 +236,18 @@ def build_facade_context(target: TargetConfig) -> FacadeContext:
     )
 
 
+def build_replay_context(ctx: FacadeContext) -> ReplayContext:
+    """Snapshot the tx-signing identity so replay can reconstruct it."""
+    return ReplayContext(
+        base_address="0x" + ctx.base_address.hex(),
+        revision=ctx.revision,
+        chain_id=ctx.chain_id,
+        gas_limit=ctx.gas_limit,
+        address_stride=ctx.address_stride,
+        deploy_pubkey_sha256=ctx.deploy_pubkey_sha256(),
+    )
+
+
 @dataclass
 class LifecycleDeps:
     """Injectable dependencies so tests can stub RPC/sensor without patching."""
@@ -259,8 +272,12 @@ def run(
     state_dir.mkdir(parents=True, exist_ok=True)
 
     target_sha = target.source_sha256
-    composition_hash = compute_composition_hash(target_sha, env)
     ref_f = reference_f or load_reference_f(default_reference_f_path())
+    # Pre-build the facade context + replay snapshot so composition_hash covers
+    # every knob that can change the final state root (spec §C.1).
+    preflight_ctx = build_facade_context(target)
+    replay_context = build_replay_context(preflight_ctx)
+    composition_hash = compute_composition_hash(target_sha, env, replay_context)
 
     own_deps = deps is None
     sensor = deps.sensor if deps else SensorClient(rpc_url)
@@ -272,7 +289,7 @@ def run(
         state_dir, composition_hash, head_block, rpc=rpc
     )
 
-    ctx = build_facade_context(target)
+    ctx = preflight_ctx
     if decision.mode == StartupMode.RESUME and decision.last_record is not None:
         session_id = _extract_last_session_id(state_dir) + 1
         resumed_from_batch = decision.last_record.batch_id
@@ -347,6 +364,7 @@ def run(
         composition_hash=composition_hash,
         reference_f_version=ref_f.version,
         env=env,
+        replay_context=replay_context,
         sessions=_load_prior_sessions(manifest_path)
         + [
             Session(
@@ -510,6 +528,7 @@ def _build_manifest(
     composition_hash: str,
     reference_f_version: str,
     env: EnvInfo,
+    replay_context: ReplayContext,
     sessions: list[Session],
     journal_path: Path,
     rpc: RpcClient | None,
@@ -519,8 +538,8 @@ def _build_manifest(
         try:
             latest = rpc.eth_get_block_by_number("latest")
             final_state_root = latest.get("stateRoot")
-        except Exception:
-            final_state_root = None
+        except (httpx.HTTPError, ConnectionError, TimeoutError) as exc:
+            _log.warning("final state_root fetch failed: %s", exc)
 
     journal_sha = compute_journal_sha256(journal_path) if journal_path.exists() else ""
 
@@ -536,6 +555,7 @@ def _build_manifest(
         nethermind_commit_sha=env.nethermind_commit_sha,
         dotnet_runtime_major=env.dotnet_runtime_major,
         cpu_arch=env.cpu_arch,
+        replay_context=replay_context,
         sessions=sessions,
         journal_sha256=journal_sha,
     )

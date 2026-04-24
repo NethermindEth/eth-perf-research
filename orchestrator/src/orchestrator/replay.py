@@ -5,17 +5,18 @@ Exit codes (design §C.2):
     1 — chain-hash mismatch
     2 — block-hash mismatch
     3 — state-root mismatch vs manifest
-    4 — facade dispatch error (unknown verb, cursor drift, etc.)
+    4 — facade dispatch error (unknown verb, cursor drift, invalid manifest, …)
+    5 — missing / invalid manifest (required for context reconstruction)
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import httpx
 
 from .facade import FacadeContext, UnknownVerb, dispatch
 from .journal import ChainHashMismatch, JournalReader, JournalSchemaError
+from .manifest import Manifest
 from .rpc import RpcClient
 
 
@@ -24,6 +25,7 @@ EXIT_CHAIN_HASH = 1
 EXIT_BLOCK_HASH = 2
 EXIT_STATE_ROOT = 3
 EXIT_FACADE = 4
+EXIT_MANIFEST = 5
 
 
 class _BlockHashMismatch(Exception):
@@ -38,11 +40,26 @@ def replay(
     journal_path: Path | str,
     rpc_url: str,
     *,
-    manifest_path: Path | str | None = None,
+    manifest_path: Path | str,
     rpc: RpcClient | None = None,
+    deploy_private_key: bytes | None = None,
 ) -> int:
-    """Return exit code per §C.2."""
+    """Return exit code per §C.2.
+
+    The manifest is **required**: it holds the ``ReplayContext`` (base_address,
+    revision, chain_id, gas_limit, signer fingerprint) needed to reconstruct the
+    ``FacadeContext`` used by the live run. Without it we cannot reproduce the
+    same tx/block hashes. ``deploy_private_key`` defaults to the lab key; replay
+    verifies its fingerprint against the manifest and refuses on mismatch.
+    """
     journal_path = Path(journal_path)
+
+    try:
+        manifest = Manifest.read(manifest_path)
+    except (FileNotFoundError, ValueError, TypeError):
+        return EXIT_MANIFEST
+    if manifest.replay_context is None:
+        return EXIT_MANIFEST
 
     reader = JournalReader(journal_path)
     try:
@@ -50,28 +67,19 @@ def replay(
     except ChainHashMismatch:
         return EXIT_CHAIN_HASH
     except JournalSchemaError:
-        # Schema violation in input journal is a facade-level corruption from replay's POV.
         return EXIT_FACADE
-
-    manifest_body: dict | None = None
-    if manifest_path:
-        manifest_body = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
 
     own_rpc = rpc is None
     rpc = rpc or RpcClient(rpc_url)
 
     try:
-        # Reconstruct the facade context from the first record's start_address.
         first = next(iter(reader), None)
         if first is None:
             return EXIT_OK  # empty journal is trivially valid
 
-        first_start = int(first.replay_core.start_address, 16)
-        ctx = FacadeContext(
-            base_address=b"\x00" * 20,
-            revision=0,
-            address_cursor=first_start,
-        )
+        ctx = _context_from_manifest(manifest, deploy_private_key)
+        if ctx is None:
+            return EXIT_MANIFEST
 
         for record in reader:
             rc = record.replay_core
@@ -94,12 +102,37 @@ def replay(
             if block_hash != rc.block_hash:
                 return EXIT_BLOCK_HASH
 
-        if manifest_body and manifest_body.get("final_state_root") is not None:
+        if manifest.final_state_root is not None:
             latest = rpc.eth_get_block_by_number("latest")
-            if latest.get("stateRoot") != manifest_body["final_state_root"]:
+            if latest.get("stateRoot") != manifest.final_state_root:
                 return EXIT_STATE_ROOT
     finally:
         if own_rpc:
             rpc.close()
 
     return EXIT_OK
+
+
+def _context_from_manifest(
+    manifest: Manifest, deploy_private_key: bytes | None
+) -> FacadeContext | None:
+    """Reconstruct the exact FacadeContext the live run used, or None on mismatch."""
+    replay_ctx = manifest.replay_context
+    if replay_ctx is None:
+        return None
+    try:
+        base_addr = bytes.fromhex(replay_ctx.base_address.removeprefix("0x")).rjust(20, b"\x00")
+    except ValueError:
+        return None
+    key = deploy_private_key if deploy_private_key is not None else b"\x11" * 32
+    ctx = FacadeContext(
+        base_address=base_addr,
+        revision=replay_ctx.revision,
+        chain_id=replay_ctx.chain_id,
+        gas_limit=replay_ctx.gas_limit,
+        deploy_private_key=key,
+        address_stride=replay_ctx.address_stride,
+    )
+    if ctx.deploy_pubkey_sha256() != replay_ctx.deploy_pubkey_sha256:
+        return None
+    return ctx
