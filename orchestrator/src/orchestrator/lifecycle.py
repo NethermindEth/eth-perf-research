@@ -250,7 +250,11 @@ def build_replay_context(ctx: FacadeContext) -> ReplayContext:
 
 @dataclass
 class LifecycleDeps:
-    """Injectable dependencies so tests can stub RPC/sensor without patching."""
+    """Injectable dependencies so tests can stub RPC/sensor without patching.
+
+    Production callers typically leave these unset and let ``run()`` construct
+    default clients from ``rpc_url`` / ``jwt_path``; tests pass stubs directly.
+    """
 
     sensor: SensorClient
     rpc: RpcClient
@@ -266,6 +270,8 @@ def run(
     env: EnvInfo,
     max_batches: int | None = None,
     deps: LifecycleDeps | None = None,
+    jwt_path: Path | str | None = None,
+    sensor_rpc_url: str | None = None,
 ) -> Path:
     """Main entry. Returns the path to the manifest written on shutdown."""
     state_dir = Path(state_dir)
@@ -280,8 +286,9 @@ def run(
     composition_hash = compute_composition_hash(target_sha, env, replay_context)
 
     own_deps = deps is None
-    sensor = deps.sensor if deps else SensorClient(rpc_url)
-    rpc = deps.rpc if deps else RpcClient(rpc_url)
+    sensor_url = sensor_rpc_url or rpc_url
+    sensor = deps.sensor if deps else SensorClient(sensor_url)
+    rpc = deps.rpc if deps else RpcClient(rpc_url, jwt_path=jwt_path)
     probe_exec = deps.probe_executor if deps else None
 
     head_block = _fetch_head_block(rpc)

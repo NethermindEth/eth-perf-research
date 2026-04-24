@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -58,13 +57,14 @@ class SensorClient:
     def __init__(
         self,
         rpc_url: str,
-        jwt_path: Path | str | None = None,
         *,
         client: httpx.Client | None = None,
     ) -> None:
         self._rpc_url = rpc_url
-        self._jwt_path = Path(jwt_path) if jwt_path is not None else None
-        self._client = client if client is not None else httpx.Client(timeout=10.0)
+        limits = httpx.Limits(max_keepalive_connections=2, keepalive_expiry=600.0)
+        self._client = (
+            client if client is not None else httpx.Client(timeout=10.0, limits=limits)
+        )
         self._owns_client = client is None
         self._request_id = 0
 
@@ -109,12 +109,12 @@ class SensorClient:
             "method": method,
             "params": params or [],
         }
-        headers: dict[str, str] = {"content-type": "application/json"}
-        if self._jwt_path is not None and self._jwt_path.exists():
-            headers["authorization"] = f"Bearer {self._jwt_path.read_text().strip()}"
+        headers = {"content-type": "application/json"}
         response = self._client.post(self._rpc_url, json=payload, headers=headers)
         response.raise_for_status()
         body = response.json()
         if "error" in body:
-            raise RuntimeError(f"rpc error for {method}: {body['error']}")
+            err = body["error"] or {}
+            code = err.get("code") if isinstance(err, dict) else None
+            raise RuntimeError(f"sensor rpc {method} failed: code={code}")
         return body["result"]

@@ -1,6 +1,7 @@
 """Typer CLI: `orchestrator [run|--replay PATH]`."""
 from __future__ import annotations
 
+import os
 import platform
 from pathlib import Path
 
@@ -23,6 +24,17 @@ def main(
         None, "--replay", help="Replay a journal; no controller, no sensor."
     ),
     rpc_url: str = typer.Option("http://localhost:8545", "--rpc-url"),
+    sensor_rpc_url: str | None = typer.Option(
+        None,
+        "--sensor-rpc-url",
+        help="Override the URL used for statecomp_get (defaults to --rpc-url).",
+    ),
+    jwt_path: Path | None = typer.Option(
+        None,
+        "--jwt-path",
+        envvar="JWT_PATH",
+        help="Path to the 64-hex JWT for engine-protected RPC ports.",
+    ),
     state_dir: Path = typer.Option(Path("./state"), "--state-dir"),
     target_yaml: Path = typer.Option(Path("./target.yaml"), "--target-yaml"),
     reference_f_path: Path | None = typer.Option(None, "--reference-f"),
@@ -68,6 +80,8 @@ def main(
         target=target,
         state_dir=state_dir,
         rpc_url=rpc_url,
+        sensor_rpc_url=sensor_rpc_url or os.environ.get("NODE_RPC"),
+        jwt_path=jwt_path,
         reference_f=ref_f,
         env=env,
         max_batches=max_batches,
