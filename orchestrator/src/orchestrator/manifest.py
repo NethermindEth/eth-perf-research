@@ -69,8 +69,10 @@ class Manifest:
     last_chain_hash_checkpoint: str = ""
     last_checkpoint_batch_id: int = -1
     final_state_root: str | None = None
-    manifest_signature: str | None = None
-    manifest_signer_pubkey: str | None = None
+    # Fields for Ed25519 manifest signing (design §13) will land when signing
+    # lands — removed pre-feature to avoid shipping a "signature: null" slot
+    # that could be mistaken for a valid unsigned manifest (review YAGNI /
+    # security M-MANIFEST-SIG-THEATRE).
     schema: int = MANIFEST_SCHEMA
 
     def to_dict(self) -> dict[str, Any]:

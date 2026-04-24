@@ -124,16 +124,13 @@ class RpcClient:
         *,
         client: httpx.Client | None = None,
         require_jwt_for_engine_port: bool = True,
-        allow_private: bool = True,
     ) -> None:
         parsed = urlparse(rpc_url)
         if parsed.scheme not in ("http", "https"):
             raise ValueError(f"rpc url must be http(s), got {rpc_url!r}")
-        if not allow_private:
-            _check_url_not_private(rpc_url)
-        else:
-            # Always refuse loopback/link-local/multicast even when private is OK.
-            _check_url_not_private(rpc_url)
+        # Always refuse loopback/link-local/multicast. Private (RFC 1918)
+        # remains allowed — see ``_check_url_not_private`` for the policy.
+        _check_url_not_private(rpc_url)
         self._rpc_url = rpc_url
         self._bearer: str | None = None
         if jwt_path is not None:

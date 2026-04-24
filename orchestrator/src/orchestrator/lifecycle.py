@@ -15,6 +15,7 @@ import logging
 import os
 import platform
 import signal
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -634,7 +635,7 @@ def _run_locked(
             PayloadStreamWriter(payload_path) as pw,
         ):
             completed = 0
-            while not stop.requested:
+            while not stop.is_set():
                 if max_batches is not None and completed >= max_batches:
                     break
                 batch_status, last_observation = _run_one_batch(
@@ -920,25 +921,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class _StopFlag:
-    """Small mutable flag that signal handlers flip and the loop observes."""
-
-    def __init__(self) -> None:
-        self.requested = False
-
-
 @contextlib.contextmanager
-def _signal_handlers() -> "Iterator[_StopFlag]":
-    """Install SIGINT/SIGTERM handlers that set the flag; restore prior handlers on exit.
+def _signal_handlers() -> "Iterator[threading.Event]":
+    """Install SIGINT/SIGTERM handlers that set a ``threading.Event``; restore on exit.
 
-    Previous version replaced the process-wide SIGINT handler and never restored it,
-    which made pytest's own Ctrl-C trap permanently vanish for any test that invoked
-    ``run()`` on the main thread (review H6).
+    Previous version replaced the process-wide SIGINT handler and never restored
+    it, which made pytest's own Ctrl-C trap permanently vanish for any test that
+    invoked ``run()`` on the main thread. Using ``threading.Event`` instead of a
+    custom flag class trims one abstraction (TRIZ simplifier #5): the loop checks
+    ``stop.is_set()`` just as cheaply.
     """
-    flag = _StopFlag()
+    flag = threading.Event()
 
     def _handle(*_: Any) -> None:
-        flag.requested = True
+        flag.set()
 
     prior: dict[int, Any] = {}
     signals = (signal.SIGINT, signal.SIGTERM)

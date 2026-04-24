@@ -470,7 +470,7 @@ def test_signal_handlers_restore_previous(tmp_path: Path) -> None:
     try:
         with _signal_handlers() as stop:
             # Inside the context, our flag is what handles signals.
-            assert not stop.requested
+            assert not stop.is_set()
             assert signal.getsignal(signal.SIGINT) is not sentinel
         # After the context exits, the previous handlers must be back in place.
         assert signal.getsignal(signal.SIGINT) is sentinel
