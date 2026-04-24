@@ -19,14 +19,13 @@ from .context import FacadeContext, SignedTransaction
 def _sign(tx_fields: dict, context: FacadeContext) -> bytes:
     """Sign an EIP-1559 tx via the cached LocalAccount on the context.
 
-    Reusing ``context.account`` avoids per-call key derivation; over a multi-day
-    run at ~100 txs/batch this is the dominant CPU cost. Review finding H8.
+    Reusing ``context.account`` avoids per-call key derivation; merging with a
+    pre-bound ``base_tx_fields()`` template replaces four ``setdefault`` probes
+    with a single C-level dict merge. Over a multi-day run at ~100 txs/batch
+    this is measurable (review H8 + P1 / TRIZ Prior Action).
     """
-    tx_fields.setdefault("chainId", context.chain_id)
-    tx_fields.setdefault("maxFeePerGas", 2_000_000_000)
-    tx_fields.setdefault("maxPriorityFeePerGas", 1_000_000_000)
-    tx_fields.setdefault("accessList", [])
-    signed = context.account.sign_transaction(tx_fields)
+    full = {**context.base_tx_fields(), **tx_fields}
+    signed = context.account.sign_transaction(full)
     return bytes(signed.raw_transaction)
 
 

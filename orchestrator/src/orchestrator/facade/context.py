@@ -112,3 +112,18 @@ class FacadeContext:
     def deploy_pubkey_sha256(self) -> str:
         """Stable fingerprint of the signer without leaking the private key."""
         return hashlib.sha256(self.deploy_private_key).hexdigest()
+
+    def base_tx_fields(self) -> dict[str, Any]:
+        """Pre-bound EIP-1559 tx fields shared by every signed tx in the run.
+
+        Returned dict is safe to mutate-by-copy in the caller (``{**base, **fields}``)
+        — avoids ~4 setdefault probes per tx × ~100 txs per batch × tens of thousands
+        of batches (TRIZ Prior Action / review P1).
+        """
+        return {
+            "type": 2,
+            "chainId": self.chain_id,
+            "maxFeePerGas": 2_000_000_000,
+            "maxPriorityFeePerGas": 1_000_000_000,
+            "accessList": [],
+        }
