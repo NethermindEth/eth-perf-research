@@ -7,8 +7,12 @@ always finishes cleanly to avoid partial journal writes.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import enum
+import errno
+import fcntl
 import logging
+import os
 import signal
 import uuid
 from dataclasses import dataclass
@@ -31,6 +35,7 @@ from .controller import (
 )
 from .facade import FacadeContext, dispatch
 from .journal import (
+    PENDING_FILENAME,
     JournalReader,
     JournalWriter,
     Observability,
@@ -60,6 +65,7 @@ from .target import TargetConfig
 JOURNAL_FILENAME = "orchestrator.journal.jsonl"
 PAYLOAD_FILENAME = "payloads.rlp"
 MANIFEST_FILENAME = "run-manifest.json"
+RUN_LOCK_FILENAME = "orchestrator.lock"
 
 
 class StartupMode(enum.Enum):
@@ -69,6 +75,39 @@ class StartupMode(enum.Enum):
 
 class ResumeRefused(Exception):
     """Pre-flight verification failed; operator must archive/rename the journal."""
+
+
+class RunAlreadyActive(Exception):
+    """Another orchestrator instance already holds the state-dir lock."""
+
+
+@contextlib.contextmanager
+def _state_dir_lock(state_dir: Path) -> Iterator[None]:
+    """Exclusive advisory lock on ``state_dir/orchestrator.lock``.
+
+    Prevents two orchestrator processes from racing on the same state dir — which
+    would let one commit a tx set that the other never journals (review C-NO-LOCK).
+    Uses ``fcntl.flock`` with ``LOCK_NB`` so we fail fast rather than hang.
+    """
+    lock_path = state_dir / RUN_LOCK_FILENAME
+    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EWOULDBLOCK, errno.EACCES):
+                raise RunAlreadyActive(
+                    f"another orchestrator holds {lock_path}; refuse to start"
+                ) from exc
+            raise
+        os.write(lock_fd, f"{os.getpid()}\n".encode())
+        os.fsync(lock_fd)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 @dataclass
@@ -84,6 +123,7 @@ def resolve_startup_mode(
     head_block: int | None,
     *,
     rpc: RpcClient | None = None,
+    facade_ctx: FacadeContext | None = None,
 ) -> StartupDecision:
     """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch.
 
@@ -92,15 +132,28 @@ def resolve_startup_mode(
 
     If a pending-batch sidecar is present (crash between commit and journal append),
     we reconcile with Nethermind head to synthesize the missing record and clear
-    the sidecar. Requires ``rpc`` to be non-None on that path.
+    the sidecar. Requires ``rpc`` to be non-None on that path; ``facade_ctx`` is
+    used to cross-check that the head block's tx set matches what the recorded
+    verb+deadline would have produced (review C-RECONCILE-TRUST).
     """
     journal = state_dir / JOURNAL_FILENAME
     pending = read_pending(state_dir)
+    journal_empty = not journal.exists() or journal.stat().st_size == 0
 
-    if not journal.exists() or journal.stat().st_size == 0:
+    if journal_empty:
+        # An empty / missing journal while the chain already advanced = operator
+        # intervention territory (review C-EMPTY-JOURNAL). Fresh-start would commit
+        # block N+1 against a stale parent.
+        if head_block and head_block > 0:
+            raise ResumeRefused(
+                f"journal empty but Nethermind head is {head_block}; archive "
+                f"state/ and restart fresh, or restore a backup"
+            )
         if pending is not None:
-            # Fresh start with leftover pending = aborted before first commit. Safe to drop.
-            clear_pending(state_dir)
+            raise ResumeRefused(
+                "journal empty but pending sidecar present — state ambiguous; "
+                f"archive {state_dir / PENDING_FILENAME} before restart"
+            )
         return StartupDecision(StartupMode.FRESH, None, "no journal at state dir")
 
     manifest_path = state_dir / MANIFEST_FILENAME
@@ -139,6 +192,7 @@ def resolve_startup_mode(
             pending=pending,
             head_block=head_block,
             rpc=rpc,
+            facade_ctx=facade_ctx,
         )
     if head_block not in (tail.replay_core.block_number, tail.replay_core.block_number + 1):
         raise ResumeRefused(
@@ -156,14 +210,16 @@ def _reconcile_pending(
     pending: PendingBatch,
     head_block: int,
     rpc: RpcClient | None,
+    facade_ctx: FacadeContext | None = None,
 ) -> Record:
     """Resolve an orphan pending-batch sidecar.
 
     Two legal shapes:
     - ``head == tail.block_number``: the commit never fired. Drop the sidecar.
     - ``head == tail.block_number + 1``: the commit happened but the journal append
-      did not. Fetch the real block, synthesize a record with ``status="aborted"``
-      (sensor state was lost), append it, then drop the sidecar.
+      did not. Fetch the real block, cross-check its tx set against what the pending
+      verb+deadline would dispatch (review C-RECONCILE-TRUST), synthesize a record
+      with ``status="reconciled_unobserved"``, append it, then drop the sidecar.
     Anything else: refuse — the state on disk is ambiguous.
     """
     # Pending is always for the batch immediately after the journal tail.
@@ -180,10 +236,16 @@ def _reconcile_pending(
     if head_block == tail.replay_core.block_number + 1:
         if rpc is None:
             raise ResumeRefused("reconcile needs RPC but none supplied")
-        block = rpc.eth_get_block_by_number(head_block, full=False)
+        block = rpc.eth_get_block_by_number(head_block, full=True)
         block_hash = block.get("hash")
         if not isinstance(block_hash, str):
             raise ResumeRefused(f"RPC returned no hash for head block {head_block}")
+        # Cross-check the head block's tx count against what the pending verb+
+        # deadline_bytes would have dispatched. Catches a misbehaving or compromised
+        # Nethermind that auto-mined an empty block (or committed a different tx
+        # set) between the commit call and our resume (review C-RECONCILE-TRUST).
+        if facade_ctx is not None:
+            _verify_reconciled_tx_set(facade_ctx, pending, block)
         journal_path = state_dir / JOURNAL_FILENAME
         with JournalWriter(journal_path) as writer:
             # Carry the tail's F/σ/α forward so the next resume doesn't cold-start
@@ -226,6 +288,33 @@ def _reconcile_pending(
         f"pending sidecar + head {head_block} not reconcilable against tail block "
         f"{tail.replay_core.block_number}"
     )
+
+
+def _verify_reconciled_tx_set(
+    ctx: FacadeContext, pending: PendingBatch, block: dict
+) -> None:
+    """Refuse reconcile if the head block's tx set differs from what we would dispatch.
+
+    Replays the facade deterministically with ``pending.start_address`` as the
+    starting cursor; compares ``len(txs)`` to the block's transaction count. A
+    count mismatch means Nethermind is reporting a block we did not build — either
+    because it auto-mined empty or because a different tx set was committed.
+    Either way the journal would silently desync from the chain, breaking §C.1.
+    """
+    start_cursor = int(pending.start_address, 16)
+    probe_ctx = dataclasses.replace(ctx, address_cursor=start_cursor, salt_cursor=0)
+    txs = dispatch(pending.verb, pending.deadline_bytes, probe_ctx)
+    chain_txs = block.get("transactions") or []
+    if not isinstance(chain_txs, list):
+        raise ResumeRefused(
+            f"reconcile: RPC returned malformed `transactions` for head block"
+        )
+    if len(chain_txs) != len(txs):
+        raise ResumeRefused(
+            f"reconcile: head block has {len(chain_txs)} txs but pending "
+            f"verb={pending.verb!r} deadline_bytes={pending.deadline_bytes} "
+            f"would produce {len(txs)}; refuse to trust the RPC — archive state/"
+        )
 
 
 def _fetch_head_block(rpc: RpcClient) -> int | None:
@@ -310,9 +399,51 @@ def run(
     rpc = deps.rpc if deps else RpcClient(rpc_url, jwt_path=jwt_path)
     probe_exec = deps.probe_executor if deps else None
 
+    # Single-writer guarantee: refuse to start if another orchestrator already
+    # holds the state-dir lock (review C-NO-LOCK). The lock is released only
+    # after the manifest is written, so crash mid-run leaves the lock file but
+    # fcntl drops the advisory lock on process exit.
+    with _state_dir_lock(state_dir):
+        return _run_locked(
+            target=target,
+            state_dir=state_dir,
+            preflight_ctx=preflight_ctx,
+            replay_context=replay_context,
+            composition_hash=composition_hash,
+            target_sha=target_sha,
+            ref_f=ref_f,
+            env=env,
+            max_batches=max_batches,
+            sensor=sensor,
+            rpc=rpc,
+            probe_exec=probe_exec,
+            own_deps=own_deps,
+        )
+
+
+def _run_locked(
+    *,
+    target: TargetConfig,
+    state_dir: Path,
+    preflight_ctx: FacadeContext,
+    replay_context: ReplayContext,
+    composition_hash: str,
+    target_sha: str,
+    ref_f: ReferenceF,
+    env: EnvInfo,
+    max_batches: int | None,
+    sensor: SensorClient,
+    rpc: RpcClient,
+    probe_exec: ProbeExecutor | None,
+    own_deps: bool,
+) -> Path:
     head_block = _fetch_head_block(rpc)
     decision = resolve_startup_mode(
-        state_dir, composition_hash, head_block, rpc=rpc
+        state_dir,
+        composition_hash,
+        head_block,
+        rpc=rpc,
+        facade_ctx=preflight_ctx,
     )
 
     ctx = preflight_ctx
