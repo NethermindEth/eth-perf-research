@@ -14,6 +14,7 @@ import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import rlp
 
@@ -66,7 +67,7 @@ class ExecutionPayloadV3:
             self.blob_gas_used,
             self.excess_blob_gas,
         ]
-        return rlp.encode(body)
+        return cast(bytes, rlp.encode(body))
 
 
 _LEN_STRUCT = struct.Struct(">I")

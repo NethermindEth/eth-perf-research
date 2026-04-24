@@ -373,7 +373,9 @@ def _reconcile_pending(
     )
 
 
-def _verify_reconciled_tx_set(ctx: FacadeContext, pending: PendingBatch, block: dict) -> None:
+def _verify_reconciled_tx_set(
+    ctx: FacadeContext, pending: PendingBatch, block: dict[str, Any]
+) -> None:
     """Refuse reconcile if the head block's tx set differs from what we would dispatch.
 
     Replays the facade deterministically with ``pending.start_address`` as the
@@ -384,7 +386,7 @@ def _verify_reconciled_tx_set(ctx: FacadeContext, pending: PendingBatch, block: 
     while replay on another client would produce a different block_hash,
     violating §C.1 silently (round-3 C1 / skeptic F-5 / TRIZ H1).
     """
-    from eth_utils import keccak
+    from eth_utils.crypto import keccak
 
     start_cursor = int(pending.start_address, 16)
     probe_ctx = dataclasses.replace(ctx, address_cursor=start_cursor, salt_cursor=0)

@@ -62,10 +62,12 @@ class FacadeContext:
     @property
     def account(self) -> LocalAccount:
         """Cached LocalAccount for this context's deploy key."""
-        if self._account is None:
+        acct = self._account
+        if acct is None:
+            acct = Account.from_key(self.deploy_private_key)
             # Field is assigned via object.__setattr__ to work under frozen=True too.
-            object.__setattr__(self, "_account", Account.from_key(self.deploy_private_key))
-        return self._account  # type: ignore[return-value]
+            object.__setattr__(self, "_account", acct)
+        return acct
 
     def __post_init__(self) -> None:
         if (

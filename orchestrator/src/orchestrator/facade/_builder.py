@@ -13,11 +13,12 @@ forward progress.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from .context import FacadeContext, SignedTransaction
 
 
-def _sign(tx_fields: dict, context: FacadeContext) -> bytes:
+def _sign(tx_fields: dict[str, Any], context: FacadeContext) -> bytes:
     """Sign an EIP-1559 tx via the cached LocalAccount on the context.
 
     Reusing ``context.account`` avoids per-call key derivation; merging with a
@@ -33,7 +34,7 @@ def _sign(tx_fields: dict, context: FacadeContext) -> bytes:
 def pack_until_deadline(
     deadline_bytes: int,
     context: FacadeContext,
-    build_one: Callable[[int, FacadeContext], tuple[dict, dict]],
+    build_one: Callable[[int, FacadeContext], tuple[dict[str, Any], dict[str, Any]]],
     kind: str,
 ) -> list[SignedTransaction]:
     """Generic build-and-pack loop.

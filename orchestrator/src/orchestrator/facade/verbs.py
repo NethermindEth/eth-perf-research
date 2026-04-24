@@ -211,7 +211,7 @@ def build_adapter(spec: VerbSpec) -> Callable[[int, FacadeContext], list[SignedT
     """Factory: return the standard adapter closure for a verb spec."""
 
     def adapter(deadline_bytes: int, context: FacadeContext) -> list[SignedTransaction]:
-        def build_one(index: int, ctx: FacadeContext) -> tuple[dict, dict]:
+        def build_one(index: int, ctx: FacadeContext) -> tuple[dict[str, Any], dict[str, Any]]:
             to = spec.make_to(ctx, index)
             data = spec.make_data(ctx, index)
             signable = {

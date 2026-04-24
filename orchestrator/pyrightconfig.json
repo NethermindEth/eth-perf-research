@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+  "include": ["src", "tests"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "standard",
+
+  "reportMissingTypeStubs": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownLambdaType": "none",
+  "reportMissingParameterType": "none",
+
+  "reportUnusedCallResult": "none",
+  "reportCallInDefaultInitializer": "none",
+  "reportUnusedParameter": "none",
+  "reportUnannotatedClassAttribute": "none",
+  "reportImplicitStringConcatenation": "none",
+  "reportAny": "none",
+  "reportExplicitAny": "none",
+
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "reportArgumentType": "none",
+      "reportPrivateUsage": "none"
+    }
+  ]
+}

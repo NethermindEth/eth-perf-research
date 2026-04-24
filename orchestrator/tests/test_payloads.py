@@ -52,7 +52,12 @@ def test_payload_stream_round_trip(tmp_path: Path) -> None:
 def test_payload_stream_fsync_per_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     real_fsync = os.fsync
-    monkeypatch.setattr(os, "fsync", lambda fd: calls.append(fd) or real_fsync(fd))
+
+    def fake_fsync(fd: int) -> None:
+        calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fake_fsync)
     stream = tmp_path / "payloads.rlp"
     with PayloadStreamWriter(stream) as w:
         for i in range(4):

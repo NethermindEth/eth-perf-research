@@ -40,6 +40,14 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 
+# Tests pass structurally-compatible stubs (e.g. `_StubRpc` where `RpcClient` is expected)
+# to exercise behaviour without spinning up real clients. The stubs are deliberately
+# duck-typed — nominal arg-type checking in tests would force a Protocol layer that
+# buys nothing for the test suite. Mirrors the `pyrightconfig.json` tests/ override.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disable_error_code = ["arg-type"]
+
 [tool.bandit]
 # B101 assert_used: pytest test asserts are expected; `# noqa` for any intentional
 # runtime assert in non-test code.

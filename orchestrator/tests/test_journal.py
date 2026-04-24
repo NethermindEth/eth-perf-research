@@ -50,7 +50,7 @@ def _make_record(batch_id: int, *, snapshot: object = _MISSING, status: str = "o
             alpha_current=0.087,
             innovation_ratio=0.024,
             residual_norm=124300.0,
-            statecomp_snapshot=snap,  # type: ignore[arg-type]
+            statecomp_snapshot=snap,
         ),
     )
 
@@ -109,7 +109,12 @@ def test_observability_excluded_from_chain_hash(tmp_path: Path) -> None:
 def test_fsync_called_per_append(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     real_fsync = os.fsync
-    monkeypatch.setattr(os, "fsync", lambda fd: calls.append(fd) or real_fsync(fd))
+
+    def fake_fsync(fd: int) -> None:
+        calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fake_fsync)
     journal = tmp_path / "j.jsonl"
     with JournalWriter(journal) as w:
         for i in range(5):
