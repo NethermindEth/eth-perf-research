@@ -318,6 +318,51 @@ def test_state_dir_lock_refuses_second_holder(tmp_path: Path) -> None:
                 pass  # unreachable
 
 
+def test_reconcile_synthesized_record_uses_new_session_id(tmp_path: Path) -> None:
+    """Skeptic F-3: synthesized record must use the NEW session's id, not the crashed one."""
+    env = _env()
+    target = _target()
+    comp = compute_composition_hash(target.source_sha256, env)
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    # Prior session_id = 5; synthesized reconcile record should be stamped with 6.
+    prior_tail = _record(batch_id=0, block_number=100)
+    object.__setattr__(prior_tail, "session_id", 5)
+    with JournalWriter(journal) as w:
+        w.append(prior_tail)
+    write_pending(
+        tmp_path,
+        PendingBatch(
+            session_id=5,  # pending belongs to the crashed session
+            resumed_from_batch=None,
+            batch_id=1,
+            verb="eoatx",
+            deadline_bytes=1000,
+            start_address="0x" + (1).to_bytes(20, "big").hex(),
+            end_address="0x" + (2).to_bytes(20, "big").hex(),
+            ts_iso="2026-04-24T00:01:00Z",
+            pre_block_number=100,
+            composition_hash=comp,
+        ),
+    )
+
+    class _Rpc:
+        def eth_get_block_by_number(self, number, full=False):
+            return {"hash": "0x" + "cc" * 32, "transactions": []}
+
+        def close(self) -> None: ...
+
+    # Force resume_session_id=6 (next session).
+    resolve_startup_mode(
+        tmp_path,
+        composition_hash=comp,
+        head_block=101,
+        rpc=_Rpc(),
+        resume_session_id=6,
+    )
+    records = list(JournalReader(journal))
+    assert records[1].session_id == 6, "reconciled record must carry the new session_id"
+
+
 def test_reconcile_pending_synthesizes_record_when_head_advanced(tmp_path: Path) -> None:
     """C3: crash between commit and journal append — replay missing record from pending."""
     env = _env()
@@ -505,7 +550,31 @@ def test_run_with_max_batches_writes_manifest(tmp_path: Path, monkeypatch: pytes
 
         def close(self) -> None: ...
 
-    deps = LifecycleDeps(sensor=_StubSensor(), rpc=_StubRpc(), probe_executor=None)
+    # Round-3 C4 wires a default probe executor on FRESH runs; inject a stub
+    # that produces REFERENCE_F-matching numbers so the §B.2 sanity gate passes
+    # under the synthetic sensor.
+    from orchestrator.reference_f import default_reference_f_path, load_reference_f
+
+    ref_f = load_reference_f(default_reference_f_path())
+
+    def _stub_probe(verb: str, tx_count: int):
+        from orchestrator.sensor import StateObservation
+
+        ref = ref_f.per_scenario(verb)
+        pre = StateObservation(block_number=0, account_bytes=0, storage_bytes=0, code_bytes=0)
+        post = StateObservation(
+            block_number=1,
+            account_bytes=int(ref["accounts"] * tx_count),
+            storage_bytes=int(ref["storage"] * tx_count),
+            code_bytes=int(ref["code"] * tx_count),
+        )
+        return pre, post
+
+    deps = LifecycleDeps(
+        sensor=_StubSensor(),
+        rpc=_StubRpc(),
+        probe_executor=_stub_probe,
+    )
     manifest_path = run(
         target=target,
         state_dir=tmp_path,

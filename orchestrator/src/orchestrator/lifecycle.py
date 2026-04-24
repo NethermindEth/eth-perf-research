@@ -152,6 +152,7 @@ def resolve_startup_mode(
     rpc: RpcClient | None = None,
     facade_ctx: FacadeContext | None = None,
     replay_context: ReplayContext | None = None,
+    resume_session_id: int | None = None,
 ) -> StartupDecision:
     """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch.
 
@@ -251,6 +252,7 @@ def resolve_startup_mode(
             head_block=head_block,
             rpc=rpc,
             facade_ctx=facade_ctx,
+            resume_session_id=resume_session_id,
         )
     if head_block not in (tail.replay_core.block_number, tail.replay_core.block_number + 1):
         raise ResumeRefused(
@@ -269,6 +271,7 @@ def _reconcile_pending(
     head_block: int,
     rpc: RpcClient | None,
     facade_ctx: FacadeContext | None = None,
+    resume_session_id: int | None = None,
 ) -> Record:
     """Resolve an orphan pending-batch sidecar.
 
@@ -312,8 +315,15 @@ def _reconcile_pending(
             # authoritative. Status uses the new `reconciled_unobserved` value so
             # downstream tooling can filter reconciled records without conflating
             # them with explicit `aborted` shutdowns (spec §8 reserved for that).
+            # Stamp with the *new* session's id so the record has a matching
+            # Session entry in the manifest once shutdown runs. Falling back to
+            # pending.session_id preserves legacy behavior when the caller
+            # didn't compute a resume_session_id (should only happen in tests).
+            synthesized_session_id = (
+                resume_session_id if resume_session_id is not None else pending.session_id
+            )
             synthesized = Record(
-                session_id=pending.session_id,
+                session_id=synthesized_session_id,
                 resumed_from_batch=pending.resumed_from_batch,
                 ts_iso=pending.ts_iso,
                 batch_id=pending.batch_id,
@@ -384,6 +394,43 @@ def _verify_reconciled_tx_set(
                 f"chain reports {chain_hash!r}; either Nethermind is misbehaving "
                 f"or state_dir has drifted. Archive state/ before restart."
             )
+
+
+def make_default_probe_executor(
+    *,
+    rpc: RpcClient,
+    sensor: SensorClient,
+    facade_ctx: FacadeContext,
+    reference_f: ReferenceF,
+) -> ProbeExecutor:
+    """Build a ProbeExecutor wired to the live facade + rpc + sensor stack.
+
+    Used by ``_run_locked`` when no explicit executor is injected and the mode
+    is FRESH. Without this, the probe sequence (spec §B.2) was silently skipped
+    from the CLI path — fresh runs seeded F from REFERENCE_F and lost the §B.2
+    sanity gate (round-3 C4 / design-compliance HIGH #1).
+
+    NOTE: this executor does **not** currently write probe batches to the
+    journal. Spec §B.2 calls for "journal normally (batch_id 0..n-1)"; wiring
+    probe batches through the full pending/commit/journal pipeline is a
+    follow-up. The immediate value here is reinstating the probe + sanity gate.
+    """
+
+    def _execute(verb: str, tx_count: int) -> tuple[StateObservation, StateObservation]:
+        # Budget = tx_count × reference-F byte-rate (approx). Dispatch ignores
+        # exact sizing and packs until the adapter fills the budget.
+        ref = reference_f.per_scenario(verb)
+        deadline_bytes = max(
+            1,
+            int(abs(ref["accounts"]) + abs(ref["storage"]) + abs(ref["code"])) * tx_count,
+        )
+        pre = sensor.read()
+        dispatched = dispatch(verb, deadline_bytes, facade_ctx)
+        rpc.testing_commit_block_v1([tx.rlp for tx in dispatched])
+        post = sensor.read(expected_block=pre.block_number + 1)
+        return pre, post
+
+    return _execute
 
 
 def _fetch_head_block(rpc: RpcClient) -> int | None:
@@ -507,6 +554,10 @@ def _run_locked(
     own_deps: bool,
 ) -> Path:
     head_block = _fetch_head_block(rpc)
+    # Compute the new session id up-front so the reconcile path can stamp the
+    # synthesized record with it (skeptic F-3 fix). This also eliminates a
+    # duplicate manifest read that the old _extract_last_session_id did later.
+    resume_session_id = _extract_last_session_id(state_dir) + 1
     decision = resolve_startup_mode(
         state_dir,
         composition_hash,
@@ -514,11 +565,12 @@ def _run_locked(
         rpc=rpc,
         facade_ctx=preflight_ctx,
         replay_context=replay_context,
+        resume_session_id=resume_session_id,
     )
 
     ctx = preflight_ctx
     if decision.mode == StartupMode.RESUME and decision.last_record is not None:
-        session_id = _extract_last_session_id(state_dir) + 1
+        session_id = resume_session_id
         resumed_from_batch = decision.last_record.batch_id
         # Spec §C.3 step 6: reconstruct F/σ/α from the journal tail so controller
         # continuity survives resume. Without this every session is a cold start.
@@ -535,10 +587,18 @@ def _run_locked(
         resumed_from_batch = None
         state = init_state(ref_f, target.qp_scenarios)
         batch_id = 0
-        if probe_exec is not None:
-            results = run_probe(ref_f, target.qp_scenarios, probe_exec)
-            seed_state_from_probe(state, results)
-            batch_id = len(results)
+        # C4: on fresh start, always run the probe (spec §B.2 + §C.3 step 2).
+        # Tests inject a stub via LifecycleDeps; production wires the default
+        # one automatically from the live rpc+sensor+facade stack.
+        active_probe = probe_exec or make_default_probe_executor(
+            rpc=rpc,
+            sensor=sensor,
+            facade_ctx=ctx,
+            reference_f=ref_f,
+        )
+        results = run_probe(ref_f, target.qp_scenarios, active_probe)
+        seed_state_from_probe(state, results)
+        batch_id = len(results)
 
     controller = Controller(state)
 
