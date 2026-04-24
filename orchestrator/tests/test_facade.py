@@ -101,6 +101,36 @@ def test_calltx_touches_existing_accounts_only() -> None:
         assert tx.fields.get("call_touch_only") is True
 
 
+def test_refuses_lab_key_on_sepolia() -> None:
+    """H-1: lab key is only allowed on {1337, 31337}; all testnets/mainnets must refuse."""
+    with pytest.raises(ValueError, match="refusing to construct"):
+        FacadeContext(base_address=b"\x00" * 20, revision=0, chain_id=11155111)
+
+
+def test_refuses_lab_key_on_holesky() -> None:
+    with pytest.raises(ValueError, match="refusing to construct"):
+        FacadeContext(base_address=b"\x00" * 20, revision=0, chain_id=17000)
+
+
+def test_refuses_lab_key_on_mainnet() -> None:
+    with pytest.raises(ValueError, match="refusing to construct"):
+        FacadeContext(base_address=b"\x00" * 20, revision=0, chain_id=1)
+
+
+def test_accepts_lab_key_on_allowed_chain_ids() -> None:
+    for chain_id in (1337, 31337):
+        ctx = FacadeContext(base_address=b"\x00" * 20, revision=0, chain_id=chain_id)
+        assert ctx.chain_id == chain_id
+
+
+def test_context_repr_does_not_leak_private_key() -> None:
+    """L-3: repr must not expose deploy_private_key."""
+    ctx = FacadeContext(base_address=b"\x00" * 20, revision=0)
+    r = repr(ctx)
+    assert "\\x11" not in r
+    assert ctx.deploy_private_key.hex() not in r
+
+
 def test_every_verb_returns_signed_tx() -> None:
     ctx = _ctx()
     for verb in EXPECTED_VERBS:

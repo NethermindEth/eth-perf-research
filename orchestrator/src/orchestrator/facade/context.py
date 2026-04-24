@@ -9,12 +9,12 @@ from eth_account import Account
 from eth_account.signers.local import LocalAccount
 
 
-# A deterministic, well-known key used by tests and by lab runs. If it's ever seen
-# alongside a production ``chain_id`` we refuse to construct the context — txs
-# signed with this key would be replayable on those networks by anyone who reads
-# the artifact.
+# A deterministic, well-known key used by tests and by lab runs. Because its bytes
+# are checked into this repository, it must only ever sign transactions on
+# lab/devnet chain ids. We enforce that with an *allowlist* (not a blocklist):
+# adding a new L2 testnet to Ethereum must not silently expose the lab key.
 _LAB_PRIVATE_KEY = b"\x11" * 32
-PROD_CHAIN_IDS = frozenset({1, 10, 137, 8453, 42161, 42170, 43114, 56, 250, 59144})
+LAB_ALLOWED_CHAIN_IDS = frozenset({1337, 31337})
 _ADDRESS_SPACE = 1 << 160
 
 
@@ -51,7 +51,8 @@ class FacadeContext:
     genesis_sha256: bytes = b""
     chain_id: int = 1337
     gas_limit: int = 30_000_000
-    deploy_private_key: bytes = _LAB_PRIVATE_KEY
+    # `repr=False` so `repr(ctx)` never leaks the private key into logs/tracebacks.
+    deploy_private_key: bytes = field(default=_LAB_PRIVATE_KEY, repr=False)
     address_stride: int = 1 << 40
     # Cached LocalAccount reused across every signing call — avoids re-derivation
     # on the hot tx-generation path. Populated lazily on first `account` access.
@@ -66,10 +67,14 @@ class FacadeContext:
         return self._account  # type: ignore[return-value]
 
     def __post_init__(self) -> None:
-        if self.deploy_private_key == _LAB_PRIVATE_KEY and self.chain_id in PROD_CHAIN_IDS:
+        if (
+            self.deploy_private_key == _LAB_PRIVATE_KEY
+            and self.chain_id not in LAB_ALLOWED_CHAIN_IDS
+        ):
             raise ValueError(
                 f"refusing to construct FacadeContext with the well-known lab key on "
-                f"chain_id={self.chain_id}; supply an explicit deploy_private_key"
+                f"chain_id={self.chain_id}; allowed only for "
+                f"{sorted(LAB_ALLOWED_CHAIN_IDS)}. Supply an explicit deploy_private_key."
             )
         if self.revision < 0 or self.address_stride <= 0:
             raise ValueError("revision must be >= 0 and address_stride > 0")
