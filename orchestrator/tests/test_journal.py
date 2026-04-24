@@ -237,6 +237,64 @@ def test_validate_record_dict_rejects_bad_status() -> None:
         validate_record_dict(bad)
 
 
+def test_reverse_seek_finds_last_chain_hash(tmp_path: Path) -> None:
+    """H7: reopening a writer on a big journal must not scan the whole file."""
+    from orchestrator.journal import _read_last_chain_hash
+
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        for i in range(20):
+            w.append(_make_record(i))
+        expected = w.prev_chain_hash
+
+    assert _read_last_chain_hash(journal) == expected
+
+
+def test_reverse_seek_tolerates_missing_trailing_newline(tmp_path: Path) -> None:
+    from orchestrator.journal import _read_last_chain_hash
+
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_make_record(0))
+        w.append(_make_record(1))
+        expected = w.prev_chain_hash
+    # Strip the trailing newline — simulates a writer that didn't flush a final \n.
+    raw = journal.read_bytes().rstrip(b"\n")
+    journal.write_bytes(raw)
+    assert _read_last_chain_hash(journal) == expected
+
+
+def test_verify_chain_from_checkpoint(tmp_path: Path) -> None:
+    """H7: verify_chain_from lets resume verify only the suffix past a checkpoint."""
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        for i in range(5):
+            w.append(_make_record(i))
+    reader = JournalReader(journal)
+    records = list(reader)
+    checkpoint = records[2]
+    # Should succeed: start verification from record 2's chain_hash, batch_id=3 onwards.
+    reader.verify_chain_from(checkpoint.replay_core.chain_hash, min_batch_id=3)
+
+
+def test_verify_chain_from_detects_tamper_in_suffix(tmp_path: Path) -> None:
+    journal = tmp_path / "j.jsonl"
+    with JournalWriter(journal) as w:
+        for i in range(5):
+            w.append(_make_record(i))
+    lines = journal.read_text().splitlines()
+    body = json.loads(lines[4])
+    body["replay_core"]["deadline_bytes"] = 12345
+    lines[4] = json.dumps(body, separators=(",", ":"))
+    journal.write_text("\n".join(lines) + "\n")
+    reader = JournalReader(journal)
+    records = list(reader)
+    with pytest.raises(ChainHashMismatch):
+        reader.verify_chain_from(
+            records[2].replay_core.chain_hash, min_batch_id=3
+        )
+
+
 def test_serialize_replay_core_excludes_chain_hash() -> None:
     rc = ReplayCore(
         verb="eoatx",

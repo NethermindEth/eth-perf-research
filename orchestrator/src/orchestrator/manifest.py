@@ -63,6 +63,10 @@ class Manifest:
     replay_context: ReplayContext | None = None
     sessions: list[Session] = field(default_factory=list)
     journal_sha256: str = ""
+    # H7: checkpoint for incremental chain verification on resume. Successive
+    # runs verify only the suffix past ``last_checkpoint_batch_id``.
+    last_chain_hash_checkpoint: str = ""
+    last_checkpoint_batch_id: int = -1
     final_state_root: str | None = None
     manifest_signature: str | None = None
     manifest_signer_pubkey: str | None = None

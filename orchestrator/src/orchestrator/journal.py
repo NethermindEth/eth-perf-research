@@ -136,15 +136,39 @@ class JournalWriter:
     def _load_last_chain_hash(self) -> str:
         if not self.path.exists() or self.path.stat().st_size == 0:
             return _CHAIN_HASH_GENESIS
-        last = None
-        with self.path.open("r", encoding="utf-8") as f:
-            for raw in f:
-                raw = raw.strip()
-                if raw:
-                    last = raw
-        if last is None:
-            return _CHAIN_HASH_GENESIS
-        return json.loads(last)["replay_core"]["chain_hash"]
+        return _read_last_chain_hash(self.path)
+
+
+def _read_last_chain_hash(path: Path) -> str:
+    """Reverse-seek the last ``\\n``-terminated record and extract its chain_hash.
+
+    Linear scan from EOF — constant time regardless of journal length. Tolerates a
+    missing trailing newline (still reads the final record). A partially-written
+    last line (incomplete JSON after last ``\\n``) propagates as JSONDecodeError;
+    callers on the resume path are expected to archive+restart in that case.
+    """
+    size = path.stat().st_size
+    chunk_size = 4096
+    buffer = bytearray()
+    with path.open("rb") as f:
+        pos = size
+        while pos > 0:
+            step = min(chunk_size, pos)
+            pos -= step
+            f.seek(pos)
+            chunk = f.read(step)
+            buffer[:0] = chunk
+            # Find a non-terminal newline (i.e. a boundary between records, not the EOF \n).
+            stripped = bytes(buffer).rstrip(b"\n")
+            nl = stripped.rfind(b"\n")
+            if nl != -1:
+                last_line = stripped[nl + 1 :]
+                return json.loads(last_line.decode("utf-8"))["replay_core"]["chain_hash"]
+    # Single record, no leading newlines.
+    stripped = bytes(buffer).strip()
+    if not stripped:
+        return _CHAIN_HASH_GENESIS
+    return json.loads(stripped.decode("utf-8"))["replay_core"]["chain_hash"]
 
 
 class JournalReader:
@@ -182,8 +206,19 @@ class JournalReader:
         return last
 
     def verify_chain(self) -> None:
-        prev = _CHAIN_HASH_GENESIS
+        self.verify_chain_from(_CHAIN_HASH_GENESIS, min_batch_id=0)
+
+    def verify_chain_from(self, prev_hash: str, min_batch_id: int) -> None:
+        """Verify only the suffix of the chain past ``min_batch_id``.
+
+        Callers that previously checkpointed a trusted (prev_hash, batch_id) pair
+        (e.g. manifest.last_chain_hash_checkpoint) pass them here so resume cost
+        stays O(tail_size) instead of O(journal_size) — review H7.
+        """
+        prev = prev_hash
         for record in self:
+            if record.batch_id < min_batch_id:
+                continue
             rc_bytes = serialize_replay_core(record.replay_core)
             expected = hashlib.sha256(prev.encode("ascii") + rc_bytes).hexdigest()
             if expected != record.replay_core.chain_hash:

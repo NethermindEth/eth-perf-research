@@ -104,6 +104,7 @@ def resolve_startup_mode(
         return StartupDecision(StartupMode.FRESH, None, "no journal at state dir")
 
     manifest_path = state_dir / MANIFEST_FILENAME
+    prior: Manifest | None = None
     if manifest_path.exists():
         prior = Manifest.read(manifest_path)
         if prior.composition_hash != composition_hash:
@@ -113,7 +114,14 @@ def resolve_startup_mode(
             )
 
     reader = JournalReader(journal)
-    reader.verify_chain()  # raises on tamper
+    # H7: if a prior manifest checkpoint exists, verify only the suffix past it.
+    if prior is not None and prior.last_chain_hash_checkpoint and prior.last_checkpoint_batch_id >= 0:
+        reader.verify_chain_from(
+            prev_hash=prior.last_chain_hash_checkpoint,
+            min_batch_id=prior.last_checkpoint_batch_id + 1,
+        )
+    else:
+        reader.verify_chain()
     tail = reader.tail()
     if tail is None:
         return StartupDecision(StartupMode.FRESH, None, "journal empty after verify")
@@ -554,6 +562,15 @@ def _build_manifest(
             _log.warning("final state_root fetch failed: %s", exc)
 
     journal_sha = compute_journal_sha256(journal_path) if journal_path.exists() else ""
+    # H7 checkpoint: if we got here the chain is known-good end-to-end; record the
+    # tail's chain_hash + batch_id so the next resume verifies only the suffix.
+    checkpoint_hash = ""
+    checkpoint_batch = -1
+    if journal_path.exists() and journal_path.stat().st_size > 0:
+        tail = JournalReader(journal_path).tail()
+        if tail is not None:
+            checkpoint_hash = tail.replay_core.chain_hash
+            checkpoint_batch = tail.batch_id
 
     return Manifest(
         run_id=str(uuid.uuid4()),
@@ -570,6 +587,9 @@ def _build_manifest(
         replay_context=replay_context,
         sessions=sessions,
         journal_sha256=journal_sha,
+        last_chain_hash_checkpoint=checkpoint_hash,
+        last_checkpoint_batch_id=checkpoint_batch,
+        final_state_root=final_state_root,
     )
 
 
