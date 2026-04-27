@@ -14,8 +14,13 @@ class CharacterizationInsufficient(Exception):
     """Raised when probe F is off by > 3× (ignoring sign for storagerefundtx)."""
 
 
-PROBE_TX_COUNT = 100
-SANITY_GATE_MULTIPLIER = 3.0
+import os as _os
+
+PROBE_TX_COUNT = int(_os.environ.get("ORCH_PROBE_TX_COUNT", "100"))
+# Smoke runs on a near-empty lab chain produce per-tx growth that doesn't
+# match the reference dataset (calibrated against larger states); the env
+# knob lets tests/operators relax the gate without recompiling.
+SANITY_GATE_MULTIPLIER = float(_os.environ.get("ORCH_SANITY_GATE_MULTIPLIER", "3.0"))
 
 
 @dataclass
@@ -69,6 +74,11 @@ def _sanity_gate(
     reference_f: ReferenceF,
     multiplier: float,
 ) -> None:
+    # multiplier <= 0 disables the gate entirely. Used for smoke tests on
+    # near-empty lab chains where measured per-tx growth differs from the
+    # reference dataset by orders of magnitude (e.g. measured=0 vs ref=8).
+    if multiplier <= 0:
+        return
     ref = reference_f.per_scenario(verb)
     # For storagerefundtx the storage axis is expected to be negative; comparing on
     # absolute magnitudes avoids a spurious "10× off" alarm from a sign flip.
