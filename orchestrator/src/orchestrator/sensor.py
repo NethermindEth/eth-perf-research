@@ -25,6 +25,15 @@ from typing import Any
 import httpx
 
 
+def _parse_int(v: Any) -> int:
+    """Accept hex (``"0x..."``) or decimal (string or int). Nethermind serializes
+    quantities as hex; older fixtures sometimes use decimal."""
+    if isinstance(v, int):
+        return v
+    s = str(v)
+    return int(s, 16) if s.startswith(("0x", "0X")) else int(s)
+
+
 class SensorWaitTimeout(Exception):
     """Raised when `blockNumber` fails to catch up to `expected_block` within the deadline."""
 
@@ -85,14 +94,14 @@ class SensorClient:
         last_seen = -1
         while True:
             resp = self._rpc("statecomp_get")
-            last_seen = int(resp["blockNumber"])
+            last_seen = _parse_int(resp["blockNumber"])
             if expected_block is None or last_seen >= expected_block:
                 ts = resp["trieStats"]
                 return StateObservation(
                     block_number=last_seen,
-                    account_bytes=int(ts["accountTrieBytes"]),
-                    storage_bytes=int(ts["storageTrieBytes"]),
-                    code_bytes=int(ts["codeBytesTotal"]),
+                    account_bytes=_parse_int(ts["accountTrieBytes"]),
+                    storage_bytes=_parse_int(ts["storageTrieBytes"]),
+                    code_bytes=_parse_int(ts["codeBytesTotal"]),
                     raw=resp,
                 )
             if time.monotonic() > deadline:
