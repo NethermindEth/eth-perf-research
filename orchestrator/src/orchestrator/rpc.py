@@ -153,9 +153,25 @@ class RpcClient:
         self.close()
 
     def testing_commit_block_v1(self, signed_txs_rlp: list[bytes]) -> str:
-        """Submit a batch of signed txs; returns the committed block's hash (hex)."""
+        """Submit a batch of signed txs; returns the committed block's hash (hex).
+
+        Marcin's endpoint signature is
+        ``testing_commitBlockV1(payloadAttributes, txRlps, extraData)``;
+        we synthesize minimal payload attributes (current wall-clock timestamp,
+        zeroed randao / fee recipient / parent beacon root, empty withdrawals)
+        and pass ``null`` extraData. Withdrawals are an empty list (Cancun+).
+        """
+        import time as _time
+
         hex_txs = ["0x" + raw.hex() for raw in signed_txs_rlp]
-        return self._call("testing_commitBlockV1", [hex_txs])
+        payload_attributes = {
+            "timestamp": hex(int(_time.time())),
+            "prevRandao": "0x" + "00" * 32,
+            "suggestedFeeRecipient": "0x" + "00" * 20,
+            "withdrawals": [],
+            "parentBeaconBlockRoot": "0x" + "00" * 32,
+        }
+        return self._call("testing_commitBlockV1", [payload_attributes, hex_txs, None])
 
     def eth_get_block_by_hash(self, block_hash: str, *, full: bool = True) -> dict[str, Any]:
         return self._call("eth_getBlockByHash", [block_hash, full])
