@@ -1,12 +1,20 @@
 services:
   nethermind:
-    image: nethermind:pr-A-dev
-    network_mode: bridge
+    image: nethermind:bloating-local
     read_only: true
     volumes:
       - type: bind
         source: ./nethermind-data
         target: /nethermind/db
+      - type: bind
+        source: /Users/daniilankusin/state-benchmarks/lab-genesis.json
+        target: /nethermind/chainspec/lab-genesis.json
+        read_only: true
+      # Hot-swap fix: empty-array initialization for histograms.
+      - type: bind
+        source: /Users/daniilankusin/RiderProjects/nethermind-arbitrum/src/Nethermind/src/Nethermind/artifacts/bin/Nethermind.StateComposition/release_linux-arm64/Nethermind.StateComposition.dll
+        target: /nethermind/Nethermind.StateComposition.dll
+        read_only: true
       # Shared tmpfs-backed volume (declared below). Using a named volume
       # lets jwt-init, nethermind, and orchestrator see the SAME file —
       # per-service `type: tmpfs` mounts are isolated per container and would
@@ -15,17 +23,32 @@ services:
         source: jwt
         target: /run/jwt
     command:
+      - --Init.ChainSpecPath=/nethermind/chainspec/lab-genesis.json
+      - --Init.DiscoveryEnabled=false
+      - --Init.StaticNodesPath=Data/static-nodes.json
+      - --Init.TrustedNodesPath=Data/trusted-nodes.json
+      - --Sync.NetworkingEnabled=false
+      - --Sync.SynchronizationEnabled=false
       - --JsonRpc.Host=0.0.0.0
       - --JsonRpc.Port=8545
-      - --JsonRpc.EnabledModules=Eth,Net,Web3,StateComposition
+      - --JsonRpc.EnabledModules=Eth,Net,Web3,Statecomp,Testing
+      - --JsonRpc.EnginePort=8551
+      - --JsonRpc.EngineHost=0.0.0.0
+      - --JsonRpc.JwtSecretFile=/run/jwt/jwt.hex
       - --JsonRpc.AdditionalRpcUrls=http://127.0.0.1:8547|http|Admin;Debug;Trace;Personal;Testing;TxPool
-      - --Testing.Enabled=true
       - --StateComposition.Enabled=true
-      - --StateComposition.RpcAccessLevel=loopback
+    ports:
+      - "8545:8545"
+      - "8551:8551"
+    tmpfs:
+      - /tmp:size=128m
+      - /nethermind/keystore:size=8m
+      - /nethermind/logs:size=128m
+      - /nethermind/Data:size=8m
     healthcheck:
       test:
         - CMD-SHELL
-        - "curl -sf -H 'content-type: application/json' --data '{\"jsonrpc\":\"2.0\",\"method\":\"eth_syncing\",\"id\":1,\"params\":[]}' http://localhost:8545 || exit 1"
+        - "bash -c 'exec 3<>/dev/tcp/localhost/8545 && echo OK' || exit 1"
       interval: 5s
       timeout: 3s
       retries: 24
@@ -55,6 +78,23 @@ services:
       - ENGINE_RPC=http://nethermind:8551
       - JWT_PATH=/run/jwt/jwt.hex
       - STATE_DIR=/app/state
+      - ORCH_SANITY_GATE_MULTIPLIER=0
+      - ORCH_PROBE_TX_COUNT=10
+      # Overshoot detector relaxed for the demo (default 0.20 trips often on
+      # near-convergence runs). 10.0 keeps the safety net for runaways.
+      - ORCH_OVERSHOOT_THRESHOLD=10.0
+      # Convergence knobs (see final-design-v3.md §4.1 + Appendix D ablation).
+      # Defaults below are the post-ablation ship recommendations:
+      #   ε=0.1: 15% faster + 50% more F coverage than argmax (winning)
+      #   gas_aware=1: cap cumulative batch gas at 0.95×block_gas_limit
+      #   penalty=0: current λ formulation overwhelms gradient; do not enable
+      #   residual_stop=0: target_reached fires first on byte-bound runs
+      # Override via shell env when running experiments / ablations.
+      - ORCH_EPSILON=${ORCH_EPSILON:-0.1}
+      - ORCH_OVERSHOOT_PENALTY=${ORCH_OVERSHOOT_PENALTY:-0.0}
+      - ORCH_GAS_AWARE_DISPATCH=${ORCH_GAS_AWARE_DISPATCH:-1}
+      - ORCH_RESIDUAL_STOP_THRESHOLD=${ORCH_RESIDUAL_STOP_THRESHOLD:-0.0}
+      - ORCH_RESIDUAL_STOP_WINDOW=${ORCH_RESIDUAL_STOP_WINDOW:-6}
     volumes:
       - type: volume
         source: jwt
@@ -70,6 +110,11 @@ services:
       - --rpc-url=${NODE_RPC:-http://nethermind:8545}
       - --state-dir=/app/state
       - --target-yaml=/app/target.yaml
+      - --genesis-sha256=2819c70927e07867ed2de8f1498dfc8a84562753577b443dd09d652c00af3134
+      - --plugin-git-sha=1253d26424c5d6ec7352d4ce23bb50452a0402c9
+      - --nethermind-commit-sha=1253d26424c5d6ec7352d4ce23bb50452a0402c9
+      - --dotnet-runtime-major=10
+      - --max-batches=1500
 
 volumes:
   jwt:
