@@ -1,7 +1,7 @@
 description: Drive a bloating-orchestrator smoke run end-to-end
 tags: bloating, orchestrator, smoke
 params:
-  - COMPOSE_DIR: "/Users/daniilankusin/eth-perf-research/orchestrator"
+  - COMPOSE_DIR: "${ORCHESTRATOR_HOST_DIR}"
   - MIN_HEAD_BLOCK: "5"
 steps:
   - name: clean state

@@ -1,19 +1,14 @@
 services:
   nethermind:
-    image: nethermind:bloating-local
+    image: nethermindeth/nethermind:bloating-test-2026-04-28
     read_only: true
     volumes:
       - type: bind
         source: ./nethermind-data
         target: /nethermind/db
       - type: bind
-        source: /Users/daniilankusin/state-benchmarks/lab-genesis.json
+        source: ${LAB_GENESIS_PATH:-./lab-genesis.json}
         target: /nethermind/chainspec/lab-genesis.json
-        read_only: true
-      # Hot-swap fix: empty-array initialization for histograms.
-      - type: bind
-        source: /Users/daniilankusin/RiderProjects/nethermind-arbitrum/src/Nethermind/src/Nethermind/artifacts/bin/Nethermind.StateComposition/release_linux-arm64/Nethermind.StateComposition.dll
-        target: /nethermind/Nethermind.StateComposition.dll
         read_only: true
       # Shared tmpfs-backed volume (declared below). Using a named volume
       # lets jwt-init, nethermind, and orchestrator see the SAME file —
