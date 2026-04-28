@@ -14,6 +14,7 @@ sawtooth oscillation run forever.
 
 from __future__ import annotations
 
+import hashlib
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -31,11 +32,34 @@ if TYPE_CHECKING:
     from .journal import Observability
 
 
-OVERSHOOT_THRESHOLD = 0.20
-OVERSHOOT_WINDOW = 6
-OVERSHOOT_WINDOW_TRIPS = 4
-OVERSHOOT_GRACE_BATCHES = 5
+import os as _os
+
+# Overshoot detector knobs — env-tunable so demo / smoke runs can relax the
+# safety net without recompiling. Production defaults are unchanged.
+OVERSHOOT_THRESHOLD = float(_os.environ.get("ORCH_OVERSHOOT_THRESHOLD", "0.20"))
+OVERSHOOT_WINDOW = int(_os.environ.get("ORCH_OVERSHOOT_WINDOW", "6"))
+OVERSHOOT_WINDOW_TRIPS = int(_os.environ.get("ORCH_OVERSHOOT_WINDOW_TRIPS", "4"))
+OVERSHOOT_GRACE_BATCHES = int(_os.environ.get("ORCH_OVERSHOOT_GRACE_BATCHES", "5"))
 _RESIDUAL_NORM_FLOOR = 1024.0
+
+# Verb-selection mixture. ``ORCH_EPSILON`` (default ``0.0``) is the probability
+# that the next verb is *sampled* from the simplex weights instead of taken
+# greedily as the argmax. ``0`` reproduces the original argmax mode; ``1``
+# reproduces full proportional sampling; ``0.1`` gives mostly-greedy with
+# occasional exploration ("ε-greedy" with sampling-from-projection rather
+# than uniform). The RNG is seeded per-batch from (composition_hash, batch_id)
+# so forward runs of the same target reproduce the same pick sequence.
+EPSILON = float(_os.environ.get("ORCH_EPSILON", "0.0"))
+if not 0.0 <= EPSILON <= 1.0:
+    raise ValueError(f"ORCH_EPSILON must be in [0, 1], got {EPSILON}")
+
+# Overshoot penalty (λ) for the QP gradient. When > 0, the projection's
+# gradient is augmented with ``λ · 2·F · max(0, F·x·N - residual)`` so mixes
+# whose predicted single-step delta would push any axis past its target are
+# pulled back. Default 0 (disabled, identical to today's projector).
+OVERSHOOT_PENALTY = float(_os.environ.get("ORCH_OVERSHOOT_PENALTY", "0.0"))
+if OVERSHOOT_PENALTY < 0:
+    raise ValueError(f"ORCH_OVERSHOOT_PENALTY must be ≥ 0, got {OVERSHOOT_PENALTY}")
 
 
 class ControllerInstability(Exception):
@@ -58,6 +82,10 @@ class ControllerState:
     overshoot_window: deque[bool] = field(default_factory=lambda: deque(maxlen=OVERSHOOT_WINDOW))
     last_observation: StateObservation | None = None
     reference_f_version: str = ""
+    # Latest residual_norm cached after each apply_observation so the
+    # lifecycle's soft-stop (ORCH_RESIDUAL_STOP_THRESHOLD) can read it
+    # without recomputing. Inf until the first observation.
+    last_residual_norm: float = float("inf")
 
     def alpha_mean(self) -> float:
         """Scalar summary for the journal's legacy ``alpha_current`` field."""
@@ -124,6 +152,43 @@ def rehydrate_state(
     return state
 
 
+def _select_verb_index(
+    x_proj: np.ndarray,
+    batch_id: int | None,
+    composition_hash: str | None,
+) -> tuple[int, bool]:
+    """Pick a verb index from the simplex projection.
+
+    Returns ``(index, was_sampled)``. With probability ``1 - EPSILON`` we
+    take ``argmax(x_proj)`` (greedy exploit). With probability ``EPSILON``
+    we sample from ``x_proj`` (weighted explore). The RNG is seeded from
+    ``(composition_hash, batch_id)`` so two forward runs of the same target
+    reproduce the same picks. Falls back to pure argmax if either seed
+    input is missing, the projection produced a degenerate distribution,
+    or ``EPSILON`` is exactly 0.
+
+    The ``was_sampled`` bit is used by the caller to choose between
+    weight-scaled and full-budget deadline_bytes (decoupling the sampling
+    branch from the size formula keeps proportional mode from
+    double-counting weight).
+    """
+    if EPSILON <= 0.0 or batch_id is None or composition_hash is None:
+        return int(np.argmax(x_proj)), False
+    total = float(x_proj.sum())
+    if total <= 0.0 or not np.isfinite(total):
+        return int(np.argmax(x_proj)), False
+    seed = int.from_bytes(
+        hashlib.sha256(f"{composition_hash}:{batch_id}".encode()).digest()[:8],
+        "big",
+    )
+    rng = np.random.default_rng(seed)
+    # Two-stage flip: first decide explore vs exploit, then act.
+    if rng.random() >= EPSILON:
+        return int(np.argmax(x_proj)), False
+    p = x_proj / total  # guard against numerical drift after the projection
+    return int(rng.choice(len(p), p=p)), True
+
+
 class Controller:
     def __init__(self, state: ControllerState) -> None:
         self.state = state
@@ -132,22 +197,57 @@ class Controller:
     def F(self) -> dict[str, dict[str, float]]:
         return self.state.F
 
-    def pick_next_batch(self, observation: StateObservation, target: TargetConfig) -> BatchPlan:
-        """Project the desired scenario mix onto the simplex and pick the top verb."""
+    def pick_next_batch(
+        self,
+        observation: StateObservation,
+        target: TargetConfig,
+        *,
+        batch_id: int | None = None,
+        composition_hash: str | None = None,
+    ) -> BatchPlan:
+        """Project the desired scenario mix onto the simplex and pick a verb.
+
+        Greedy by default (argmax of the projected mix). When ``EPSILON > 0``
+        a fraction ``ε`` of batches are sampled from the projected mix
+        instead — keeps F estimates fresh across the registry. The RNG is
+        seeded from ``(composition_hash, batch_id)`` for reproducibility.
+
+        When ``OVERSHOOT_PENALTY > 0``, the QP gradient is augmented with a
+        penalty that discourages mixes whose predicted single-step delta
+        would push any axis past its remaining budget. Default 0 = identical
+        gradient as today's projector.
+
+        Sampled batches use the *full* ``total_batch_bytes`` budget; greedy
+        batches scale by mix weight. This decoupling avoids double-counting
+        the weight under proportional sampling, which was the root cause of
+        the +6 pp accounts overshoot in the prior 1500-batch run.
+        """
         verbs = list(target.qp_scenarios)
         residual = self._residual(observation, target)  # shape (3,)
         f_matrix = self._f_matrix(verbs)  # shape (3, n)
         x = np.full(len(verbs), 1.0 / len(verbs))  # warm start
+        # Squared-residual gradient (the term the original projector used).
         grad = 2.0 * f_matrix.T @ (f_matrix @ x - residual)
-        # Normalize gradient so eta has a consistent effect regardless of residual magnitude.
+        # Optional overshoot penalty: predict per-axis state delta from a
+        # full-budget batch executed at mix x and penalize anything that
+        # would push us past the remaining residual on any axis.
+        if OVERSHOOT_PENALTY > 0.0:
+            # Per-tx average bytes, scaled to a full batch.
+            n_full = max(1.0, float(target.total_batch_bytes))
+            predicted_delta = (f_matrix @ x) * n_full
+            overshoot = np.maximum(0.0, predicted_delta - residual)
+            grad = grad + OVERSHOOT_PENALTY * 2.0 * f_matrix.T @ overshoot * n_full
         grad_norm = float(np.linalg.norm(grad))
         if grad_norm > 1e-12:
             grad = grad / grad_norm
         x_proj = project_simplex(x - target.projection_eta * grad)
-        top_index = int(np.argmax(x_proj))
+        top_index, was_sampled = _select_verb_index(x_proj, batch_id, composition_hash)
         top_verb = verbs[top_index]
         weight = float(x_proj[top_index])
-        deadline = max(1, int(target.total_batch_bytes * weight))
+        if was_sampled:
+            deadline = max(1, int(target.total_batch_bytes))
+        else:
+            deadline = max(1, int(target.total_batch_bytes * weight))
         mix = {v: float(w) for v, w in zip(verbs, x_proj, strict=False)}
         return BatchPlan(verb=top_verb, deadline_bytes=deadline, mix=mix)
 
@@ -195,6 +295,7 @@ class Controller:
         self._check_overshoot(residual_norm, commanded_vec)
         self.state.batch_id += 1
         self.state.last_observation = post
+        self.state.last_residual_norm = residual_norm
         return {
             "observed_flat_bytes": int(sum(observed.values())),
             "coeffs_before": {verb: coeffs_before},
