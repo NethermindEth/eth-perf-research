@@ -27,6 +27,8 @@ from typing import Any
 import httpx
 
 from .controller import (
+    EPSILON,
+    OVERSHOOT_PENALTY,
     Controller,
     ControllerInstability,
     init_state,
@@ -69,6 +71,13 @@ JOURNAL_FILENAME = "orchestrator.journal.jsonl"
 PAYLOAD_FILENAME = "payloads.rlp"
 MANIFEST_FILENAME = "run-manifest.json"
 RUN_LOCK_FILENAME = "orchestrator.lock"
+
+# Soft-stop on innovation residual: when ``controller.state.last_residual_norm``
+# stays below ``THRESHOLD`` for ``WINDOW`` consecutive batches, the run halts
+# with stop_reason "residual_converged". 0 (default) disables the stop, in
+# which case only ``target_reached`` and ``max_batches`` end the loop.
+RESIDUAL_STOP_THRESHOLD = float(os.environ.get("ORCH_RESIDUAL_STOP_THRESHOLD", "0.0"))
+RESIDUAL_STOP_WINDOW = int(os.environ.get("ORCH_RESIDUAL_STOP_WINDOW", "6"))
 
 
 class StartupMode(enum.Enum):
@@ -490,12 +499,38 @@ def _fetch_head_block(rpc: RpcClient) -> int | None:
     return int(head, 16) if isinstance(head, str) else int(head)
 
 
+def _target_reached(observation: StateObservation, target: TargetConfig) -> bool:
+    """True when each axis has met its target share — stop bloating instead of overshooting.
+
+    Verbs only grow state, so once an axis crosses its target the controller
+    can't bring it back down. Without this check the run keeps looking for
+    something to chase and inflates other axes (e.g. accounts drifts past
+    14 % while the controller closes the code residual). Stops as soon as
+    every axis is at-or-past its share of ``target_total_bytes``.
+    """
+    targets = {
+        "accounts": target.target_total_bytes * target.mainnet_target["accounts"],
+        "storage": target.target_total_bytes * target.mainnet_target["storage"],
+        "code": target.target_total_bytes * target.mainnet_target["code"],
+    }
+    return (
+        observation.account_bytes >= targets["accounts"]
+        and observation.storage_bytes >= targets["storage"]
+        and observation.code_bytes >= targets["code"]
+    )
+
+
 def build_facade_context(target: TargetConfig) -> FacadeContext:
+    gas_limit = int(target.raw.get("gas_limit", 30_000_000))
+    # block_gas_limit defaults to per-tx gas_limit so existing target.yaml
+    # files keep working unchanged. Override via an explicit YAML field.
+    block_gas_limit = int(target.raw.get("block_gas_limit", gas_limit))
     return FacadeContext(
         base_address=target.base_address,
         revision=target.revision,
         chain_id=int(target.raw.get("chain_id", 1337)),
-        gas_limit=int(target.raw.get("gas_limit", 30_000_000)),
+        gas_limit=gas_limit,
+        block_gas_limit=block_gas_limit,
     )
 
 
@@ -656,6 +691,7 @@ def _run_locked(
             PayloadStreamWriter(payload_path) as pw,
         ):
             completed = 0
+            consecutive_low_residual = 0
             while not stop.is_set():
                 if max_batches is not None and completed >= max_batches:
                     break
@@ -679,6 +715,20 @@ def _run_locked(
                 if batch_status != "ok":
                     stop_reason = batch_status
                     break
+                if _target_reached(last_observation, target):
+                    stop_reason = "target_reached"
+                    break
+                # Soft-stop: when the controller's innovation residual_norm
+                # stays below THRESHOLD for WINDOW consecutive batches, we've
+                # plateaued — stop instead of grinding.
+                if RESIDUAL_STOP_THRESHOLD > 0:
+                    if controller.state.last_residual_norm < RESIDUAL_STOP_THRESHOLD:
+                        consecutive_low_residual += 1
+                    else:
+                        consecutive_low_residual = 0
+                    if consecutive_low_residual >= RESIDUAL_STOP_WINDOW:
+                        stop_reason = "residual_converged"
+                        break
             else:
                 stop_reason = "signal"
     except ControllerInstability as exc:
@@ -728,7 +778,10 @@ def _run_one_batch(
     batch_id: int,
     pre_observation: StateObservation,
 ) -> tuple[str, StateObservation]:
-    plan = controller.pick_next_batch(pre_observation, target)
+    plan = controller.pick_next_batch(
+        pre_observation, target,
+        batch_id=batch_id, composition_hash=composition_hash,
+    )
     start_cursor = facade_ctx.address_cursor
     txs = dispatch(plan.verb, plan.deadline_bytes, facade_ctx)
     end_cursor = facade_ctx.address_cursor
@@ -811,6 +864,9 @@ def _run_one_batch(
             innovation_ratio=float(obs_diag["innovation_ratio"]),
             residual_norm=float(obs_diag["residual_norm"]),
             statecomp_snapshot=None if status == "sensor_wait_timeout" else post.raw,
+            mix_simplex=dict(plan.mix),
+            epsilon=EPSILON,
+            overshoot_penalty=OVERSHOOT_PENALTY,
         ),
     )
     journal_writer.append(record)

@@ -71,6 +71,15 @@ class Observability:
     residual_norm: float = 0.0
     # Null (not absent) on sensor_wait_timeout — preserves chain-hash determinism.
     statecomp_snapshot: dict[str, Any] | None = None
+    # Diagnostic-only knobs that produced this batch's pick. ``mix_simplex``
+    # is the full simplex projection; ``epsilon`` is the explore probability
+    # in effect; ``overshoot_penalty`` is the QP overshoot λ. All written into
+    # Observability (not ReplayCore) so the chain-hash stays deterministic
+    # regardless of these knob values. ``None`` on records produced before
+    # the field existed (back-compat for older journals).
+    mix_simplex: dict[str, float] | None = None
+    epsilon: float | None = None
+    overshoot_penalty: float | None = None
 
 
 @dataclass
@@ -116,6 +125,9 @@ def _observability_to_jsonable(obs: Observability) -> dict[str, Any]:
         "innovation_ratio": obs.innovation_ratio,
         "residual_norm": obs.residual_norm,
         "statecomp_snapshot": obs.statecomp_snapshot,  # None preserved as JSON null
+        "mix_simplex": obs.mix_simplex,
+        "epsilon": obs.epsilon,
+        "overshoot_penalty": obs.overshoot_penalty,
     }
 
 
