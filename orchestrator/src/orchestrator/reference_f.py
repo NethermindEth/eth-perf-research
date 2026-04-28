@@ -17,7 +17,11 @@ class ReferenceF:
     source_path: Path
 
     def per_scenario(self, verb: str) -> dict[str, float]:
-        return self.coefficients[verb]
+        # Verbs not in the reference dataset (e.g. ``noop`` — added after the
+        # JSON was minted) seed at zero on every axis. Zero F is honest for
+        # scenarios with no a priori expectation; the adaptive-α update will
+        # populate real values once the verb is observed.
+        return self.coefficients.get(verb, {a: 0.0 for a in AXES})
 
     @property
     def scenarios(self) -> list[str]:

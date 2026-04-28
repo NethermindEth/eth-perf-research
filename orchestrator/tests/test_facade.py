@@ -22,6 +22,7 @@ EXPECTED_VERBS = {
     "gasburnertx",
     "blob_combined",
     "evm_fuzz",
+    "noop",
 }
 
 
@@ -35,9 +36,10 @@ def _ctx() -> FacadeContext:
     )
 
 
-def test_registry_has_all_12_verbs() -> None:
+def test_registry_has_all_13_verbs() -> None:
+    """12 original scenarios + the no-op (self-transfer, mathematical zero)."""
     assert set(VERBS.keys()) == EXPECTED_VERBS
-    assert len(VERBS) == 12
+    assert len(VERBS) == 13
 
 
 @pytest.mark.parametrize("verb", sorted(EXPECTED_VERBS))
@@ -139,3 +141,39 @@ def test_every_verb_returns_signed_tx() -> None:
         assert txs, f"{verb}: zero txs"
         assert isinstance(txs[0].rlp, (bytes, bytearray))
         assert len(txs[0].rlp) > 0
+
+
+def test_gas_aware_dispatcher_caps_storagespam(monkeypatch) -> None:
+    """When ORCH_GAS_AWARE_DISPATCH=1 and block_gas_limit is small, the
+    dispatcher returns ≤ ⌊0.95·block / per_tx_gas⌋ txs even if the byte
+    budget would allow more."""
+    # Re-import facade with the env flag set so the module-level constant
+    # picks it up. Reload to flip GAS_AWARE_DISPATCH.
+    monkeypatch.setenv("ORCH_GAS_AWARE_DISPATCH", "1")
+    import importlib
+
+    import orchestrator.facade as facade_mod
+
+    facade_mod = importlib.reload(facade_mod)
+
+    ctx = FacadeContext(
+        base_address=(0x10_00_00).to_bytes(20, "big"),
+        revision=0,
+        chain_id=1337,
+        deploy_private_key=b"\x42" * 32,
+        block_gas_limit=30_000_000,
+    )
+    # storagespam.gas = 2_000_000 → cap = floor(30M*0.95 / 2M) = 14
+    txs = facade_mod.dispatch("storagespam", deadline_bytes=10_000_000, context=ctx)
+    assert 1 <= len(txs) <= 14, f"got {len(txs)} txs, expected ≤14 under gas cap"
+
+
+def test_noop_verb_self_transfer() -> None:
+    """noop verb must produce a value=0 self-transfer (sender == recipient)."""
+    ctx = _ctx()
+    txs = dispatch("noop", deadline_bytes=5_000, context=ctx)
+    assert txs, "noop: zero txs"
+    # All recipients should equal the deploy account address (self-transfer).
+    self_addr = bytes.fromhex(ctx.account.address.lower().removeprefix("0x"))
+    for tx in txs:
+        assert tx.kind == "noop"

@@ -36,6 +36,8 @@ def pack_until_deadline(
     context: FacadeContext,
     build_one: Callable[[int, FacadeContext], tuple[dict[str, Any], dict[str, Any]]],
     kind: str,
+    *,
+    gas_budget: int | None = None,
 ) -> list[SignedTransaction]:
     """Generic build-and-pack loop.
 
@@ -47,21 +49,39 @@ def pack_until_deadline(
 
     Returns at least one tx even if the first tx exceeds the deadline — forward progress
     is more important than strict budget adherence when the budget is tiny.
+
+    When ``gas_budget`` is provided the loop also stops once cumulative
+    ``signable["gas"]`` would exceed ``0.95 * gas_budget``. The 0.95 leaves
+    headroom for intrinsic + base costs that the dispatcher doesn't model
+    (per-tx 21 K base, EIP-2935 history-write, etc.). Used to keep
+    storage-heavy verbs from blowing past the block-gas ceiling.
     """
     out: list[SignedTransaction] = []
     accumulated = 0
+    accumulated_gas = 0
+    gas_ceiling = int(gas_budget * 0.95) if gas_budget is not None else None
     starting_cursor = context.address_cursor
     while True:
         signable, diag = build_one(context.address_cursor, context)
         raw = _sign(signable, context)
         tx_size = len(raw)
+        tx_gas = int(signable.get("gas", 0))
         if out and accumulated + tx_size > deadline_bytes:
+            break
+        if (
+            gas_ceiling is not None
+            and out
+            and accumulated_gas + tx_gas > gas_ceiling
+        ):
             break
         out.append(SignedTransaction(rlp=raw, kind=kind, fields=diag))
         accumulated += tx_size
+        accumulated_gas += tx_gas
         context.address_cursor += 1
         # Safety: if deadline is 0 and we've emitted one tx, stop.
         if accumulated >= deadline_bytes:
+            break
+        if gas_ceiling is not None and accumulated_gas >= gas_ceiling:
             break
         # Safety: bound the loop to avoid runaway on absurdly-large deadlines in tests.
         if context.address_cursor - starting_cursor > 200_000:

@@ -52,6 +52,12 @@ class FacadeContext:
     genesis_sha256: bytes = b""
     chain_id: int = 1337
     gas_limit: int = 30_000_000
+    # Block-level gas ceiling used by the dispatcher to cap cumulative gas
+    # across a single batch (so e.g. 200×storagespam at 2 M gas/tx can't
+    # request 400 M gas against a 30 M block). Sourced from
+    # ``target.yaml:block_gas_limit`` if present; falls back to the per-tx
+    # ``gas_limit``. Read in ``pack_until_deadline`` (not signed onto txs).
+    block_gas_limit: int = 30_000_000
     # `repr=False` so `repr(ctx)` never leaks the private key into logs/tracebacks.
     deploy_private_key: bytes = field(default=_LAB_PRIVATE_KEY, repr=False)
     address_stride: int = 1 << 40

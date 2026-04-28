@@ -19,9 +19,45 @@ from typing import Any
 from ._builder import pack_until_deadline
 from .context import FacadeContext, SignedTransaction
 
-# Well-known byte constants reused by a couple of verbs.
-_DEPLOY_RUNTIME = bytes.fromhex("60006000f3")
-_DEPLOY_INIT = bytes.fromhex("6005600c60003960056000f3") + _DEPLOY_RUNTIME
+# Storage-burner runtime: SLOAD slot 0 (counter), then 16 unrolled SSTOREs at
+# (counter+1..counter+16), then SSTORE slot 0 = counter+16, STOP. 104 bytes.
+# Mirrors the contract prefunded at derive_address(0) in the lab chainspec
+# so a deployed contract is functionally identical (and call-compatible
+# with the storage-spam selectors).
+_STORAGE_BURNER_RUNTIME = bytes.fromhex(
+    "6000546001018080556001018080556001018080556001018080556001018080"
+    "556001018080556001018080556001018080556001018080556001018080556001"
+    "018080556001018080556001018080556001018080556001018080556001018080"
+    "558060005500"
+)
+
+
+def _build_unique_storage_burner_init(idx: int) -> bytes:
+    """Return CREATE-tx initcode that deploys a per-idx unique storage burner.
+
+    Prefixed with ``PUSH32 idx; POP`` so each deploy emits a distinct codehash.
+    The plugin's ``codeBytesTotal`` is deduplicated by hash, so without a unique
+    tag every deploytx would collapse onto a single hash and the code axis
+    wouldn't grow proportionally.
+    """
+    unique_tag = b"\x7f" + idx.to_bytes(32, "big") + b"\x50"  # PUSH32 idx; POP
+    runtime = unique_tag + _STORAGE_BURNER_RUNTIME
+    length = len(runtime)
+    if length > 0xFFFF:
+        raise ValueError(f"runtime too large for PUSH2 length: {length}")
+    # PUSH2 length; PUSH1 14 (= len(init_prefix)); PUSH1 0; CODECOPY;
+    # PUSH2 length; PUSH1 0; RETURN
+    init_prefix = bytes([
+        0x61, (length >> 8) & 0xFF, length & 0xFF,
+        0x60, 0x0E,
+        0x60, 0x00,
+        0x39,
+        0x61, (length >> 8) & 0xFF, length & 0xFF,
+        0x60, 0x00,
+        0xF3,
+    ])
+    assert len(init_prefix) == 14
+    return init_prefix + runtime
 
 _FACTORY_CALL_PREFIX = b"\xff" * 4
 _ERC20_TRANSFER_SELECTOR = bytes.fromhex("a9059cbb")  # keccak("transfer(address,uint256)")[:4]
@@ -61,6 +97,20 @@ def _eoatx_to(ctx: FacadeContext, idx: int) -> bytes:
     return ctx.derive_address(idx)
 
 
+def _self_to(ctx: FacadeContext, _idx: int) -> bytes:
+    """Self-transfer recipient — used by the no-op verb.
+
+    Returns the deploy account's own 20-byte address. Sending value=0 to
+    self with no calldata costs only the 21 K intrinsic gas, touches only
+    the sender's nonce, and produces ~zero state-trie growth (encoding a
+    larger nonce can shift a leaf by one byte but typically doesn't). This
+    gives the controller a true mathematical "do nothing" verb so the
+    simplex projector has a zero in its action space.
+    """
+    addr_hex = ctx.account.address.lower().removeprefix("0x")
+    return bytes.fromhex(addr_hex)
+
+
 def _calltx_to(ctx: FacadeContext, idx: int) -> bytes:
     # Touch a previously-created address (idx-1) so we don't create new state.
     return ctx.derive_address(max(0, idx - 1))
@@ -86,8 +136,8 @@ def _calltx_data(_ctx: FacadeContext, _idx: int) -> bytes:
     return b"\x00" * 4  # bare 4-byte selector
 
 
-def _deploy_data(_ctx: FacadeContext, _idx: int) -> bytes:
-    return _DEPLOY_INIT
+def _deploy_data(_ctx: FacadeContext, idx: int) -> bytes:
+    return _build_unique_storage_burner_init(idx)
 
 
 def _factory_data(ctx: FacadeContext, _idx: int) -> bytes:
@@ -148,8 +198,8 @@ def _eoatx_diag(ctx: FacadeContext, idx: int) -> dict[str, Any]:
     return {"to": "0x" + to.hex(), "value": 1}
 
 
-def _deploy_diag(_ctx: FacadeContext, _idx: int) -> dict[str, Any]:
-    return {"is_deploy": True, "init_len": len(_DEPLOY_INIT)}
+def _deploy_diag(_ctx: FacadeContext, idx: int) -> dict[str, Any]:
+    return {"is_deploy": True, "init_len": len(_build_unique_storage_burner_init(idx))}
 
 
 def _factory_diag(ctx: FacadeContext, _idx: int) -> dict[str, Any]:
@@ -204,13 +254,24 @@ VERB_SPECS: tuple[VerbSpec, ...] = (
     VerbSpec("gasburnertx", 1_500_000, _zero_to, _gasburner_data, _gasburner_diag),
     VerbSpec("blob_combined", 200_000, _zero_to, _blob_data, _blob_diag),
     VerbSpec("evm_fuzz", 300_000, _zero_to, _fuzz_data, _fuzz_diag),
+    # No-op: self-transfer with value=0, intrinsic gas only, ~zero state delta.
+    # Gives the controller a "wait" move whose F vector is essentially (0, 0, 0)
+    # so the simplex projector can sit on the boundary of the simplex once we
+    # approach target. Combined with ORCH_RESIDUAL_STOP_THRESHOLD this is what
+    # makes "stop early when there's nothing useful to do" work.
+    VerbSpec("noop", 21_000, _self_to, _noop_data),
 )
 
 
-def build_adapter(spec: VerbSpec) -> Callable[[int, FacadeContext], list[SignedTransaction]]:
+def build_adapter(spec: VerbSpec) -> Callable[..., list[SignedTransaction]]:
     """Factory: return the standard adapter closure for a verb spec."""
 
-    def adapter(deadline_bytes: int, context: FacadeContext) -> list[SignedTransaction]:
+    def adapter(
+        deadline_bytes: int,
+        context: FacadeContext,
+        *,
+        gas_budget: int | None = None,
+    ) -> list[SignedTransaction]:
         def build_one(index: int, ctx: FacadeContext) -> tuple[dict[str, Any], dict[str, Any]]:
             to = spec.make_to(ctx, index)
             data = spec.make_data(ctx, index)
@@ -225,7 +286,9 @@ def build_adapter(spec: VerbSpec) -> Callable[[int, FacadeContext], list[SignedT
             diag = spec.extra_diag(ctx, index)
             return signable, diag
 
-        return pack_until_deadline(deadline_bytes, context, build_one, spec.name)
+        return pack_until_deadline(
+            deadline_bytes, context, build_one, spec.name, gas_budget=gas_budget,
+        )
 
     adapter.__name__ = f"{spec.name}_adapter"
     return adapter
