@@ -13,6 +13,16 @@ services:
       - ./config/logs:/root/.local # to keep history and logs
       - ./init.sh:/init.sh # Mount the initialization scrip
       - /var/run/docker.sock:/var/run/docker.sock # optional. required for docker in docker
+      # Mount the bloating-orchestrator stack so Dagu can drive its compose file.
+      # The path inside dagu must match the absolute host path because compose
+      # bind-mounts in docker-compose.yml are resolved by the host docker daemon
+      # against the SAME path (so the mount has to be identity-mapped).
+      - /Users/daniilankusin/eth-perf-research/orchestrator:/Users/daniilankusin/eth-perf-research/orchestrator
+      # Lab chainspec is bind-mounted into Nethermind from /Users/daniilankusin/state-benchmarks
+      # so that absolute path also has to resolve identically inside dagu.
+      - /Users/daniilankusin/state-benchmarks/lab-genesis.json:/Users/daniilankusin/state-benchmarks/lab-genesis.json:ro
+      # Patched StateComposition.dll likewise.
+      - /Users/daniilankusin/RiderProjects/nethermind-arbitrum/src/Nethermind/src/Nethermind/artifacts/bin/Nethermind.StateComposition/release_linux-arm64/Nethermind.StateComposition.dll:/Users/daniilankusin/RiderProjects/nethermind-arbitrum/src/Nethermind/src/Nethermind/artifacts/bin/Nethermind.StateComposition/release_linux-arm64/Nethermind.StateComposition.dll:ro
     command: sh -c "chmod +x /init.sh && /init.sh && dagu start-all"
     user: "0:0"
     entrypoint: [] # Override any default entrypoint
