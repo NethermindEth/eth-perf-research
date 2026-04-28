@@ -32,10 +32,18 @@ class _StubRpc:
 
     def __init__(self) -> None:
         self._call_idx = 0
+        self.last_timestamp: int | None = None
 
-    def testing_commit_block_v1(self, signed_txs_rlp: list[bytes]) -> str:
-        digest = hashlib.sha256(b"".join(signed_txs_rlp)).hexdigest()
+    def testing_commit_block_v1(
+        self, signed_txs_rlp: list[bytes], *, timestamp_unix: int
+    ) -> str:
+        # Folding the timestamp into the digest mirrors the real EL: replay
+        # must re-supply the journaled value or the hash diverges.
+        digest = hashlib.sha256(
+            b"".join(signed_txs_rlp) + timestamp_unix.to_bytes(8, "big")
+        ).hexdigest()
         self._call_idx += 1
+        self.last_timestamp = timestamp_unix
         return "0x" + digest
 
     def eth_get_block_by_hash(self, block_hash: str, full: bool = True) -> dict[str, Any]:
@@ -62,7 +70,10 @@ def _seed_journal(
             start = ctx.address_cursor
             txs = dispatch(verb, deadline_bytes=5_000, context=ctx)
             end = ctx.address_cursor
-            block_hash = rpc.testing_commit_block_v1([tx.rlp for tx in txs])
+            block_ts = 1_700_000_000 + i
+            block_hash = rpc.testing_commit_block_v1(
+                [tx.rlp for tx in txs], timestamp_unix=block_ts
+            )
             w.append(
                 Record(
                     session_id=1,
@@ -77,6 +88,7 @@ def _seed_journal(
                         status="ok",
                         block_hash=block_hash,
                         block_number=100 + i,
+                        block_timestamp=block_ts,
                     ),
                     observability=Observability(statecomp_snapshot={"x": i}),
                 )
@@ -153,7 +165,7 @@ def test_replay_block_hash_mismatch_exits_2(tmp_path: Path) -> None:
     journal, manifest = _seed_journal(tmp_path)
 
     class _BadHash(_StubRpc):
-        def testing_commit_block_v1(self, signed_txs_rlp):
+        def testing_commit_block_v1(self, signed_txs_rlp, *, timestamp_unix):
             return "0x" + "ff" * 32
 
     rc = replay(journal, "http://stub", rpc=_BadHash(), manifest_path=manifest)
@@ -192,6 +204,7 @@ def test_replay_unknown_verb_exits_4(tmp_path: Path) -> None:
                     status="ok",
                     block_hash="0x" + "bb" * 32,
                     block_number=100,
+                    block_timestamp=1_700_000_000,
                 ),
                 observability=Observability(statecomp_snapshot={}),
             )
@@ -253,6 +266,16 @@ def test_replay_missing_manifest_exits_5(tmp_path: Path) -> None:
         manifest_path=tmp_path / "does_not_exist.json",
     )
     assert rc == EXIT_MANIFEST
+
+
+def test_replay_uses_journaled_block_timestamp(tmp_path: Path) -> None:
+    """§C.1: replay must re-supply the journaled block_timestamp, not wall clock."""
+    journal, manifest = _seed_journal(tmp_path, n=2)
+    rpc = _StubRpc()
+    rc = replay(journal, "http://stub", rpc=rpc, manifest_path=manifest)
+    assert rc == EXIT_OK
+    # Last batch was seeded at i=1 → 1_700_000_001.
+    assert rpc.last_timestamp == 1_700_000_001
 
 
 def test_replay_refuses_on_signer_fingerprint_mismatch(tmp_path: Path) -> None:

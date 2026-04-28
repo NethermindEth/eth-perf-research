@@ -173,7 +173,5 @@ def test_noop_verb_self_transfer() -> None:
     ctx = _ctx()
     txs = dispatch("noop", deadline_bytes=5_000, context=ctx)
     assert txs, "noop: zero txs"
-    # All recipients should equal the deploy account address (self-transfer).
-    self_addr = bytes.fromhex(ctx.account.address.lower().removeprefix("0x"))
     for tx in txs:
         assert tx.kind == "noop"

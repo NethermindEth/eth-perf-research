@@ -46,6 +46,14 @@ class ReplayContext:
     gas_limit: int
     address_stride: int
     deploy_pubkey_sha256: str
+    # ``block_gas_limit`` shifts the dispatcher's tx-count threshold for the
+    # same ``(verb, deadline_bytes)`` pair (heavy-gas verbs cap earlier). Two
+    # runs with identical ``target.yaml`` SHA but different ``block_gas_limit``
+    # produce different tx sets and different block hashes, so it must be part
+    # of the composition_hash preimage. Defaulted to 0 for legacy-manifest
+    # back-compat (older runs round-trip into a sentinel that
+    # ``replay_context_matches`` will refuse against any concrete value).
+    block_gas_limit: int = 0
 
 
 @dataclass
@@ -101,16 +109,21 @@ class Manifest:
 def compute_composition_hash(
     target_sha256: str,
     env: EnvInfo,
-    replay_context: ReplayContext | None = None,  # noqa: ARG001 — kept for signature stability
+    replay_context: ReplayContext | None = None,
 ) -> str:
     """sha256 matching the exact preimage defined in design §7.
 
-    Preimage: ``target_yaml || genesis || plugin || nethermind || runtime || arch``.
-    ``replay_context`` is accepted for call-site compatibility but no longer folded
-    in; the signer / chain identity lives in ``Manifest.replay_context`` and is
-    compared structurally on resume (see ``manifest_replay_context_compatible``).
-    Keeping the hash narrow preserves spec alignment and lets journals produced by
-    pre-widening versions still resume under the new code.
+    Preimage: ``target_yaml || genesis || plugin || nethermind || runtime || arch``,
+    plus ``block_gas_limit`` from ``replay_context`` (when supplied) since the
+    dispatcher's tx-count behaviour for ``(verb, deadline_bytes)`` depends on
+    it. Two runs with the same ``target.yaml`` SHA but different
+    ``block_gas_limit`` produce different tx sets and would silently bypass
+    ``ResumeRefused`` without this term.
+
+    The signer / chain identity stays in ``Manifest.replay_context`` and is
+    compared structurally on resume (see ``replay_context_matches``). Pre-widen
+    journals serialize ``replay_context=None`` here so existing
+    composition_hash values still match and old runs continue to resume.
     """
     parts = [
         target_sha256,
@@ -120,6 +133,8 @@ def compute_composition_hash(
         str(env.dotnet_runtime_major),
         env.cpu_arch,
     ]
+    if replay_context is not None:
+        parts.append(str(replay_context.block_gas_limit))
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 

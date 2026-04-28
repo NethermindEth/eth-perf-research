@@ -21,7 +21,7 @@ class ReferenceF:
         # JSON was minted) seed at zero on every axis. Zero F is honest for
         # scenarios with no a priori expectation; the adaptive-α update will
         # populate real values once the verb is observed.
-        return self.coefficients.get(verb, {a: 0.0 for a in AXES})
+        return self.coefficients.get(verb, dict.fromkeys(AXES, 0.0))
 
     @property
     def scenarios(self) -> list[str]:

@@ -95,7 +95,7 @@ def main() -> None:
             s = summarize_one(r / "state")
             s["name"] = r.name
             rows.append(s)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"  {r.name}: ERROR — {exc}")
 
     print()

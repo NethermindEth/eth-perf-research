@@ -350,8 +350,9 @@ def test_proportional_falls_back_to_argmax_without_seed(
     reference_f, target, monkeypatch
 ) -> None:
     """Missing batch_id / composition_hash makes proportional mode degenerate to argmax."""
-    import orchestrator.controller as ctl_mod
     import numpy as np
+
+    import orchestrator.controller as ctl_mod
 
     monkeypatch.setattr(ctl_mod, "EPSILON", 1.0)
     state = init_state(reference_f, target.qp_scenarios)

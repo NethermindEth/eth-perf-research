@@ -108,3 +108,33 @@ def test_default_timeout_is_five_seconds() -> None:
 
 def test_poll_interval_is_100ms() -> None:
     assert SensorClient.POLL_INTERVAL_S == 0.1
+
+
+def test_per_call_timeout_capped_by_outer_deadline() -> None:
+    """A single stuck RPC must not block past the caller-supplied timeout_s."""
+
+    class _SlowTransport(httpx.BaseTransport):
+        def __init__(self) -> None:
+            self.timeouts: list[float | None] = []
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            # Capture the per-request timeout so we can assert it was capped.
+            ext = request.extensions or {}
+            self.timeouts.append(ext.get("timeout", {}).get("connect") if ext else None)
+            raise httpx.ReadTimeout("simulated stuck endpoint", request=request)
+
+    transport = _SlowTransport()
+    started = time.monotonic()
+    sensor = SensorClient(
+        "http://fake/rpc",
+        client=httpx.Client(transport=transport, timeout=10.0),
+    )
+    try:
+        with pytest.raises(SensorWaitTimeout):
+            sensor.read(expected_block=999, timeout_s=0.5)
+    finally:
+        sensor.close()
+    elapsed = time.monotonic() - started
+    # Without the per-call cap, a single stuck call honoring the 10 s client
+    # timeout would block well past the outer 0.5 s window.
+    assert elapsed < 2.0, f"sensor.read blocked for {elapsed:.2f}s past deadline"

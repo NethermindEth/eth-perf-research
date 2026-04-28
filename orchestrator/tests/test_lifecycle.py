@@ -571,7 +571,7 @@ def test_run_with_max_batches_writes_manifest(
         def __init__(self) -> None:
             self._block = 0
 
-        def testing_commit_block_v1(self, txs):
+        def testing_commit_block_v1(self, txs, *, timestamp_unix):
             self._block += 1
             return "0x" + self._block.to_bytes(32, "big").hex()
 
@@ -597,6 +597,11 @@ def test_run_with_max_batches_writes_manifest(
                 "number": hex(max(self._block, 0)),
                 "stateRoot": "0x" + b"\x01".hex() * 32,
             }
+
+        def eth_get_transaction_count(self, address, block="latest"):
+            # Fresh runs start at cursor=0; nonce reconcile only fires on
+            # resume, so the value here doesn't matter for the fresh-start path.
+            return 0
 
         def close(self) -> None: ...
 
@@ -645,6 +650,136 @@ def test_run_with_max_batches_writes_manifest(
     assert len(lines) == 3
 
 
+def test_resume_refused_when_nonce_mismatches_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume must refuse if eth_getTransactionCount disagrees with the rehydrated cursor.
+
+    A mid-batch crash that left partial txs on-chain would leave the cursor
+    behind the EOA's nonce; resuming would re-sign already-mined nonces. The
+    guard fires before the main loop opens its journal/payload writers.
+    """
+    from orchestrator.lifecycle import LifecycleDeps
+
+    target = _target()
+    env = _env()
+
+    # Seed: the journal has cursor=1 (one batch dispatched a single tx),
+    # but the on-chain nonce will be 5 → guard must raise.
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    rec = _record(batch_id=0, block_number=100)
+    object.__setattr__(rec.replay_core, "end_address", "0x" + (1).to_bytes(20, "big").hex())
+    with JournalWriter(journal) as w:
+        w.append(rec)
+
+    # Build a manifest that matches the current run config so we get past
+    # composition_hash + replay_context gates.
+    from orchestrator.lifecycle import build_facade_context, build_replay_context
+    from orchestrator.manifest import Manifest, compute_composition_hash
+
+    fctx = build_facade_context(target)
+    rctx = build_replay_context(fctx)
+    comp = compute_composition_hash(target.source_sha256, env, rctx)
+    manifest = Manifest(
+        run_id="r",
+        target_yaml_sha256=target.source_sha256,
+        base_address="0x" + target.base_address.hex(),
+        revision=0,
+        genesis_sha256=env.genesis_sha256,
+        composition_hash=comp,
+        reference_f_version="2026.04.23",
+        plugin_git_sha=env.plugin_git_sha,
+        nethermind_commit_sha=env.nethermind_commit_sha,
+        dotnet_runtime_major=env.dotnet_runtime_major,
+        cpu_arch=env.cpu_arch,
+        replay_context=rctx,
+    )
+    manifest.write(tmp_path / "run-manifest.json")
+
+    class _MismatchedRpc:
+        def testing_commit_block_v1(self, txs, *, timestamp_unix):
+            return "0x" + "00" * 32
+
+        def eth_get_block_by_hash(self, block_hash, full=True):
+            return {}
+
+        def eth_get_block_by_number(self, number="latest", full=False):
+            # Make resume go down the resume path: head == tail.block_number.
+            return {"number": hex(100), "stateRoot": "0x" + "01" * 32}
+
+        def eth_get_transaction_count(self, address, block="latest"):
+            # Cursor is 1 after rehydration; chain reports 5 → mismatch.
+            return 5
+
+        def close(self) -> None: ...
+
+    class _Sensor:
+        def read(self, expected_block=None, timeout_s=5.0):
+            from orchestrator.sensor import StateObservation
+
+            return StateObservation(
+                block_number=expected_block or 100,
+                account_bytes=0,
+                storage_bytes=0,
+                code_bytes=0,
+                raw={"blockNumber": expected_block or 100},
+            )
+
+        def close(self) -> None: ...
+
+    deps = LifecycleDeps(sensor=_Sensor(), rpc=_MismatchedRpc())
+    with pytest.raises(ResumeRefused, match=r"cursor.*chain"):
+        run(target=target, state_dir=tmp_path, rpc_url="http://stub", env=env, deps=deps)
+
+
+def test_legacy_manifest_resume_bypass_refused(tmp_path: Path) -> None:
+    """A pre-ReplayContext manifest must NOT silently let a new signer resume.
+
+    Without this guard, an attacker (or operator with a stale state dir) could
+    drop a manifest with ``replay_context: null`` next to a non-empty journal
+    and resume under a different signer / chain_id. The signer + chain identity
+    gate would be skipped because ``replay_context_matches(None, current)``
+    returns False but only when current is non-None — yet the prior code only
+    invoked ``replay_context_matches`` if ``replay_context is not None``,
+    creating an "if both sides present" check that this gate must close.
+    """
+    target = _target()
+    env = _env()
+    from orchestrator.lifecycle import build_facade_context, build_replay_context
+    from orchestrator.manifest import compute_composition_hash
+
+    fctx = build_facade_context(target)
+    rctx = build_replay_context(fctx)
+    comp = compute_composition_hash(target.source_sha256, env, rctx)
+
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    with JournalWriter(journal) as w:
+        w.append(_record(batch_id=0, block_number=100))
+    legacy = Manifest(
+        run_id="r",
+        target_yaml_sha256=target.source_sha256,
+        base_address="0x" + target.base_address.hex(),
+        revision=0,
+        genesis_sha256=env.genesis_sha256,
+        composition_hash=comp,
+        reference_f_version="2026.04.23",
+        plugin_git_sha=env.plugin_git_sha,
+        nethermind_commit_sha=env.nethermind_commit_sha,
+        dotnet_runtime_major=env.dotnet_runtime_major,
+        cpu_arch=env.cpu_arch,
+        replay_context=None,  # legacy run, pre-ReplayContext
+    )
+    legacy.write(tmp_path / "run-manifest.json")
+
+    with pytest.raises(ResumeRefused, match="legacy manifest"):
+        resolve_startup_mode(
+            tmp_path,
+            composition_hash=comp,
+            head_block=100,
+            replay_context=rctx,
+        )
+
+
 def _record(
     batch_id: int,
     *,
@@ -664,6 +799,7 @@ def _record(
             status="ok",
             block_hash="0x" + ("bb" * 32),
             block_number=block_number,
+            block_timestamp=1_700_000_000 + batch_id,
         ),
         observability=observability
         or Observability(statecomp_snapshot={"blockNumber": block_number}),

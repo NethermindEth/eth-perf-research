@@ -52,6 +52,11 @@ class ReplayCore:
     )
     block_hash: str
     block_number: int
+    # Unix-epoch seconds passed to ``testing_commitBlockV1`` as
+    # ``payloadAttributes.timestamp``. The EL folds this into the committed
+    # block's header hash, so replay must re-supply the same value to satisfy
+    # §C.1 replay-equivalence. Chain-hash-preimage critical.
+    block_timestamp: int = 0
     chain_hash: str = ""  # set by the writer
 
 
@@ -103,6 +108,7 @@ def _replay_core_to_jsonable(rc: ReplayCore) -> dict[str, Any]:
         "status": rc.status,
         "block_hash": rc.block_hash,
         "block_number": rc.block_number,
+        "block_timestamp": rc.block_timestamp,
         "chain_hash": rc.chain_hash,
     }
 

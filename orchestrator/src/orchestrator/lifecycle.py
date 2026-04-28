@@ -258,6 +258,11 @@ def _load_and_verify_prior_manifest(
     ``composition_hash`` covers target+env per design §7. Tx-signing identity lives
     in ``replay_context``; check it separately so a changed signer / chain between
     runs refuses resume even when target.yaml is unchanged.
+
+    Also guards against legacy-manifest bypass: if the journal is non-empty and
+    the prior manifest predates ``ReplayContext`` (``prior.replay_context is
+    None``), allowing the new run to resume would silently skip the signer +
+    chain identity gate. Refuse so the operator must archive the old run.
     """
     manifest_path = state_dir / MANIFEST_FILENAME
     if not manifest_path.exists():
@@ -267,6 +272,17 @@ def _load_and_verify_prior_manifest(
         raise ResumeRefused(
             f"composition_hash mismatch: manifest={prior.composition_hash[:8]}… "
             f"current={composition_hash[:8]}…"
+        )
+    journal_path = state_dir / JOURNAL_FILENAME
+    journal_nonempty = journal_path.exists() and journal_path.stat().st_size > 0
+    if (
+        journal_nonempty
+        and prior.replay_context is None
+        and replay_context is not None
+    ):
+        raise ResumeRefused(
+            "legacy manifest has no replay_context; refusing to resume on a "
+            "non-empty journal — start fresh or re-run on the original code"
         )
     if replay_context is not None and not replay_context_matches(
         prior.replay_context, replay_context
@@ -349,6 +365,12 @@ def _reconcile_pending(
         block_hash = block.get("hash")
         if not isinstance(block_hash, str):
             raise ResumeRefused(f"RPC returned no hash for head block {head_block}")
+        # Carry the on-chain block.timestamp into the synthesized record so
+        # replay re-supplies it. The chain is the source of truth here — the
+        # sidecar pre-dates the commit and never saw the timestamp the EL
+        # actually used (it could differ if the EL clamps to parent+1).
+        raw_ts = block.get("timestamp", 0)
+        block_ts = int(raw_ts, 16) if isinstance(raw_ts, str) else int(raw_ts)
         # Cross-check the head block's tx count against what the pending verb+
         # deadline_bytes would have dispatched. Catches a misbehaving or compromised
         # Nethermind that auto-mined an empty block (or committed a different tx
@@ -383,6 +405,7 @@ def _reconcile_pending(
                     status="reconciled_unobserved",
                     block_hash=block_hash,
                     block_number=head_block,
+                    block_timestamp=block_ts,
                 ),
                 observability=Observability(
                     observed_flat_bytes=0,
@@ -474,11 +497,39 @@ def make_default_probe_executor(
         )
         pre = sensor.read()
         dispatched = dispatch(verb, deadline_bytes, facade_ctx)
-        rpc.testing_commit_block_v1([tx.rlp for tx in dispatched])
+        rpc.testing_commit_block_v1(
+            [tx.rlp for tx in dispatched],
+            timestamp_unix=_now_unix(),
+        )
         post = sensor.read(expected_block=pre.block_number + 1)
         return pre, post
 
     return _execute
+
+
+def _verify_nonce_aligned(rpc: RpcClient, ctx: FacadeContext) -> None:
+    """Refuse resume if rehydrated ``address_cursor`` ≠ EOA on-chain nonce.
+
+    Every verb signs with the single lab key and uses ``address_cursor`` as the
+    tx nonce (facade/_builder.py). A crash mid-batch where partial txs landed
+    on-chain leaves the cursor below the chain's nonce; replay would then
+    re-sign already-mined nonces, the dispatch RPC would reject them, and the
+    journal/chain would silently diverge. Catching this at resume keeps the
+    invariant ``cursor == on_chain_nonce`` load-bearing.
+
+    The genesis pre-funds the lab account with no explicit ``nonce`` field,
+    so ``account.nonce == 0`` initially. Equality holds for fresh runs too,
+    but we only invoke this on resume since fresh runs derive the cursor from
+    init_state (= 0) and the nonce assertion is then trivial.
+    """
+    on_chain_nonce = rpc.eth_get_transaction_count(ctx.account.address, "latest")
+    if ctx.address_cursor != on_chain_nonce:
+        raise ResumeRefused(
+            f"address_cursor / on-chain nonce mismatch for "
+            f"{ctx.account.address}: cursor={ctx.address_cursor} "
+            f"chain={on_chain_nonce}. Mid-batch crash likely leaked partial "
+            f"txs onto the chain. Archive state/ before restart."
+        )
 
 
 def _fetch_head_block(rpc: RpcClient) -> int | None:
@@ -543,6 +594,7 @@ def build_replay_context(ctx: FacadeContext) -> ReplayContext:
         gas_limit=ctx.gas_limit,
         address_stride=ctx.address_stride,
         deploy_pubkey_sha256=ctx.deploy_pubkey_sha256(),
+        block_gas_limit=ctx.block_gas_limit,
     )
 
 
@@ -656,6 +708,11 @@ def _run_locked(
         )
         batch_id = decision.last_record.batch_id + 1
         ctx.address_cursor = int(decision.last_record.replay_core.end_address, 16)
+        # Resume guard: refuse if the rehydrated cursor doesn't match the EOA's
+        # on-chain nonce. A mid-batch crash that leaked partial txs onto the
+        # chain (or operator intervention via direct RPC) silently desyncs
+        # otherwise — replay would re-sign already-mined nonces.
+        _verify_nonce_aligned(rpc, ctx)
     else:
         session_id = 1
         resumed_from_batch = None
@@ -793,6 +850,12 @@ def _run_one_batch(
     # C3: write a pending-batch sidecar BEFORE the commit. If we crash between
     # commit and journal append, resume uses this to synthesize the missing record.
     ts_iso = _now_iso()
+    # Generate the EL block timestamp ONCE per batch and capture it in the
+    # sidecar + journal so replay re-supplies the same value. The wall clock is
+    # an off-spec input that gets folded into the committed block hash by the
+    # EL; if we let ``rpc`` re-read ``time.time()`` on each replay, every replay
+    # produces a different block hash and §C.1 fails.
+    block_timestamp = _now_unix()
     write_pending(
         state_dir,
         PendingBatch(
@@ -809,7 +872,9 @@ def _run_one_batch(
         ),
     )
 
-    block_hash = rpc.testing_commit_block_v1([tx.rlp for tx in txs])
+    block_hash = rpc.testing_commit_block_v1(
+        [tx.rlp for tx in txs], timestamp_unix=block_timestamp
+    )
     block = rpc.eth_get_block_by_hash(block_hash, full=True)
     payload = _block_to_payload(block, signed_txs=[tx.rlp for tx in txs])
     payload_writer.append(payload)
@@ -853,6 +918,7 @@ def _run_one_batch(
             block_number=int(block["number"], 16)
             if isinstance(block.get("number"), str)
             else int(block.get("number", 0)),
+            block_timestamp=block_timestamp,
         ),
         observability=Observability(
             observed_flat_bytes=int(obs_diag["observed_flat_bytes"]),
@@ -998,6 +1064,18 @@ def _extract_last_session_id(state_dir: Path) -> int:
 
 def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _now_unix() -> int:
+    """Wall-clock seconds since the unix epoch.
+
+    Captured ONCE per batch and journaled so replay can re-supply the exact
+    value to ``testing_commit_block_v1``. The EL folds this into the block
+    header hash, so determinism here is load-bearing for §C.1 replay.
+    """
+    import time as _time
+
+    return int(_time.time())
 
 
 @contextlib.contextmanager

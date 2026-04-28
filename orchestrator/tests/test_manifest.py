@@ -49,6 +49,7 @@ def test_replay_context_matches_refuses_legacy_one_sided() -> None:
         gas_limit=30_000_000,
         address_stride=1 << 40,
         deploy_pubkey_sha256="a" * 64,
+        block_gas_limit=30_000_000,
     )
     # Attacker drops `"replay_context": null` → must now be rejected.
     assert not replay_context_matches(None, current)
@@ -65,6 +66,7 @@ def test_replay_context_matches_field_equality() -> None:
         gas_limit=30_000_000,
         address_stride=1 << 40,
         deploy_pubkey_sha256="a" * 64,
+        block_gas_limit=30_000_000,
     )
     b = dataclasses.replace(a, chain_id=11155111)
     assert replay_context_matches(a, a)
@@ -87,6 +89,39 @@ def test_composition_hash_changes_when_any_input_changes() -> None:
     # Different plugin sha.
     env2 = EnvInfo(**{**env.__dict__, "plugin_git_sha": "q" * 40})
     assert compute_composition_hash("t" * 64, env2) != baseline
+
+
+def test_composition_hash_includes_block_gas_limit() -> None:
+    """target.yaml:block_gas_limit shifts dispatch behaviour → must affect comp hash."""
+    from orchestrator.manifest import ReplayContext
+
+    env = _env()
+    rctx_30m = ReplayContext(
+        base_address="0x" + "00" * 20,
+        revision=0,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        address_stride=1 << 40,
+        deploy_pubkey_sha256="a" * 64,
+        block_gas_limit=30_000_000,
+    )
+    rctx_60m = ReplayContext(
+        base_address="0x" + "00" * 20,
+        revision=0,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        address_stride=1 << 40,
+        deploy_pubkey_sha256="a" * 64,
+        block_gas_limit=60_000_000,
+    )
+    h30 = compute_composition_hash("t" * 64, env, rctx_30m)
+    h60 = compute_composition_hash("t" * 64, env, rctx_60m)
+    assert h30 != h60
+    # Back-compat: omitting replay_context (older callers) must keep producing
+    # the legacy preimage so existing journals still match.
+    legacy = compute_composition_hash("t" * 64, env)
+    assert legacy != h30
+    assert legacy != h60
 
 
 def test_manifest_roundtrip(tmp_path: Path) -> None:

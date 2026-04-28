@@ -152,20 +152,29 @@ class RpcClient:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
-    def testing_commit_block_v1(self, signed_txs_rlp: list[bytes]) -> str:
+    def testing_commit_block_v1(
+        self, signed_txs_rlp: list[bytes], *, timestamp_unix: int
+    ) -> str:
         """Submit a batch of signed txs; returns the committed block's hash (hex).
 
         Marcin's endpoint signature is
         ``testing_commitBlockV1(payloadAttributes, txRlps, extraData)``;
-        we synthesize minimal payload attributes (current wall-clock timestamp,
-        zeroed randao / fee recipient / parent beacon root, empty withdrawals)
-        and pass ``null`` extraData. Withdrawals are an empty list (Cancun+).
-        """
-        import time as _time
+        we synthesize minimal payload attributes (caller-supplied unix
+        timestamp, zeroed randao / fee recipient / parent beacon root, empty
+        withdrawals) and pass ``null`` extraData. Withdrawals are an empty
+        list (Cancun+).
 
+        ``timestamp_unix`` is **required** and folded into the committed block's
+        hash. Replay must journal it and re-supply the same value, otherwise
+        §C.1 replay-equivalence fails (different timestamp → different hash).
+        """
+        if not isinstance(timestamp_unix, int) or timestamp_unix < 0:
+            raise ValueError(
+                f"timestamp_unix must be a non-negative int, got {timestamp_unix!r}"
+            )
         hex_txs = ["0x" + raw.hex() for raw in signed_txs_rlp]
         payload_attributes = {
-            "timestamp": hex(int(_time.time())),
+            "timestamp": hex(timestamp_unix),
             "prevRandao": "0x" + "00" * 32,
             "suggestedFeeRecipient": "0x" + "00" * 20,
             "withdrawals": [],
@@ -181,6 +190,22 @@ class RpcClient:
     ) -> dict[str, Any]:
         tag = number if isinstance(number, str) else hex(number)
         return self._call("eth_getBlockByNumber", [tag, full])
+
+    def eth_get_transaction_count(
+        self, address: str, block: str | int = "latest"
+    ) -> int:
+        """Return the on-chain nonce for ``address`` (decoded hex → int).
+
+        Used by the resume-time cursor reconciliation guard: a mid-batch crash
+        that leaks partial txs onto the chain leaves ``address_cursor`` lower
+        than the EOA's actual nonce. Resuming under that condition would re-sign
+        already-mined nonces and silently desync the run.
+        """
+        tag = block if isinstance(block, str) else hex(block)
+        raw = self._call("eth_getTransactionCount", [address, tag])
+        if isinstance(raw, int):
+            return raw
+        return int(raw, 16)
 
     def _call(self, method: str, params: list[Any]) -> Any:
         self._request_id += 1

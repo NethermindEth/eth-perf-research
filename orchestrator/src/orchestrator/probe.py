@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os as _os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -13,8 +14,6 @@ from .sensor import StateObservation
 class CharacterizationInsufficient(Exception):
     """Raised when probe F is off by > 3× (ignoring sign for storagerefundtx)."""
 
-
-import os as _os
 
 PROBE_TX_COUNT = int(_os.environ.get("ORCH_PROBE_TX_COUNT", "100"))
 # Smoke runs on a near-empty lab chain produce per-tx growth that doesn't

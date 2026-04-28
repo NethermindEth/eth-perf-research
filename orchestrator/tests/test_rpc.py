@@ -128,3 +128,55 @@ def test_rpc_error_log_redacts_server_message(
     combined = " ".join(r.getMessage() for r in caplog.records)
     assert "SECRET_LEAK_TOKEN" not in combined
     assert "msg_sha16=" in combined
+
+
+class _CapturePayloadTransport(httpx.BaseTransport):
+    """Captures the JSON body of the most recent request for payload assertions."""
+
+    def __init__(self, body: dict) -> None:
+        self.body = body
+        self.captured_payload: dict | None = None
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        self.captured_payload = _json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json=self.body)
+
+
+def test_testing_commit_block_v1_uses_supplied_timestamp() -> None:
+    """§C.1: caller-supplied timestamp must be folded into payloadAttributes verbatim."""
+    transport = _CapturePayloadTransport(
+        {"jsonrpc": "2.0", "id": 1, "result": "0x" + "ab" * 32}
+    )
+    rpc = RpcClient("http://nethermind:8545", client=_client(transport))
+    rpc.testing_commit_block_v1([b"\x01\x02"], timestamp_unix=1730000042)
+    assert transport.captured_payload is not None
+    params = transport.captured_payload["params"]
+    payload_attrs = params[0]
+    assert payload_attrs["timestamp"] == hex(1730000042)
+
+
+def test_testing_commit_block_v1_rejects_negative_timestamp() -> None:
+    transport = _CapturePayloadTransport(
+        {"jsonrpc": "2.0", "id": 1, "result": "0x" + "ab" * 32}
+    )
+    rpc = RpcClient("http://nethermind:8545", client=_client(transport))
+    with pytest.raises(ValueError, match="timestamp_unix"):
+        rpc.testing_commit_block_v1([b"\x01"], timestamp_unix=-1)
+
+
+def test_testing_commit_block_v1_requires_keyword_timestamp() -> None:
+    """The signature change is the whole point — calling without timestamp must fail."""
+    transport = _CapturePayloadTransport(
+        {"jsonrpc": "2.0", "id": 1, "result": "0x" + "ab" * 32}
+    )
+    rpc = RpcClient("http://nethermind:8545", client=_client(transport))
+    with pytest.raises(TypeError):
+        rpc.testing_commit_block_v1([b"\x01"])  # type: ignore[call-arg]
+
+
+def test_eth_get_transaction_count_decodes_hex() -> None:
+    transport = _Transport({"jsonrpc": "2.0", "id": 1, "result": "0x2a"})
+    rpc = RpcClient("http://nethermind:8545", client=_client(transport))
+    assert rpc.eth_get_transaction_count("0x" + "00" * 20) == 42

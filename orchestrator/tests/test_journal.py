@@ -41,6 +41,7 @@ def _make_record(batch_id: int, *, snapshot: object = _MISSING, status: str = "o
             status=status,
             block_hash=f"0x{'bb' * 32}",
             block_number=100 + batch_id,
+            block_timestamp=1700000000 + batch_id,
         ),
         observability=Observability(
             observed_flat_bytes=1234,
@@ -225,6 +226,7 @@ def test_validate_record_dict_rejects_bad_status() -> None:
             "status": "garbage",
             "block_hash": "0x" + "bb" * 32,
             "block_number": 100,
+            "block_timestamp": 1700000000,
             "chain_hash": "0" * 64,
         },
         "observability": {
@@ -336,3 +338,41 @@ def test_serialize_replay_core_excludes_chain_hash() -> None:
     )
     payload = serialize_replay_core(rc).decode()
     assert "chain_hash" not in payload
+
+
+def test_block_timestamp_is_chain_hash_preimage() -> None:
+    """§C.1: block_timestamp is folded into the EL block hash → must affect chain_hash."""
+    base = ReplayCore(
+        verb="eoatx",
+        deadline_bytes=100,
+        start_address="0x00",
+        end_address="0x01",
+        status="ok",
+        block_hash="0xab",
+        block_number=1,
+        block_timestamp=1700000000,
+    )
+    other = ReplayCore(
+        verb="eoatx",
+        deadline_bytes=100,
+        start_address="0x00",
+        end_address="0x01",
+        status="ok",
+        block_hash="0xab",
+        block_number=1,
+        block_timestamp=1700000001,
+    )
+    assert serialize_replay_core(base) != serialize_replay_core(other)
+
+
+def test_block_timestamp_round_trips_through_journal(tmp_path: Path) -> None:
+    journal = tmp_path / "j.jsonl"
+    record = _make_record(0)
+    record.replay_core.block_timestamp = 1730000042
+    with JournalWriter(journal) as w:
+        w.append(record)
+    body = json.loads(journal.read_text().strip())
+    assert body["replay_core"]["block_timestamp"] == 1730000042
+    reread = JournalReader(journal).tail()
+    assert reread is not None
+    assert reread.replay_core.block_timestamp == 1730000042

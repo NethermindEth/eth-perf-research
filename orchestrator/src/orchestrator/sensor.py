@@ -93,7 +93,21 @@ class SensorClient:
         deadline = time.monotonic() + timeout_s
         last_seen = -1
         while True:
-            resp = self._rpc("statecomp_get")
+            # A single stuck RPC call must not eat the whole 5 s window. Cap
+            # the per-call timeout at the lesser of (remaining-deadline, 2 s)
+            # so we still get at least one poll attempt before SensorWaitTimeout.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SensorWaitTimeout(expected_block or 0, last_seen)
+            call_timeout = min(remaining, 2.0)
+            try:
+                resp = self._rpc("statecomp_get", request_timeout=call_timeout)
+            except httpx.TimeoutException:
+                # The call itself timed out; convert to SensorWaitTimeout if
+                # the outer deadline is also exceeded, otherwise loop and retry.
+                if time.monotonic() >= deadline:
+                    raise SensorWaitTimeout(expected_block or 0, last_seen) from None
+                continue
             last_seen = _parse_int(resp["blockNumber"])
             if expected_block is None or last_seen >= expected_block:
                 ts = resp["trieStats"]
@@ -108,7 +122,13 @@ class SensorClient:
                 raise SensorWaitTimeout(expected_block, last_seen)
             time.sleep(self.POLL_INTERVAL_S)
 
-    def _rpc(self, method: str, params: list[Any] | None = None) -> dict[str, Any]:
+    def _rpc(
+        self,
+        method: str,
+        params: list[Any] | None = None,
+        *,
+        request_timeout: float | None = None,
+    ) -> dict[str, Any]:
         self._request_id += 1
         payload = {
             "jsonrpc": "2.0",
@@ -117,7 +137,12 @@ class SensorClient:
             "params": params or [],
         }
         headers = {"content-type": "application/json"}
-        response = self._client.post(self._rpc_url, json=payload, headers=headers)
+        # Per-call timeout overrides the client-default 10 s so the sensor
+        # never blocks past the outer ``read()`` deadline.
+        kwargs: dict[str, Any] = {"json": payload, "headers": headers}
+        if request_timeout is not None:
+            kwargs["timeout"] = request_timeout
+        response = self._client.post(self._rpc_url, **kwargs)
         response.raise_for_status()
         body = response.json()
         if "error" in body:

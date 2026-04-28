@@ -107,7 +107,11 @@ def _replay_one_record(record: Record, ctx: FacadeContext, rpc: RpcClient) -> in
         return EXIT_FACADE
 
     try:
-        block_hash = rpc.testing_commit_block_v1([tx.rlp for tx in txs])
+        # Re-supply the journaled block timestamp; the EL folds it into the
+        # block hash, so any drift here breaks §C.1 replay-equivalence.
+        block_hash = rpc.testing_commit_block_v1(
+            [tx.rlp for tx in txs], timestamp_unix=rc.block_timestamp
+        )
     except (httpx.HTTPError, ConnectionError, TimeoutError, RuntimeError):
         return EXIT_FACADE
     if block_hash != rc.block_hash:
@@ -127,11 +131,21 @@ def _context_from_manifest(
     except ValueError:
         return None
     key = deploy_private_key if deploy_private_key is not None else b"\x11" * 32
+    # Pre-block_gas_limit manifests serialized 0; FacadeContext defaults its
+    # ``block_gas_limit`` to ``gas_limit`` to match the live-run convention in
+    # ``build_facade_context``. This keeps replay reproducing the same
+    # gas-aware dispatch decisions for legacy journals too.
+    block_gas_limit = (
+        replay_ctx.block_gas_limit
+        if replay_ctx.block_gas_limit > 0
+        else replay_ctx.gas_limit
+    )
     ctx = FacadeContext(
         base_address=base_addr,
         revision=replay_ctx.revision,
         chain_id=replay_ctx.chain_id,
         gas_limit=replay_ctx.gas_limit,
+        block_gas_limit=block_gas_limit,
         deploy_private_key=key,
         address_stride=replay_ctx.address_stride,
     )
