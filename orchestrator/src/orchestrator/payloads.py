@@ -3,8 +3,10 @@
 Format: one record per commit. Each record is length-prefixed (4-byte big-endian unsigned
 integer giving RLP byte length) followed by the RLP-encoded payload. fsync after each write.
 
-The RLP layout is the canonical `ExecutionPayloadV3` encoding used across all EL clients —
-`geth import`, `besu blocks import`, `erigon import`, `reth import` all accept it.
+The RLP layout is the canonical `ExecutionPayloadV3` encoding consumed by the Engine API
+(`engine_newPayloadV3` / `engine_newPayloadV4`). Replay against another EL is via the Engine
+API — see `scripts/replay_on_geth.py` for a working geth driver. Note that this is NOT the
+chain-export RLP that the legacy `geth import` / `besu blocks import` CLI commands consume.
 """
 
 from __future__ import annotations

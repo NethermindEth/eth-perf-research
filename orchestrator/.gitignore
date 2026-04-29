@@ -10,3 +10,11 @@ state/
 run-manifest.json
 .omc/
 target.yaml
+# Local stack scratch — bind-mount targets / generated reports / per-host paths.
+nethermind-data/
+reports/
+lab-genesis.json
+# Geth datadir + runtime files; keep state-geth/genesis.json (the committed config).
+state-geth/datadir/
+state-geth/geth.log
+state-geth/jwt.hex

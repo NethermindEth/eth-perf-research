@@ -780,6 +780,191 @@ def test_legacy_manifest_resume_bypass_refused(tmp_path: Path) -> None:
         )
 
 
+class _ProbeStubSensor:
+    """Sensor that grows account_bytes per call so the probe sanity gate passes.
+
+    Each ``read()`` call increments ``block_number`` by one and adds the verb's
+    REFERENCE_F per-tx bytes × tx_count to the cumulative byte counters. The
+    probe fires per-verb back-to-back, so this stub only needs to grow on
+    matched (pre, post) pairs — the lifecycle's pre-loop ``sensor.read()`` call
+    sees whichever counters were last set.
+    """
+
+    def __init__(self, ref_f, tx_count: int) -> None:
+        self._block = 0
+        self._account = 0
+        self._storage = 0
+        self._code = 0
+        self._ref_f = ref_f
+        self._tx_count = tx_count
+        self._verbs_iter: list[str] = []
+
+    def queue(self, verbs: list[str]) -> None:
+        self._verbs_iter = list(verbs)
+
+    def read(self, expected_block=None, timeout_s=5.0):
+        from orchestrator.sensor import StateObservation
+
+        if expected_block is not None:
+            # post-commit read: bump the counters by the next queued verb's
+            # REFERENCE_F so the probe sanity gate passes.
+            self._block = expected_block
+            if self._verbs_iter:
+                verb = self._verbs_iter.pop(0)
+                ref = self._ref_f.per_scenario(verb)
+                self._account += int(ref["accounts"] * self._tx_count)
+                self._storage += int(ref["storage"] * self._tx_count)
+                self._code += int(ref["code"] * self._tx_count)
+        else:
+            # pre-commit read or top-of-loop read: don't advance the block.
+            pass
+        return StateObservation(
+            block_number=self._block,
+            account_bytes=self._account,
+            storage_bytes=self._storage,
+            code_bytes=self._code,
+            raw={"blockNumber": self._block},
+        )
+
+    def close(self) -> None: ...
+
+
+class _ProbeStubRpc:
+    """Tracks committed blocks; returns minimal-but-valid block dicts."""
+
+    def __init__(self) -> None:
+        self._block = 0
+
+    def testing_commit_block_v1(self, txs, *, timestamp_unix):
+        self._block += 1
+        return "0x" + self._block.to_bytes(32, "big").hex()
+
+    def eth_get_block_by_hash(self, block_hash, full=True):
+        return {
+            "parentHash": "0x" + b"\x00".hex() * 32,
+            "miner": "0x" + b"\x00".hex() * 20,
+            "stateRoot": "0x" + b"\x01".hex() * 32,
+            "receiptsRoot": "0x" + b"\x00".hex() * 32,
+            "logsBloom": "0x" + b"\x00".hex() * 256,
+            "mixHash": "0x" + b"\x00".hex() * 32,
+            "number": hex(self._block),
+            "gasLimit": "0x1c9c380",
+            "gasUsed": "0x5208",
+            "timestamp": hex(1700000000 + self._block),
+            "extraData": "0x",
+            "baseFeePerGas": "0x3b9aca00",
+            "hash": block_hash,
+        }
+
+    def eth_get_block_by_number(self, number="latest", full=False):
+        return {
+            "number": hex(max(self._block, 0)),
+            "stateRoot": "0x" + b"\x01".hex() * 32,
+        }
+
+    def eth_get_transaction_count(self, address, block="latest"):
+        return 0
+
+    def close(self) -> None: ...
+
+
+def _three_verb_target() -> TargetConfig:
+    """Tiny 3-verb target so probe + QP records are easy to count."""
+    return TargetConfig(
+        mainnet_target={"accounts": 0.141, "storage": 0.817, "code": 0.042},
+        target_total_bytes=10_000_000_000,
+        base_address=(0x10_00).to_bytes(20, "big"),
+        revision=0,
+        qp_scenarios=("eoatx", "calltx", "deploytx"),
+        total_batch_bytes=500_000,
+        projection_eta=0.5,
+        raw={},
+        source_sha256="t" * 64,
+    )
+
+
+def test_probe_batches_are_journaled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§B.2: probe blocks must land in the journal at batch_ids 0..n-1 with payloads."""
+    from orchestrator.payloads import PayloadStreamReader
+    from orchestrator.probe import PROBE_TX_COUNT
+    from orchestrator.reference_f import default_reference_f_path, load_reference_f
+
+    target = _three_verb_target()
+    env = _env()
+    ref_f = load_reference_f(default_reference_f_path())
+
+    sensor = _ProbeStubSensor(ref_f, PROBE_TX_COUNT)
+    sensor.queue(list(target.qp_scenarios))
+
+    deps = LifecycleDeps(
+        sensor=sensor,
+        rpc=_ProbeStubRpc(),
+        probe_executor=None,  # use the default journaling executor
+    )
+    run(
+        target=target,
+        state_dir=tmp_path,
+        rpc_url="http://stub",
+        env=env,
+        max_batches=0,  # zero QP batches — only probes journal
+        deps=deps,
+    )
+
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    records = list(JournalReader(journal))
+    n_probes = len(target.qp_scenarios)
+    assert len(records) == n_probes, f"expected {n_probes} probe records, got {len(records)}"
+    for i, rec in enumerate(records):
+        assert rec.batch_id == i
+        assert rec.replay_core.verb == target.qp_scenarios[i]
+        assert rec.replay_core.status == "ok"
+
+    # Payload stream must mirror the journal: one ExecutionPayloadV3 per probe.
+    payload_path = tmp_path / "payloads.rlp"
+    payloads = list(PayloadStreamReader(payload_path))
+    assert len(payloads) == n_probes
+
+
+def test_probe_then_qp_batch_id_continuity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QP loop's first batch_id must equal n_probes (continuity across probe/QP)."""
+    from orchestrator.probe import PROBE_TX_COUNT
+    from orchestrator.reference_f import default_reference_f_path, load_reference_f
+
+    target = _three_verb_target()
+    env = _env()
+    ref_f = load_reference_f(default_reference_f_path())
+
+    sensor = _ProbeStubSensor(ref_f, PROBE_TX_COUNT)
+    sensor.queue(list(target.qp_scenarios))
+
+    deps = LifecycleDeps(
+        sensor=sensor,
+        rpc=_ProbeStubRpc(),
+        probe_executor=None,
+    )
+    run(
+        target=target,
+        state_dir=tmp_path,
+        rpc_url="http://stub",
+        env=env,
+        max_batches=1,  # one QP batch after the probe
+        deps=deps,
+    )
+
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    records = list(JournalReader(journal))
+    n_probes = len(target.qp_scenarios)
+    assert len(records) == n_probes + 1
+    # batch_ids must be contiguous 0..n_probes
+    assert [r.batch_id for r in records] == list(range(n_probes + 1))
+    # The QP batch's batch_id == n_probes
+    assert records[n_probes].batch_id == n_probes
+
+
 def _record(
     batch_id: int,
     *,

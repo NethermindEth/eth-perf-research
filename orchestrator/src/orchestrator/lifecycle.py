@@ -29,6 +29,7 @@ import httpx
 from .controller import (
     EPSILON,
     OVERSHOOT_PENALTY,
+    BatchPlan,
     Controller,
     ControllerInstability,
     init_state,
@@ -481,10 +482,12 @@ def make_default_probe_executor(
     from the CLI path — fresh runs seeded F from REFERENCE_F and lost the §B.2
     sanity gate (round-3 C4 / design-compliance HIGH #1).
 
-    NOTE: this executor does **not** currently write probe batches to the
-    journal. Spec §B.2 calls for "journal normally (batch_id 0..n-1)"; wiring
-    probe batches through the full pending/commit/journal pipeline is a
-    follow-up. The immediate value here is reinstating the probe + sanity gate.
+    Probe blocks are committed but NOT journaled here. The journaling-capable
+    variant lives at ``make_journaling_probe_executor``: it threads the same
+    pending/commit/journal pipeline the QP loop uses, so probe blocks land in
+    ``payloads.rlp`` and the journal at ``batch_id`` 0..n-1 (spec §B.2). The
+    bare executor stays available for tests that don't need a journal/payload
+    writer in scope.
     """
 
     def _execute(verb: str, tx_count: int) -> tuple[StateObservation, StateObservation]:
@@ -502,6 +505,71 @@ def make_default_probe_executor(
             timestamp_unix=_now_unix(),
         )
         post = sensor.read(expected_block=pre.block_number + 1)
+        return pre, post
+
+    return _execute
+
+
+def make_journaling_probe_executor(
+    *,
+    controller: Controller,
+    sensor: SensorClient,
+    rpc: RpcClient,
+    facade_ctx: FacadeContext,
+    reference_f: ReferenceF,
+    journal_writer: JournalWriter,
+    payload_writer: PayloadStreamWriter,
+    state_dir: Path,
+    composition_hash: str,
+    session_id: int,
+    resumed_from_batch: int | None,
+    batch_id_start: int = 0,
+) -> ProbeExecutor:
+    """Probe executor that journals each probe block (spec §B.2).
+
+    Every invocation goes through ``_commit_and_journal`` — the same pipeline
+    as the QP main loop — so probe records share the pending sidecar, payload
+    stream, and chain-hashed journal. ``batch_id`` advances 0..n-1 across calls
+    via a shared counter; the QP loop must start at the post-probe value
+    (``batch_id_start + n_probes``) for chain continuity.
+
+    Sensor timeouts are propagated as ``sensor_wait_timeout`` records (same as
+    QP), so probe-time stalls produce a journal record instead of being papered
+    over.
+    """
+    counter = {"batch_id": batch_id_start}
+
+    def _execute(verb: str, tx_count: int) -> tuple[StateObservation, StateObservation]:
+        ref = reference_f.per_scenario(verb)
+        deadline_bytes = max(
+            1,
+            int(abs(ref["accounts"]) + abs(ref["storage"]) + abs(ref["code"])) * tx_count,
+        )
+        pre = sensor.read()
+        # Synthesize a single-verb plan inline — controller.pick_next_batch
+        # MUST NOT run for probes (their verb sequence is fixed by spec §B.2).
+        plan = BatchPlan(verb=verb, deadline_bytes=deadline_bytes, mix={verb: 1.0})
+        status, post = _commit_and_journal(
+            plan=plan,
+            controller=controller,
+            sensor=sensor,
+            rpc=rpc,
+            facade_ctx=facade_ctx,
+            journal_writer=journal_writer,
+            payload_writer=payload_writer,
+            state_dir=state_dir,
+            composition_hash=composition_hash,
+            session_id=session_id,
+            resumed_from_batch=resumed_from_batch,
+            batch_id=counter["batch_id"],
+            pre_observation=pre,
+        )
+        counter["batch_id"] += 1
+        if status != "ok":
+            # Sensor never advanced; return the stale pre as post so the
+            # sanity gate sees a zero-delta and (for non-zero ref values)
+            # raises CharacterizationInsufficient, aborting the probe.
+            return pre, pre
         return pre, post
 
     return _execute
@@ -695,9 +763,11 @@ def _run_locked(
     )
 
     ctx = preflight_ctx
-    if decision.mode == StartupMode.RESUME and decision.last_record is not None:
+    is_fresh = not (decision.mode == StartupMode.RESUME and decision.last_record is not None)
+    if not is_fresh:
+        assert decision.last_record is not None  # narrow for type checker
         session_id = resume_session_id
-        resumed_from_batch = decision.last_record.batch_id
+        resumed_from_batch: int | None = decision.last_record.batch_id
         # Spec §C.3 step 6: reconstruct F/σ/α from the journal tail so controller
         # continuity survives resume. Without this every session is a cold start.
         state = rehydrate_state(
@@ -708,6 +778,7 @@ def _run_locked(
         )
         batch_id = decision.last_record.batch_id + 1
         ctx.address_cursor = int(decision.last_record.replay_core.end_address, 16)
+        ctx.last_block_timestamp = decision.last_record.replay_core.block_timestamp
         # Resume guard: refuse if the rehydrated cursor doesn't match the EOA's
         # on-chain nonce. A mid-batch crash that leaked partial txs onto the
         # chain (or operator intervention via direct RPC) silently desyncs
@@ -717,19 +788,7 @@ def _run_locked(
         session_id = 1
         resumed_from_batch = None
         state = init_state(ref_f, target.qp_scenarios)
-        batch_id = 0
-        # C4: on fresh start, always run the probe (spec §B.2 + §C.3 step 2).
-        # Tests inject a stub via LifecycleDeps; production wires the default
-        # one automatically from the live rpc+sensor+facade stack.
-        active_probe = probe_exec or make_default_probe_executor(
-            rpc=rpc,
-            sensor=sensor,
-            facade_ctx=ctx,
-            reference_f=ref_f,
-        )
-        results = run_probe(ref_f, target.qp_scenarios, active_probe)
-        seed_state_from_probe(state, results)
-        batch_id = len(results)
+        batch_id = 0  # probe path advances this below
 
     controller = Controller(state)
 
@@ -738,7 +797,6 @@ def _run_locked(
     manifest_path = state_dir / MANIFEST_FILENAME
 
     session_started = _now_iso()
-    last_observation = sensor.read()
     stop_reason = "max_batches"
 
     try:
@@ -747,6 +805,30 @@ def _run_locked(
             JournalWriter(journal_path) as jw,
             PayloadStreamWriter(payload_path) as pw,
         ):
+            if is_fresh:
+                # C4 + spec §B.2: probe BEFORE the QP loop so F is seeded from
+                # measured observations. Probe blocks are journaled at batch_id
+                # 0..n-1 via the same pending/commit/journal pipeline as QP
+                # batches; the QP loop then starts at batch_id = n_probes.
+                active_probe = probe_exec or make_journaling_probe_executor(
+                    controller=controller,
+                    sensor=sensor,
+                    rpc=rpc,
+                    facade_ctx=ctx,
+                    reference_f=ref_f,
+                    journal_writer=jw,
+                    payload_writer=pw,
+                    state_dir=state_dir,
+                    composition_hash=composition_hash,
+                    session_id=session_id,
+                    resumed_from_batch=resumed_from_batch,
+                    batch_id_start=batch_id,
+                )
+                results = run_probe(ref_f, target.qp_scenarios, active_probe)
+                seed_state_from_probe(state, results)
+                batch_id = len(results)
+
+            last_observation = sensor.read()
             completed = 0
             consecutive_low_residual = 0
             while not stop.is_set():
@@ -839,6 +921,52 @@ def _run_one_batch(
         pre_observation, target,
         batch_id=batch_id, composition_hash=composition_hash,
     )
+    return _commit_and_journal(
+        plan=plan,
+        controller=controller,
+        sensor=sensor,
+        rpc=rpc,
+        facade_ctx=facade_ctx,
+        journal_writer=journal_writer,
+        payload_writer=payload_writer,
+        state_dir=state_dir,
+        composition_hash=composition_hash,
+        session_id=session_id,
+        resumed_from_batch=resumed_from_batch,
+        batch_id=batch_id,
+        pre_observation=pre_observation,
+    )
+
+
+def _commit_and_journal(
+    *,
+    plan: BatchPlan,
+    controller: Controller,
+    sensor: SensorClient,
+    rpc: RpcClient,
+    facade_ctx: FacadeContext,
+    journal_writer: JournalWriter,
+    payload_writer: PayloadStreamWriter,
+    state_dir: Path,
+    composition_hash: str,
+    session_id: int,
+    resumed_from_batch: int | None,
+    batch_id: int,
+    pre_observation: StateObservation,
+) -> tuple[str, StateObservation]:
+    """Dispatch ``plan``, commit its block, journal the result, and return ``(status, post)``.
+
+    Shared seam between the QP main loop and the §B.2 probe sequence: both supply
+    a ``BatchPlan`` (the main loop via ``controller.pick_next_batch``, the probe
+    via a hand-built ``BatchPlan(verb=v, deadline_bytes=d, mix={v: 1.0})``). The
+    full pending → commit → payload → sense → apply_observation → journal →
+    clear-pending pipeline is identical, so probe records are crash-recoverable
+    on the same code path the main loop uses.
+
+    NOTE: probe records carry the same chain-hash invariant as QP records. Old
+    journals produced before probes were journaled (batch_id 0 was the first QP
+    batch) will fail to verify under this code; archive state/ when upgrading.
+    """
     start_cursor = facade_ctx.address_cursor
     txs = dispatch(plan.verb, plan.deadline_bytes, facade_ctx)
     end_cursor = facade_ctx.address_cursor
@@ -854,8 +982,13 @@ def _run_one_batch(
     # sidecar + journal so replay re-supplies the same value. The wall clock is
     # an off-spec input that gets folded into the committed block hash by the
     # EL; if we let ``rpc`` re-read ``time.time()`` on each replay, every replay
-    # produces a different block hash and §C.1 fails.
-    block_timestamp = _now_unix()
+    # produces a different block hash and §C.1 fails. The Engine API requires
+    # strictly increasing timestamps; on rapid commits (probe phase fires 7
+    # blocks within one second) `_now_unix()` returns the same int, so we floor
+    # at ``parent.timestamp + 1`` — Nethermind tolerated the duplicate, geth /
+    # besu / reth reject it with `invalid timestamp`.
+    block_timestamp = max(facade_ctx.last_block_timestamp + 1, _now_unix())
+    facade_ctx.last_block_timestamp = block_timestamp
     write_pending(
         state_dir,
         PendingBatch(

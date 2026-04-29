@@ -58,6 +58,12 @@ class FacadeContext:
     # ``target.yaml:block_gas_limit`` if present; falls back to the per-tx
     # ``gas_limit``. Read in ``pack_until_deadline`` (not signed onto txs).
     block_gas_limit: int = 30_000_000
+    # Cache of the last block's timestamp so commit_and_journal can floor at
+    # ``parent.timestamp + 1``. The Engine API enforces strictly increasing
+    # timestamps; rapid commits (probe phase fires 7 blocks within one second)
+    # would otherwise share a wall-clock timestamp and be rejected by
+    # geth/besu/reth on cross-client replay.
+    last_block_timestamp: int = 0
     # `repr=False` so `repr(ctx)` never leaks the private key into logs/tracebacks.
     deploy_private_key: bytes = field(default=_LAB_PRIVATE_KEY, repr=False)
     address_stride: int = 1 << 40
