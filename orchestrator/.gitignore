@@ -14,6 +14,11 @@ target.yaml
 nethermind-data/
 reports/
 lab-genesis.json
+# Demo runs (DAG-driven) write to *-demo dirs so prod state stays clean.
+nethermind-data-demo/
+state-demo/
+target-demo.yaml
+.env.demo
 # Geth datadir + runtime files; keep state-geth/genesis.json (the committed config).
 state-geth/datadir/
 state-geth/geth.log

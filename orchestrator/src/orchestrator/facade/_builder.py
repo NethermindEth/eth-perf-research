@@ -25,8 +25,22 @@ def _sign(tx_fields: dict[str, Any], context: FacadeContext) -> bytes:
     pre-bound ``base_tx_fields()`` template replaces four ``setdefault`` probes
     with a single C-level dict merge. Over a multi-day run at ~100 txs/batch
     this is measurable (review H8 + P1 / TRIZ Prior Action).
+
+    EELS builders return ``to``/``data`` as hex strings; the canonical signing
+    path here uses ``bytes``/``bytes | None``. Normalize both so callers can
+    pass either shape without forcing the verb layer to convert.
     """
     full = {**context.base_tx_fields(), **tx_fields}
+    to_val = full.get("to")
+    if isinstance(to_val, str):
+        full["to"] = bytes.fromhex(to_val[2:]) if to_val.startswith("0x") else (
+            bytes.fromhex(to_val) if to_val else None
+        )
+    data_val = full.get("data")
+    if isinstance(data_val, str):
+        full["data"] = bytes.fromhex(data_val[2:]) if data_val.startswith("0x") else (
+            bytes.fromhex(data_val) if data_val else b""
+        )
     signed = context.account.sign_transaction(full)
     return bytes(signed.raw_transaction)
 

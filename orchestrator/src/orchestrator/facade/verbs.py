@@ -1,13 +1,15 @@
-"""Data-driven verb registry — one spec per scenario (replaces 12 near-identical modules).
+"""Data-driven verb registry — one spec per scenario.
 
-Every verb follows the same shape: derive a ``to`` address, build calldata, pick a gas
-limit, and tag the resulting tx with a diagnostic dict. A ``VerbSpec`` table captures
-those four bits; the adapter factory in ``__init__`` binds them into the standard
-``(deadline_bytes, context) -> list[SignedTransaction]`` signature.
+Each EELS-backed verb routes through ``spamoor_builders.build_<verb>_transactions``
+with ``count=1`` and ``reuse_contract=True`` (or an equivalent ``contract_address``
+override) so every emitted tx targets the address pre-funded in lab-genesis.
+The orchestrator's signing path (``_builder._sign`` + ``context.base_tx_fields``)
+strips the EELS-supplied chain/fee fields and re-injects the canonical lab values.
 
-When the upstream EELS port (``execution-specs feat/spamoor-to-est``) becomes
-pip-installable each entry's ``make_data`` / ``make_to`` is a drop-in replacement for the
-upstream helper with no change to the registry's shape.
+``noop`` keeps a local self-transfer (no EELS analog; used by the controller's
+residual-stop logic). ``blob_combined`` keeps a local stub: type-3 broadcast needs
+KZG sidecars that the orchestrator's ``_sign`` path doesn't currently produce —
+deferred to a follow-up.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import spamoor_builders as sb
 from ._builder import pack_until_deadline
 from .context import FacadeContext, SignedTransaction
 
@@ -59,16 +62,32 @@ def _build_unique_storage_burner_init(idx: int) -> bytes:
     assert len(init_prefix) == 14
     return init_prefix + runtime
 
-_FACTORY_CALL_PREFIX = b"\xff" * 4
-_ERC20_TRANSFER_SELECTOR = bytes.fromhex("a9059cbb")  # keccak("transfer(address,uint256)")[:4]
-_STORAGESPAM_SELECTOR = bytes.fromhex("8c8e4f53")
-_SWAP_SELECTOR = bytes.fromhex("128acb08")
-_CLEAR_SELECTOR = bytes.fromhex("45b5a4a0")
-_BURN_SELECTOR = bytes.fromhex("8b9a4f53")
 
-# Marker sequence used by storagerefundtx to make "SSTORE→0" intent visible in tests
-# without having to disassemble EVM bytecode. Kept exported for back-compat.
+# Marker sequence used by storagerefundtx to make "SSTORE→0" intent visible in
+# tests without having to disassemble EVM bytecode. Kept exported for
+# back-compat: 0x55 (SSTORE opcode) followed by 32 zero bytes.
+# EELS' storagerefundtx selector ``fe0d94c1`` + 32-byte zero slot count produces
+# the same ``55 || 0x00*32`` byte sequence inside calldata, so the marker
+# remains discoverable in the signed RLP.
 SSTORE_TO_ZERO_MARKER = bytes.fromhex("55" + "00" * 32)
+
+
+# ----------------------------------------------------------------------------
+# Placeholder addresses pre-deployed in lab-genesis.json. Each EELS builder
+# targets one of these when invoked with ``reuse_contract=True`` (or, for
+# factorydeploytx, with a non-empty ``factory_address``).
+# ----------------------------------------------------------------------------
+
+SPAMOOR_PLACEHOLDERS: dict[str, str] = {
+    "calltx": "0x1111111111111111111111111111111111111111",
+    "factorydeploytx": "0x2222222222222222222222222222222222222222",
+    "gasburnertx": "0x3333333333333333333333333333333333333333",
+    "uniswap_swaps": "0x4444444444444444444444444444444444444444",
+    "erc20tx": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "storagespam": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "erc20_bloater": "0xdddddddddddddddddddddddddddddddddddddddd",
+    "storagerefundtx": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+}
 
 
 MakeTo = Callable[[FacadeContext, int], bytes | None]
@@ -89,182 +108,328 @@ class VerbSpec:
     value: int = 0
 
 
-# ---------------------------------------------------------------------------
-# Helpers used by multiple verbs. Defined as lambdas below for locality.
-
-
-def _eoatx_to(ctx: FacadeContext, idx: int) -> bytes:
-    return ctx.derive_address(idx)
+# ----------------------------------------------------------------------------
+# Local helpers retained for ``noop`` (and tests).
+# ----------------------------------------------------------------------------
 
 
 def _self_to(ctx: FacadeContext, _idx: int) -> bytes:
-    """Self-transfer recipient — used by the no-op verb.
-
-    Returns the deploy account's own 20-byte address. Sending value=0 to
-    self with no calldata costs only the 21 K intrinsic gas, touches only
-    the sender's nonce, and produces ~zero state-trie growth (encoding a
-    larger nonce can shift a leaf by one byte but typically doesn't). This
-    gives the controller a true mathematical "do nothing" verb so the
-    simplex projector has a zero in its action space.
-    """
+    """Self-transfer recipient — used by the no-op verb."""
     addr_hex = ctx.account.address.lower().removeprefix("0x")
     return bytes.fromhex(addr_hex)
-
-
-def _calltx_to(ctx: FacadeContext, idx: int) -> bytes:
-    # Touch a previously-created address (idx-1) so we don't create new state.
-    return ctx.derive_address(max(0, idx - 1))
-
-
-def _deploy_to(_ctx: FacadeContext, _idx: int) -> None:
-    return None  # CREATE tx — `to` must be absent.
-
-
-def _zero_to(ctx: FacadeContext, _idx: int) -> bytes:
-    return ctx.derive_address(0)
-
-
-def _pool_to(ctx: FacadeContext, _idx: int) -> bytes:
-    return ctx.derive_address(1)
 
 
 def _noop_data(_ctx: FacadeContext, _idx: int) -> bytes:
     return b""
 
 
-def _calltx_data(_ctx: FacadeContext, _idx: int) -> bytes:
-    return b"\x00" * 4  # bare 4-byte selector
-
-
-def _deploy_data(_ctx: FacadeContext, idx: int) -> bytes:
-    return _build_unique_storage_burner_init(idx)
-
-
-def _factory_data(ctx: FacadeContext, _idx: int) -> bytes:
-    return _FACTORY_CALL_PREFIX + ctx.next_salt()
-
-
-def _storagespam_data(_ctx: FacadeContext, idx: int) -> bytes:
-    return _STORAGESPAM_SELECTOR + idx.to_bytes(32, "big") + (16).to_bytes(32, "big")
-
-
-def _erc20_bloater_data(ctx: FacadeContext, idx: int) -> bytes:
-    recipient = ctx.derive_address(idx + 1_000_000)
-    return _ERC20_TRANSFER_SELECTOR + b"\x00" * 12 + recipient + (1).to_bytes(32, "big")
-
-
-def _erc20tx_data(ctx: FacadeContext, idx: int) -> bytes:
-    recipient = ctx.derive_address((idx % 64) + 1)
-    return _ERC20_TRANSFER_SELECTOR + b"\x00" * 12 + recipient + (1).to_bytes(32, "big")
-
-
-def _swap_data(_ctx: FacadeContext, idx: int) -> bytes:
-    return _SWAP_SELECTOR + idx.to_bytes(32, "big") + (1).to_bytes(32, "big")
-
-
-def _storagerefund_data(_ctx: FacadeContext, idx: int) -> bytes:
-    return _CLEAR_SELECTOR + idx.to_bytes(32, "big") + SSTORE_TO_ZERO_MARKER
-
-
-def _gasburner_data(_ctx: FacadeContext, _idx: int) -> bytes:
-    return _BURN_SELECTOR + (100_000).to_bytes(32, "big")
+def _blob_to(_ctx: FacadeContext, _idx: int) -> bytes:
+    return bytes.fromhex("1000000000000000000000000000000000000000")
 
 
 def _blob_data(_ctx: FacadeContext, _idx: int) -> bytes:
+    # Stub payload until type-3 + KZG sidecars are wired through ``_sign``.
     return b"\xff" * 32
 
 
-def _fuzz_data(_ctx: FacadeContext, idx: int) -> bytes:
-    return ((idx * 0x9E3779B97F4A7C15) & ((1 << 256) - 1)).to_bytes(32, "big")
+# ----------------------------------------------------------------------------
+# EELS-backed builders. Each returns ``(signable, diag)`` for ``build_one``.
+# We always invoke EELS with ``count=1`` and the placeholder target so a single
+# call yields exactly one execution tx; the dispatch loop in
+# ``pack_until_deadline`` already drives multiple calls in sequence.
+# ----------------------------------------------------------------------------
 
 
-def _erc20_bloater_diag(ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    recipient = ctx.derive_address(idx + 1_000_000)
-    return {"erc20_recipient": "0x" + recipient.hex()}
+_BASE_FIELDS_TO_STRIP = ("chainId", "maxFeePerGas", "maxPriorityFeePerGas", "type", "accessList")
 
 
-def _erc20tx_diag(ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    recipient = ctx.derive_address((idx % 64) + 1)
-    return {"erc20_recipient": "0x" + recipient.hex(), "churn_only": True}
+def _to_signable(eels_tx: dict[str, Any], idx: int, gas: int) -> dict[str, Any]:
+    """Drop fields the orchestrator's ``base_tx_fields`` already injects.
+
+    EELS' builders pin ``chainId=1`` and a builder-internal fee schedule;
+    the orchestrator overrides both via ``FacadeContext.base_tx_fields()``.
+    Rather than mutate the EELS dict in place, copy + filter so a future
+    re-sync of ``spamoor_builders.py`` doesn't surprise us.
+    """
+    out: dict[str, Any] = {
+        k: v for k, v in eels_tx.items() if k not in _BASE_FIELDS_TO_STRIP
+    }
+    out["nonce"] = idx
+    out["gas"] = gas
+    return out
 
 
-def _calltx_diag(ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    to = ctx.derive_address(max(0, idx - 1))
-    return {"to": "0x" + to.hex(), "call_touch_only": True}
+def _eoatx_build(ctx: FacadeContext, idx: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Value-1 EOA transfer to a fresh derived address (creates one new account per tx).
+
+    EELS' ``build_eoatx_transactions`` hard-codes ``to=0x0…0`` (burn address) which
+    matches Spamoor's CLI default. That makes the tx mechanically valid but it
+    doesn't grow the account-trie axis the controller needs to balance against
+    storage + code. We keep the EELS calldata/fee shape and just override the
+    recipient with ``ctx.derive_address(idx)`` so each tx writes a fresh leaf.
+    """
+    txs = sb.build_eoatx_transactions(count=1, throughput=1.0, amount=1)
+    signable = _to_signable(txs[0], idx, gas=21_000)
+    fresh = ctx.derive_address(idx)
+    signable["to"] = "0x" + fresh.hex()
+    signable["value"] = 1
+    return signable, {"to": signable["to"], "value": 1, "fresh_account": True}
 
 
-def _eoatx_diag(ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    to = ctx.derive_address(idx)
-    return {"to": "0x" + to.hex(), "value": 1}
+def _calltx_build(_ctx: FacadeContext, idx: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = SPAMOOR_PLACEHOLDERS["calltx"]
+    txs = sb.build_calltx_transactions(
+        count=1,
+        throughput=1.0,
+        contract_address=target,
+        call_data="0x00000000",
+        gas_limit=40_000,
+    )
+    signable = _to_signable(txs[0], idx, gas=40_000)
+    return signable, {"to": target, "call_touch_only": True}
 
 
-def _deploy_diag(_ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    return {"is_deploy": True, "init_len": len(_build_unique_storage_burner_init(idx))}
+def _deploytx_build(_ctx: FacadeContext, idx: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Deploy a per-idx unique storage-burner so codehashes don't dedupe.
+
+    EELS' ``build_deploytx_transactions`` cycles a fixed bytecode list, which
+    would collapse to a single codehash across the run. We keep the local
+    unique-init builder so the plugin's ``codeBytesTotal`` axis grows.
+    """
+    init_code = _build_unique_storage_burner_init(idx)
+    signable = {
+        "type": 2,
+        "nonce": idx,
+        "to": None,
+        "value": 0,
+        "gas": 300_000,
+        "data": init_code,
+    }
+    return signable, {"is_deploy": True, "init_len": len(init_code)}
 
 
-def _factory_diag(ctx: FacadeContext, _idx: int) -> dict[str, Any]:
-    # `next_salt` has already advanced by the time diag runs; reconstruct the prior.
-    prior_salt = (ctx.salt_cursor - 1).to_bytes(32, "big") if ctx.salt_cursor > 0 else b"\x00" * 32
-    return {"is_factory_deploy": True, "salt": prior_salt.hex()}
+def _factorydeploytx_build(
+    ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    factory = SPAMOOR_PLACEHOLDERS["factorydeploytx"]
+    salt = ctx.salt_cursor
+    # ``factory_address`` non-empty → builder skips the leading deploy tx.
+    txs = sb.build_factorydeploytx_transactions(
+        count=1,
+        init_code="0x6001600055",
+        start_salt=salt,
+        factory_address=factory,
+        gas_limit=400_000,
+    )
+    signable = _to_signable(txs[0], idx, gas=400_000)
+    ctx.salt_cursor += 1
+    return signable, {
+        "is_factory_deploy": True,
+        "salt": salt.to_bytes(32, "big").hex(),
+    }
 
 
-def _swap_diag(ctx: FacadeContext, _idx: int) -> dict[str, Any]:
-    return {"swap_pool": "0x" + ctx.derive_address(1).hex()}
+def _storagespam_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = SPAMOOR_PLACEHOLDERS["storagespam"]
+    txs = sb.build_storagespam_transactions(
+        count=1,
+        gas_units_to_burn=1_950_000,
+        reuse_contract=True,
+        contract_address=target,
+    )
+    signable = _to_signable(txs[0], idx, gas=2_000_000)
+    return signable, {"slots_written": 16, "start_slot": idx}
 
 
-def _storagerefund_diag(_ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    return {"refund_start_slot": idx}
+def _erc20_bloater_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = SPAMOOR_PLACEHOLDERS["erc20_bloater"]
+    txs = sb.build_erc20_bloater_transactions(
+        count=1,
+        addresses_per_tx=370,
+        start_address_index=1 + idx * 370,
+        gas_limit=80_000,
+        contract_address=target,
+    )
+    signable = _to_signable(txs[0], idx, gas=80_000)
+    return signable, {"erc20_recipient": target}
 
 
-def _storagespam_diag(_ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    return {"slots_written": 16, "start_slot": idx}
+def _erc20tx_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = SPAMOOR_PLACEHOLDERS["erc20tx"]
+    txs = sb.build_erc20tx_transactions(
+        count=1,
+        contract_address=target,
+        gas_limit=60_000,
+    )
+    signable = _to_signable(txs[0], idx, gas=60_000)
+    return signable, {"erc20_recipient": target, "churn_only": True}
 
 
-def _blob_diag(_ctx: FacadeContext, _idx: int) -> dict[str, Any]:
-    return {"blob_tx_placeholder": True, "blob_count": 3}
+def _uniswap_swaps_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    router = SPAMOOR_PLACEHOLDERS["uniswap_swaps"]
+    txs = sb.build_uniswap_swaps_transactions(
+        count=1,
+        gas_limit=250_000,
+        router_address=router,
+    )
+    signable = _to_signable(txs[0], idx, gas=250_000)
+    return signable, {"swap_pool": router}
 
 
-def _fuzz_diag(_ctx: FacadeContext, idx: int) -> dict[str, Any]:
-    return {"fuzz_seed": idx}
+def _storagerefundtx_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target = SPAMOOR_PLACEHOLDERS["storagerefundtx"]
+    txs = sb.build_storagerefundtx_transactions(
+        count=1,
+        slots_per_call=0,  # produces zero word -> SSTORE→0 marker survives
+        contract_address=target,
+        gas_limit=80_000,
+    )
+    signable = _to_signable(txs[0], idx, gas=80_000)
+    return signable, {"refund_start_slot": idx}
 
 
-def _gasburner_diag(_ctx: FacadeContext, _idx: int) -> dict[str, Any]:
-    return {"compute_only": True}
+def _gasburnertx_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """EELS' gasburner builder always emits a leading deploy tx; slice it off.
+
+    With ``contract_address`` set, the second tx targets the placeholder.
+    We use ``count=1`` so the result is exactly ``[deploy, exec]`` and we
+    keep the exec.
+    """
+    target = SPAMOOR_PLACEHOLDERS["gasburnertx"]
+    txs = sb.build_gasburnertx_transactions(
+        count=1,
+        gas_units_to_burn=1_500_000,
+        contract_address=target,
+    )
+    # txs == [deploy_tx, exec_tx]; we want the exec (idx 1).
+    exec_tx = txs[1]
+    signable = _to_signable(exec_tx, idx, gas=1_500_000)
+    return signable, {"compute_only": True}
+
+
+def _evm_fuzz_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    txs = sb.build_evm_fuzz_transactions(
+        count=1,
+        gas_limit=300_000,
+        tx_id_offset=idx,
+    )
+    signable = _to_signable(txs[0], idx, gas=300_000)
+    return signable, {"fuzz_seed": idx}
+
+
+def _blob_combined_build(
+    _ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Local type-2 stub: real EELS blob_combined produces type-3 txs which
+    require KZG sidecars not yet handled by the orchestrator's ``_sign``.
+    """
+    signable = {
+        "type": 2,
+        "nonce": idx,
+        "to": _blob_to(_ctx, idx),
+        "value": 0,
+        "gas": 200_000,
+        "data": _blob_data(_ctx, idx),
+    }
+    return signable, {"blob_tx_placeholder": True, "blob_count": 3}
+
+
+def _noop_build(
+    ctx: FacadeContext, idx: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    signable = {
+        "type": 2,
+        "nonce": idx,
+        "to": _self_to(ctx, idx),
+        "value": 0,
+        "gas": 21_000,
+        "data": _noop_data(ctx, idx),
+    }
+    return signable, {}
+
+
+# Map verb name -> builder. Each builder returns ``(signable, diag)``.
+_VERB_BUILDERS: dict[str, Callable[[FacadeContext, int], tuple[dict[str, Any], dict[str, Any]]]] = {
+    "eoatx": _eoatx_build,
+    "calltx": _calltx_build,
+    "deploytx": _deploytx_build,
+    "factorydeploytx": _factorydeploytx_build,
+    "storagespam": _storagespam_build,
+    "erc20_bloater": _erc20_bloater_build,
+    "erc20tx": _erc20tx_build,
+    "uniswap_swaps": _uniswap_swaps_build,
+    "storagerefundtx": _storagerefundtx_build,
+    "gasburnertx": _gasburnertx_build,
+    "evm_fuzz": _evm_fuzz_build,
+    "blob_combined": _blob_combined_build,
+    "noop": _noop_build,
+}
+
+
+# Per-verb gas hints used by the dispatcher's gas-aware cap. Must match the
+# ``gas`` value the corresponding builder writes into ``signable``.
+_VERB_GAS: dict[str, int] = {
+    "eoatx": 21_000,
+    "calltx": 40_000,
+    "deploytx": 300_000,
+    "factorydeploytx": 400_000,
+    "storagespam": 2_000_000,
+    "erc20_bloater": 80_000,
+    "erc20tx": 60_000,
+    "uniswap_swaps": 250_000,
+    "storagerefundtx": 80_000,
+    "gasburnertx": 1_500_000,
+    "evm_fuzz": 300_000,
+    "blob_combined": 200_000,
+    "noop": 21_000,
+}
 
 
 # Tuple (not list) so ``VERB_SPECS.append(...)`` can't silently extend the registry
 # at runtime. Treat the set of verbs as a compile-time property of the package.
-VERB_SPECS: tuple[VerbSpec, ...] = (
-    VerbSpec("eoatx", 21_000, _eoatx_to, _noop_data, _eoatx_diag, value=1),
-    VerbSpec("calltx", 40_000, _calltx_to, _calltx_data, _calltx_diag),
-    VerbSpec("deploytx", 300_000, _deploy_to, _deploy_data, _deploy_diag),
+VERB_SPECS: tuple[VerbSpec, ...] = tuple(
     VerbSpec(
+        name=name,
+        gas=_VERB_GAS[name],
+        make_to=lambda _c, _i: None,  # unused; build_one drives EELS directly
+        make_data=lambda _c, _i: b"",  # unused; ditto
+        advance_salt=(name == "factorydeploytx"),
+    )
+    for name in (
+        "eoatx",
+        "calltx",
+        "deploytx",
         "factorydeploytx",
-        400_000,
-        _zero_to,
-        _factory_data,
-        _factory_diag,
-        advance_salt=True,
-    ),
-    VerbSpec("storagespam", 2_000_000, _zero_to, _storagespam_data, _storagespam_diag),
-    VerbSpec("erc20_bloater", 80_000, _zero_to, _erc20_bloater_data, _erc20_bloater_diag),
-    VerbSpec("erc20tx", 60_000, _zero_to, _erc20tx_data, _erc20tx_diag),
-    VerbSpec("uniswap_swaps", 250_000, _pool_to, _swap_data, _swap_diag),
-    VerbSpec("storagerefundtx", 80_000, _zero_to, _storagerefund_data, _storagerefund_diag),
-    VerbSpec("gasburnertx", 1_500_000, _zero_to, _gasburner_data, _gasburner_diag),
-    VerbSpec("blob_combined", 200_000, _zero_to, _blob_data, _blob_diag),
-    VerbSpec("evm_fuzz", 300_000, _zero_to, _fuzz_data, _fuzz_diag),
-    # No-op: self-transfer with value=0, intrinsic gas only, ~zero state delta.
-    # Gives the controller a "wait" move whose F vector is essentially (0, 0, 0)
-    # so the simplex projector can sit on the boundary of the simplex once we
-    # approach target. Combined with ORCH_RESIDUAL_STOP_THRESHOLD this is what
-    # makes "stop early when there's nothing useful to do" work.
-    VerbSpec("noop", 21_000, _self_to, _noop_data),
+        "storagespam",
+        "erc20_bloater",
+        "erc20tx",
+        "uniswap_swaps",
+        "storagerefundtx",
+        "gasburnertx",
+        "blob_combined",
+        "evm_fuzz",
+        "noop",
+    )
 )
 
 
 def build_adapter(spec: VerbSpec) -> Callable[..., list[SignedTransaction]]:
     """Factory: return the standard adapter closure for a verb spec."""
+    builder = _VERB_BUILDERS[spec.name]
 
     def adapter(
         deadline_bytes: int,
@@ -273,18 +438,7 @@ def build_adapter(spec: VerbSpec) -> Callable[..., list[SignedTransaction]]:
         gas_budget: int | None = None,
     ) -> list[SignedTransaction]:
         def build_one(index: int, ctx: FacadeContext) -> tuple[dict[str, Any], dict[str, Any]]:
-            to = spec.make_to(ctx, index)
-            data = spec.make_data(ctx, index)
-            signable = {
-                "type": 2,
-                "nonce": index,
-                "to": to,
-                "value": spec.value,
-                "gas": spec.gas,
-                "data": data,
-            }
-            diag = spec.extra_diag(ctx, index)
-            return signable, diag
+            return builder(ctx, index)
 
         return pack_until_deadline(
             deadline_bytes, context, build_one, spec.name, gas_budget=gas_budget,

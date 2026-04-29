@@ -113,3 +113,38 @@ ignore = [
 "src/orchestrator/cli.py" = [
     "ARG001",  # Typer callback receives ctx even when unused
 ]
+# One-off plotly report script. Keeps stylistic divergence from the rest of
+# the codebase (dict() literals are idiomatic in plotly examples).
+"scripts/orchestrator_report.py" = [
+    "B007",   # ``for i, v in enumerate(...)`` reads naturally even when v unused.
+    "B905",   # ``zip(...)`` strict= over a fixed-shape pair.
+    "C408",   # plotly's idiom is ``dict(l=80, r=20, ...)``.
+    "C416",   # comprehensions over pandas Series are fine.
+    "F541",   # one-off f-string preserved for grep symmetry.
+]
+# Vendored from ethereum/execution-specs feat/spamoor-to-est @ 8d89e82f8.
+# Kept byte-for-byte (modulo the documented strips) so a future re-sync is
+# ``cp`` + manual diff. Local lint conventions are intentionally relaxed.
+"src/orchestrator/facade/spamoor_builders.py" = [
+    "ARG001",  # Unused builder args are part of the upstream signature.
+    "B007",    # Unused loop vars mirror upstream loops.
+    "B905",    # ``zip(...)`` strict= mismatch — upstream omits.
+    "BLE001",  # Bare except passes are upstream's pattern for fee parsing.
+    "C408",    # ``dict()`` over literal — upstream style.
+    "C416",    # Comprehension simplifications upstream skips.
+    "C419",    # Upstream uses generator-style any().
+    "E722",    # Upstream's bare except blocks.
+    "F541",    # f-string without placeholders.
+    "PTH123",  # Upstream uses ``open()`` for parity with EELS' I/O patterns.
+    "RET504",  # Upstream returns assigned variables for readability.
+    "RUF005",  # Upstream uses concat over unpacking.
+    "RUF013",  # Optional/None mismatches are upstream's signature.
+    "RUF100",  # ``# noqa`` annotations preserved verbatim.
+    "S101",    # Asserts in upstream guard EELS-only paths.
+    "SIM105",  # try/except/pass mirrors upstream.
+    "SIM108",  # Upstream uses if/else over ternary.
+    "UP006",   # ``List``/``Dict`` annotations are upstream's typing style.
+    "UP015",   # ``open(..., "r", ...)`` explicit mode upstream uses.
+    "UP035",   # ``typing.List`` import mirrors upstream.
+    "UP045",   # ``Optional[X]`` typing mirrors upstream.
+]
