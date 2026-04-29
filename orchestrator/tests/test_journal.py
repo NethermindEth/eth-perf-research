@@ -42,6 +42,7 @@ def _make_record(batch_id: int, *, snapshot: object = _MISSING, status: str = "o
             block_hash=f"0x{'bb' * 32}",
             block_number=100 + batch_id,
             block_timestamp=1700000000 + batch_id,
+            target_sha256="a" * 64,
         ),
         observability=Observability(
             observed_flat_bytes=1234,
@@ -214,7 +215,7 @@ def test_validate_record_dict_rejects_bad_status() -> None:
     from orchestrator.journal import JournalSchemaError
 
     bad = {
-        "schema": 1,
+        "schema": 2,
         "session_id": 1,
         "ts_iso": "2026-04-24T00:00:00Z",
         "batch_id": 0,
@@ -227,6 +228,7 @@ def test_validate_record_dict_rejects_bad_status() -> None:
             "block_hash": "0x" + "bb" * 32,
             "block_number": 100,
             "block_timestamp": 1700000000,
+            "target_sha256": "a" * 64,
             "chain_hash": "0" * 64,
         },
         "observability": {
@@ -363,6 +365,71 @@ def test_block_timestamp_is_chain_hash_preimage() -> None:
         block_timestamp=1700000001,
     )
     assert serialize_replay_core(base) != serialize_replay_core(other)
+
+
+def test_target_sha256_in_chain_hash_preimage() -> None:
+    """v2: target_sha256 must affect chain_hash so two runs with different
+    targets at the same batch_id produce different chain_hashes."""
+    base = ReplayCore(
+        verb="eoatx",
+        deadline_bytes=100,
+        start_address="0x00",
+        end_address="0x01",
+        status="ok",
+        block_hash="0xab",
+        block_number=1,
+        block_timestamp=1700000000,
+        target_sha256="a" * 64,
+    )
+    other = ReplayCore(
+        verb="eoatx",
+        deadline_bytes=100,
+        start_address="0x00",
+        end_address="0x01",
+        status="ok",
+        block_hash="0xab",
+        block_number=1,
+        block_timestamp=1700000000,
+        target_sha256="b" * 64,
+    )
+    assert serialize_replay_core(base) != serialize_replay_core(other)
+
+
+def test_schema_v1_journal_rejected(tmp_path: Path) -> None:
+    """v1 records (no target_sha256, schema=1) must be refused with a clear error."""
+    journal = tmp_path / "j.jsonl"
+    # Hand-craft a v1 record: no target_sha256, schema=1.
+    v1_record = {
+        "schema": 1,
+        "session_id": 1,
+        "resumed_from_batch": None,
+        "ts_iso": "2026-04-24T00:00:00Z",
+        "batch_id": 0,
+        "replay_core": {
+            "verb": "eoatx",
+            "deadline_bytes": 1000,
+            "start_address": "0x00",
+            "end_address": "0x01",
+            "status": "ok",
+            "block_hash": "0x" + "bb" * 32,
+            "block_number": 100,
+            "block_timestamp": 1700000000,
+            "chain_hash": "0" * 64,
+        },
+        "observability": {
+            "observed_flat_bytes": 0,
+            "coeffs_before": {},
+            "coeffs_after": {},
+            "sigma_innov": {},
+            "alpha_current": 0.0,
+            "innovation_ratio": 0.0,
+            "residual_norm": 0.0,
+            "statecomp_snapshot": None,
+        },
+    }
+    journal.write_text(json.dumps(v1_record, separators=(",", ":")) + "\n")
+    with pytest.raises(JournalSchemaError):
+        list(JournalReader(journal))
 
 
 def test_block_timestamp_round_trips_through_journal(tmp_path: Path) -> None:

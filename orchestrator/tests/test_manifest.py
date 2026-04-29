@@ -1,4 +1,4 @@
-"""Manifest writer + composition-hash tests."""
+"""Manifest writer + chain-identity-hash tests."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ from orchestrator.manifest import (
     EnvInfo,
     Manifest,
     Session,
-    compute_composition_hash,
+    TargetSnapshot,
+    compute_chain_identity_hash,
     compute_journal_sha256,
 )
 
@@ -73,26 +74,35 @@ def test_replay_context_matches_field_equality() -> None:
     assert not replay_context_matches(a, b)
 
 
-def test_composition_hash_is_deterministic() -> None:
+def test_chain_identity_hash_is_deterministic() -> None:
     env = _env()
-    a = compute_composition_hash("t" * 64, env)
-    b = compute_composition_hash("t" * 64, env)
+    a = compute_chain_identity_hash(env)
+    b = compute_chain_identity_hash(env)
     assert a == b
     assert len(a) == 64
 
 
-def test_composition_hash_changes_when_any_input_changes() -> None:
+def test_chain_identity_hash_changes_when_env_changes() -> None:
     env = _env()
-    baseline = compute_composition_hash("t" * 64, env)
-    # Different target.
-    assert compute_composition_hash("u" * 64, env) != baseline
+    baseline = compute_chain_identity_hash(env)
     # Different plugin sha.
     env2 = EnvInfo(**{**env.__dict__, "plugin_git_sha": "q" * 40})
-    assert compute_composition_hash("t" * 64, env2) != baseline
+    assert compute_chain_identity_hash(env2) != baseline
 
 
-def test_composition_hash_includes_block_gas_limit() -> None:
-    """target.yaml:block_gas_limit shifts dispatch behaviour → must affect comp hash."""
+def test_chain_identity_hash_excludes_target() -> None:
+    """target.yaml shape is per-batch input — same chain identity must produce
+    the same chain_identity_hash regardless of target.yaml shape."""
+    env = _env()
+    # No target argument exists for compute_chain_identity_hash; verify the
+    # signature documents this contract by construction.
+    a = compute_chain_identity_hash(env)
+    b = compute_chain_identity_hash(env)
+    assert a == b
+
+
+def test_chain_identity_hash_includes_block_gas_limit() -> None:
+    """block_gas_limit shifts dispatch behaviour → must affect chain identity."""
     from orchestrator.manifest import ReplayContext
 
     env = _env()
@@ -114,24 +124,22 @@ def test_composition_hash_includes_block_gas_limit() -> None:
         deploy_pubkey_sha256="a" * 64,
         block_gas_limit=60_000_000,
     )
-    h30 = compute_composition_hash("t" * 64, env, rctx_30m)
-    h60 = compute_composition_hash("t" * 64, env, rctx_60m)
+    h30 = compute_chain_identity_hash(env, rctx_30m)
+    h60 = compute_chain_identity_hash(env, rctx_60m)
     assert h30 != h60
-    # Back-compat: omitting replay_context (older callers) must keep producing
-    # the legacy preimage so existing journals still match.
-    legacy = compute_composition_hash("t" * 64, env)
-    assert legacy != h30
-    assert legacy != h60
+    # No replay_context → distinct from both.
+    plain = compute_chain_identity_hash(env)
+    assert plain != h30
+    assert plain != h60
 
 
 def test_manifest_roundtrip(tmp_path: Path) -> None:
     m = Manifest(
         run_id="abc",
-        target_yaml_sha256="t" * 64,
         base_address="0x" + "00" * 20,
         revision=0,
         genesis_sha256="g" * 64,
-        composition_hash="c" * 64,
+        chain_identity_hash="c" * 64,
         reference_f_version="2026.04.23",
         plugin_git_sha="p" * 40,
         nethermind_commit_sha="n" * 40,
@@ -143,12 +151,46 @@ def test_manifest_roundtrip(tmp_path: Path) -> None:
     out = tmp_path / "run-manifest.json"
     m.write(out)
     body = json.loads(out.read_text())
-    assert body["schema"] == 1
+    assert body["schema"] == 2
     assert body["run_id"] == "abc"
 
     reloaded = Manifest.read(out)
     assert reloaded.run_id == "abc"
     assert reloaded.sessions[0].session_id == 1
+
+
+def test_target_history_replay_lookup(tmp_path: Path) -> None:
+    """Round-trip a manifest with two snapshots; loader recovers them in order."""
+    snap_a = TargetSnapshot(
+        sha256="a" * 64,
+        ts_iso="2026-04-24T00:00:00Z",
+        body={"mainnet_target": {"accounts": 0.141, "storage": 0.817, "code": 0.042}},
+    )
+    snap_b = TargetSnapshot(
+        sha256="b" * 64,
+        ts_iso="2026-04-24T01:00:00Z",
+        body={"mainnet_target": {"accounts": 0.5, "storage": 0.4, "code": 0.1}},
+    )
+    m = Manifest(
+        run_id="r",
+        base_address="0x" + "00" * 20,
+        revision=0,
+        genesis_sha256="g" * 64,
+        chain_identity_hash="c" * 64,
+        reference_f_version="2026.04.23",
+        plugin_git_sha="p" * 40,
+        nethermind_commit_sha="n" * 40,
+        dotnet_runtime_major=10,
+        cpu_arch="x86_64",
+        target_history=[snap_a, snap_b],
+    )
+    out = tmp_path / "run-manifest.json"
+    m.write(out)
+    reloaded = Manifest.read(out)
+    assert len(reloaded.target_history) == 2
+    assert reloaded.target_history[0].sha256 == snap_a.sha256
+    assert reloaded.target_history[1].sha256 == snap_b.sha256
+    assert reloaded.target_history[0].body == snap_a.body
 
 
 def test_compute_journal_sha256(tmp_path: Path) -> None:
@@ -169,6 +211,7 @@ def test_compute_journal_sha256(tmp_path: Path) -> None:
                         status="ok",
                         block_hash="0x" + ("bb" * 32),
                         block_number=100 + i,
+                        target_sha256="a" * 64,
                     ),
                     observability=Observability(statecomp_snapshot={"x": i}),
                 )

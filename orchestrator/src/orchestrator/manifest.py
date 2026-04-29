@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-MANIFEST_SCHEMA = 1
+MANIFEST_SCHEMA = 2
 
 
 @dataclass
@@ -48,22 +51,38 @@ class ReplayContext:
     deploy_pubkey_sha256: str
     # ``block_gas_limit`` shifts the dispatcher's tx-count threshold for the
     # same ``(verb, deadline_bytes)`` pair (heavy-gas verbs cap earlier). Two
-    # runs with identical ``target.yaml`` SHA but different ``block_gas_limit``
-    # produce different tx sets and different block hashes, so it must be part
-    # of the composition_hash preimage. Defaulted to 0 for legacy-manifest
+    # runs with identical chain identity but different ``block_gas_limit``
+    # produce different tx sets and different block hashes, so it is part of
+    # the chain_identity_hash preimage. Defaulted to 0 for legacy-manifest
     # back-compat (older runs round-trip into a sentinel that
     # ``replay_context_matches`` will refuse against any concrete value).
     block_gas_limit: int = 0
 
 
 @dataclass
+class TargetSnapshot:
+    """A single ``target.yaml`` snapshot recorded into the manifest.
+
+    ``sha256`` is the canonical sha256 of the raw YAML bytes (matches
+    ``TargetConfig.source_sha256``). ``ts_iso`` is the wall-clock time the
+    snapshot was first observed by the run. ``body`` is the parsed YAML —
+    sufficient for replay to re-construct the exact target shape, without
+    preserving comments. The manifest grows by one snapshot every time the
+    live watcher detects a sha256 change.
+    """
+
+    sha256: str
+    ts_iso: str
+    body: dict[str, Any]
+
+
+@dataclass
 class Manifest:
     run_id: str
-    target_yaml_sha256: str
     base_address: str
     revision: int
     genesis_sha256: str
-    composition_hash: str
+    chain_identity_hash: str
     reference_f_version: str
     plugin_git_sha: str
     nethermind_commit_sha: str
@@ -71,6 +90,11 @@ class Manifest:
     cpu_arch: str
     replay_context: ReplayContext | None = None
     sessions: list[Session] = field(default_factory=list)
+    # Per-batch target reload (schema v2): every distinct ``target.yaml`` shape
+    # observed during the run is recorded here. ``replay_core.target_sha256``
+    # references one of these entries by sha256 so replay can rebuild the
+    # exact target each batch was dispatched against.
+    target_history: list[TargetSnapshot] = field(default_factory=list)
     journal_sha256: str = ""
     # H7: checkpoint for incremental chain verification on resume. Successive
     # runs verify only the suffix past ``last_checkpoint_batch_id``.
@@ -87,54 +111,99 @@ class Manifest:
         return asdict(self)
 
     def write(self, path: Path | str) -> None:
-        Path(path).write_text(
-            json.dumps(self.to_dict(), indent=2, sort_keys=True),
-            encoding="utf-8",
+        """Atomically replace the manifest file (write tmp + os.replace + fsync).
+
+        Live target reload mutates ``target_history`` between commits; if a crash
+        landed mid-write the next run could read a half-flushed manifest and
+        crash before resume even starts. Writing through a temp file and
+        ``os.replace`` keeps the on-disk manifest at either the prior version
+        or the new version, never partial.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = json.dumps(self.to_dict(), indent=2, sort_keys=True)
+        # Use mkstemp so the temp file lives in the same directory (same FS) as
+        # the destination — required for atomic os.replace across all platforms.
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)  # noqa: PTH105
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                Path(tmp_name).unlink()
+            raise
 
     @classmethod
     def read(cls, path: Path | str) -> Manifest:
         body = json.loads(Path(path).read_text(encoding="utf-8"))
+        # Refuse pre-v2 manifests with a clear message — schema v1 had a single
+        # composition_hash that gated resume on target.yaml content. With
+        # per-batch target reload (v2), the resume gate is chain_identity_hash
+        # and target_sha256 is per-record; a v1 manifest cannot be safely
+        # adopted because its replay records have no target_sha256 to look up.
+        manifest_schema = body.get("schema")
+        if manifest_schema is not None and int(manifest_schema) < MANIFEST_SCHEMA:
+            raise ValueError(
+                f"manifest schema={manifest_schema} predates per-batch target "
+                f"reload (current schema={MANIFEST_SCHEMA}). Archive state/ to "
+                f"start fresh, or downgrade orchestrator."
+            )
         sessions = [Session(**s) for s in body.pop("sessions", [])]
         replay_raw = body.pop("replay_context", None)
         replay_ctx = ReplayContext(**replay_raw) if replay_raw else None
+        target_history_raw = body.pop("target_history", [])
+        target_history = [TargetSnapshot(**snap) for snap in target_history_raw]
         # Filter to known fields so newer manifests with extra keys don't crash
         # older readers. Unknown keys are ignored; missing required keys will
         # raise from ``cls(...)`` as usual.
         known = {f.name for f in dataclasses.fields(cls)}
         filtered = {k: v for k, v in body.items() if k in known}
-        return cls(sessions=sessions, replay_context=replay_ctx, **filtered)
+        return cls(
+            sessions=sessions,
+            replay_context=replay_ctx,
+            target_history=target_history,
+            **filtered,
+        )
 
 
-def compute_composition_hash(
-    target_sha256: str,
+def compute_chain_identity_hash(
     env: EnvInfo,
     replay_context: ReplayContext | None = None,
 ) -> str:
-    """sha256 matching the exact preimage defined in design §7.
+    """sha256 over the run's chain identity. Resume gate.
 
-    Preimage: ``target_yaml || genesis || plugin || nethermind || runtime || arch``,
-    plus ``block_gas_limit`` from ``replay_context`` (when supplied) since the
-    dispatcher's tx-count behaviour for ``(verb, deadline_bytes)`` depends on
-    it. Two runs with the same ``target.yaml`` SHA but different
-    ``block_gas_limit`` produce different tx sets and would silently bypass
-    ``ResumeRefused`` without this term.
+    Preimage: ``genesis || chain_id || deploy_pubkey || plugin || nethermind ||
+    runtime || arch || schema_version``, plus ``block_gas_limit`` when the
+    ``replay_context`` is supplied (the dispatcher's tx-count behaviour for
+    ``(verb, deadline_bytes)`` depends on it).
 
-    The signer / chain identity stays in ``Manifest.replay_context`` and is
-    compared structurally on resume (see ``replay_context_matches``). Pre-widen
-    journals serialize ``replay_context=None`` here so existing
-    composition_hash values still match and old runs continue to resume.
+    Crucially, this hash does NOT include ``target.yaml`` — the target shape is
+    a per-batch input that can change mid-run (see ``manifest.target_history``).
+    Two runs with the same chain identity but different target.yaml files MUST
+    produce the same ``chain_identity_hash`` so the second one can resume the
+    first.
     """
-    parts = [
-        target_sha256,
+    parts: list[str] = [
         env.genesis_sha256,
         env.plugin_git_sha,
         env.nethermind_commit_sha,
         str(env.dotnet_runtime_major),
         env.cpu_arch,
+        f"schema={MANIFEST_SCHEMA}",
     ]
     if replay_context is not None:
-        parts.append(str(replay_context.block_gas_limit))
+        parts.extend(
+            [
+                str(replay_context.chain_id),
+                replay_context.deploy_pubkey_sha256,
+                str(replay_context.block_gas_limit),
+            ]
+        )
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 

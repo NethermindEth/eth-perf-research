@@ -2,8 +2,8 @@
 
 All operator-level inputs (RPC URL, state dir, target YAML, environment fingerprint
 fields) are required. Silent defaults are a footgun: they produce runs whose identity
-(composition_hash, manifest env fields) quietly diverges from what the operator thinks
-they're launching. Fields that are *legitimately* optional — e.g. ``--max-batches``
+(chain_identity_hash, manifest env fields) quietly diverges from what the operator
+thinks they're launching. Fields that are *legitimately* optional — e.g. ``--max-batches``
 (None = run until goal), ``--jwt-path`` (only needed on the engine port),
 ``--sensor-rpc-url`` (override of --rpc-url) — stay optional.
 """
@@ -20,7 +20,7 @@ from .lifecycle import run as lifecycle_run
 from .manifest import EnvInfo
 from .reference_f import default_reference_f_path, load_reference_f
 from .replay import replay as replay_run
-from .target import load_target
+from .target import LiveTargetWatcher, load_target
 
 app = typer.Typer(add_completion=False, help="Bloating feedback-loop orchestrator")
 
@@ -103,6 +103,11 @@ def main(
         raise typer.Exit(code=2)
 
     target = load_target(target_yaml)
+    # Live-reload watcher: stat target.yaml once per batch and adopt edits
+    # immediately. The CLI is the only place that knows the path is real
+    # (``deps``-injected runs may be using synthetic in-memory targets), so
+    # the watcher is constructed here.
+    watcher = LiveTargetWatcher(target_yaml, initial=target)
     ref_f = load_reference_f(reference_f_path or default_reference_f_path())
     env = EnvInfo(
         genesis_sha256=genesis_sha256,
@@ -113,6 +118,7 @@ def main(
     )
     lifecycle_run(
         target=target,
+        target_watcher=watcher,
         state_dir=state_dir,
         rpc_url=rpc_url,
         sensor_rpc_url=sensor_rpc_url or os.environ.get("NODE_RPC"),

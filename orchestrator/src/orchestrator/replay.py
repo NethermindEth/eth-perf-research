@@ -17,8 +17,12 @@ import httpx
 
 from .facade import FacadeContext, UnknownVerb, dispatch
 from .journal import ChainHashMismatch, JournalReader, JournalSchemaError, Record
-from .manifest import Manifest
+from .manifest import Manifest, TargetSnapshot
 from .rpc import RpcClient
+
+
+class ReplayError(RuntimeError):
+    """Raised when the manifest's ``target_history`` cannot reconstruct a record."""
 
 EXIT_OK = 0
 EXIT_CHAIN_HASH = 1
@@ -64,6 +68,10 @@ def replay(
     own_rpc = rpc is None
     rpc = rpc or RpcClient(rpc_url)
 
+    # Per-batch target lookup: each journaled record's ``target_sha256``
+    # must resolve into ``manifest.target_history``. Build the index once.
+    target_index = _index_target_history(manifest.target_history)
+
     try:
         first = next(iter(reader), None)
         if first is None:
@@ -74,6 +82,13 @@ def replay(
             return EXIT_MANIFEST
 
         for record in reader:
+            try:
+                _resolve_target_for_record(record, target_index)
+            except ReplayError:
+                # Manifest's target_history doesn't contain the sha referenced
+                # by this batch — surface as a facade error so operators see
+                # exit code 4 (corrupt or pruned manifest).
+                return EXIT_FACADE
             exit_code = _replay_one_record(record, ctx, rpc)
             if exit_code != EXIT_OK:
                 return exit_code
@@ -87,6 +102,36 @@ def replay(
             rpc.close()
 
     return EXIT_OK
+
+
+def _index_target_history(
+    target_history: list[TargetSnapshot],
+) -> dict[str, TargetSnapshot]:
+    """Build sha256 → snapshot index. Empty manifests yield an empty index."""
+    return {snap.sha256: snap for snap in target_history}
+
+
+def _resolve_target_for_record(
+    record: Record, target_index: dict[str, TargetSnapshot]
+) -> TargetSnapshot | None:
+    """Look up the target snapshot referenced by ``record.replay_core.target_sha256``.
+
+    Returns the snapshot, or ``None`` for legacy records without a
+    target_sha256 (treated as "use whatever was in the manifest"). Raises
+    ``ReplayError`` when the sha is non-empty but missing from the index —
+    that signals a corrupt or truncated manifest and the operator must
+    archive state/.
+    """
+    sha = record.replay_core.target_sha256
+    if not sha:
+        return None
+    snap = target_index.get(sha)
+    if snap is None:
+        raise ReplayError(
+            f"target_sha256 {sha[:8]}… referenced by batch {record.batch_id} "
+            f"not in manifest.target_history; corrupt manifest"
+        )
+    return snap
 
 
 def _replay_one_record(record: Record, ctx: FacadeContext, rpc: RpcClient) -> int:

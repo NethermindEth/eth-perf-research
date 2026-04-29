@@ -22,7 +22,7 @@ from typing import Any
 
 import jsonschema
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _CHAIN_HASH_GENESIS = "0" * 64
 
 
@@ -57,6 +57,13 @@ class ReplayCore:
     # block's header hash, so replay must re-supply the same value to satisfy
     # §C.1 replay-equivalence. Chain-hash-preimage critical.
     block_timestamp: int = 0
+    # sha256 of the ``target.yaml`` bytes that produced this batch. Per-batch
+    # so live target reload can flip the target shape between consecutive
+    # records without breaking the chain. Replay looks the value up in
+    # ``manifest.target_history`` to reconstruct the exact target. Required by
+    # schema v2 — chain-hash-preimage critical so two runs with different
+    # targets at the same batch_id produce different chain_hashes.
+    target_sha256: str = ""
     chain_hash: str = ""  # set by the writer
 
 
@@ -109,6 +116,7 @@ def _replay_core_to_jsonable(rc: ReplayCore) -> dict[str, Any]:
         "block_hash": rc.block_hash,
         "block_number": rc.block_number,
         "block_timestamp": rc.block_timestamp,
+        "target_sha256": rc.target_sha256,
         "chain_hash": rc.chain_hash,
     }
 
@@ -330,10 +338,17 @@ class JournalReader:
 
 
 def _dict_to_record(d: dict[str, Any]) -> Record:
+    record_schema = d.get("schema", SCHEMA_VERSION)
+    if record_schema != SCHEMA_VERSION:
+        raise JournalSchemaError(
+            f"schema={record_schema} found; this build requires schema={SCHEMA_VERSION} "
+            f"(target_sha256 is now per-batch). Archive state/ to start fresh.",
+            batch_id=d.get("batch_id") if isinstance(d, dict) else None,
+        )
     rc = ReplayCore(**d["replay_core"])
     obs = Observability(**d["observability"])
     return Record(
-        schema=d.get("schema", SCHEMA_VERSION),
+        schema=record_schema,
         session_id=d["session_id"],
         resumed_from_batch=d.get("resumed_from_batch"),
         ts_iso=d["ts_iso"],
@@ -354,10 +369,15 @@ class PendingBatch:
     sees this sidecar and reconciles with Nethermind's head to synthesize the
     missing record — closing the atomicity gap flagged by review C3.
 
-    ``composition_hash`` ties the sidecar to the exact run that wrote it. An
-    operator who changes ``target.yaml`` between ``compose down`` and ``compose
-    up`` would get a mismatched hash and the reconcile refuses rather than
-    replaying under the wrong code path.
+    ``chain_identity_hash`` ties the sidecar to the exact chain identity that
+    wrote it. An operator who changes the chain (genesis, signer, runtime)
+    between ``compose down`` and ``compose up`` would get a mismatched hash and
+    the reconcile refuses rather than replaying under the wrong code path.
+
+    ``target_sha256`` records the target.yaml shape that was active when the
+    sidecar was written; a mid-run target swap doesn't gate reconcile (target
+    is per-batch now), but the value is journaled into the synthesized record
+    so replay can look it up in ``manifest.target_history``.
     """
 
     session_id: int
@@ -369,7 +389,8 @@ class PendingBatch:
     end_address: str
     ts_iso: str
     pre_block_number: int
-    composition_hash: str = ""
+    chain_identity_hash: str = ""
+    target_sha256: str = ""
 
 
 def write_pending(state_dir: Path | str, pending: PendingBatch) -> None:
@@ -417,8 +438,13 @@ def clear_pending(state_dir: Path | str) -> None:
 
 @functools.cache
 def load_schema() -> dict[str, Any]:
-    """Return the JSON Schema for a journal record (cached read)."""
-    schema_path = Path(__file__).parent / "schemas" / "journal_v1.json"
+    """Return the JSON Schema for a journal record (cached read).
+
+    Schema bumped to v2 in the live-target-reload work: ``replay_core`` now
+    carries ``target_sha256`` (per-batch reference into ``manifest.target_history``).
+    Pre-v2 records are rejected by ``_dict_to_record`` with an explicit message.
+    """
+    schema_path = Path(__file__).parent / "schemas" / "journal_v2.json"
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
 

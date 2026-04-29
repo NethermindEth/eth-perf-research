@@ -196,7 +196,7 @@ def main() -> int:
         try:
             chain_id = _rpc(client, args.public_url, "eth_chainId", [])
             print(f"[geth] chain_id={chain_id}")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"failed to reach geth public port {args.public_url}: {exc}", file=sys.stderr)
             return 3
 
@@ -223,7 +223,7 @@ def main() -> int:
             ]
             try:
                 np_result = _rpc(client, args.auth_url, "engine_newPayloadV4", params, jwt_path=args.jwt)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 fail_reason = {"phase": "newPayloadV4", "error": str(exc), "block": block_number}
                 print(f"[block {block_number}] newPayloadV4 transport error: {exc}")
                 break
@@ -259,7 +259,7 @@ def main() -> int:
                     ],
                     jwt_path=args.jwt,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 fail_reason = {"phase": "fcuV3", "error": str(exc), "block": block_number}
                 print(f"[block {block_number}] fcuV3 transport error: {exc}")
                 break
@@ -299,7 +299,7 @@ def main() -> int:
             try:
                 nm = _summarise_block(client, args.nm_url, tag)
                 print(f"  nethermind {tag:>6}: {nm}")
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(f"  nethermind {tag}: unreachable ({exc})")
 
     return 0 if fail_reason is None else 1

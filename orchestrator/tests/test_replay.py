@@ -15,7 +15,7 @@ from orchestrator.journal import (
     ReplayCore,
 )
 from orchestrator.lifecycle import build_replay_context
-from orchestrator.manifest import Manifest
+from orchestrator.manifest import Manifest, TargetSnapshot
 from orchestrator.replay import (
     EXIT_BLOCK_HASH,
     EXIT_CHAIN_HASH,
@@ -89,23 +89,32 @@ def _seed_journal(
                         block_hash=block_hash,
                         block_number=100 + i,
                         block_timestamp=block_ts,
+                        target_sha256="a" * 64,
                     ),
                     observability=Observability(statecomp_snapshot={"x": i}),
                 )
             )
+    # Single boot target snapshot — replay seeds target_index from this so each
+    # journaled batch's target_sha256 resolves to the body. The seed journal
+    # below uses target_sha256="a" * 64 to match.
+    target_snapshot = TargetSnapshot(
+        sha256="a" * 64,
+        ts_iso="2026-04-24T00:00:00Z",
+        body={"mainnet_target": {"accounts": 0.141, "storage": 0.817, "code": 0.042}},
+    )
     manifest = Manifest(
         run_id="r",
-        target_yaml_sha256="t" * 64,
         base_address="0x" + ctx.base_address.hex(),
         revision=0,
         genesis_sha256="g" * 64,
-        composition_hash="c" * 64,
+        chain_identity_hash="c" * 64,
         reference_f_version="2026.04.23",
         plugin_git_sha="p" * 40,
         nethermind_commit_sha="n" * 40,
         dotnet_runtime_major=10,
         cpu_arch="x86_64",
         replay_context=build_replay_context(FacadeContext(base_address=b"\x00" * 20, revision=0)),
+        target_history=[target_snapshot],
         final_state_root=state_root,
     )
     manifest.write(manifest_path)
@@ -205,6 +214,7 @@ def test_replay_unknown_verb_exits_4(tmp_path: Path) -> None:
                     block_hash="0x" + "bb" * 32,
                     block_number=100,
                     block_timestamp=1_700_000_000,
+                    target_sha256="a" * 64,
                 ),
                 observability=Observability(statecomp_snapshot={}),
             )
@@ -289,3 +299,128 @@ def test_replay_refuses_on_signer_fingerprint_mismatch(tmp_path: Path) -> None:
         deploy_private_key=b"\x22" * 32,  # wrong key
     )
     assert rc == EXIT_MANIFEST
+
+
+def test_replay_uses_per_batch_target(tmp_path: Path) -> None:
+    """v2 live-target reload: a journal where batches reference two different
+    target snapshots must replay cleanly when both are present in the manifest's
+    target_history.
+    """
+    ctx = FacadeContext(base_address=b"\x00" * 20, revision=0)
+    rpc = _StubRpc()
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    manifest_path = tmp_path / "run-manifest.json"
+    target_a_sha = "a" * 64
+    target_b_sha = "b" * 64
+    with JournalWriter(journal) as w:
+        for i in range(6):
+            start = ctx.address_cursor
+            txs = dispatch("eoatx", deadline_bytes=5_000, context=ctx)
+            end = ctx.address_cursor
+            block_ts = 1_700_000_000 + i
+            block_hash = rpc.testing_commit_block_v1(
+                [tx.rlp for tx in txs], timestamp_unix=block_ts
+            )
+            # First half references target A, second half references target B.
+            sha = target_a_sha if i < 3 else target_b_sha
+            w.append(
+                Record(
+                    session_id=1,
+                    resumed_from_batch=None,
+                    ts_iso="2026-04-24T00:00:00Z",
+                    batch_id=i,
+                    replay_core=ReplayCore(
+                        verb="eoatx",
+                        deadline_bytes=5_000,
+                        start_address="0x" + start.to_bytes(20, "big").hex(),
+                        end_address="0x" + end.to_bytes(20, "big").hex(),
+                        status="ok",
+                        block_hash=block_hash,
+                        block_number=100 + i,
+                        block_timestamp=block_ts,
+                        target_sha256=sha,
+                    ),
+                    observability=Observability(statecomp_snapshot={"x": i}),
+                )
+            )
+    manifest = Manifest(
+        run_id="r",
+        base_address="0x" + ctx.base_address.hex(),
+        revision=0,
+        genesis_sha256="g" * 64,
+        chain_identity_hash="c" * 64,
+        reference_f_version="2026.04.23",
+        plugin_git_sha="p" * 40,
+        nethermind_commit_sha="n" * 40,
+        dotnet_runtime_major=10,
+        cpu_arch="x86_64",
+        replay_context=build_replay_context(FacadeContext(base_address=b"\x00" * 20, revision=0)),
+        target_history=[
+            TargetSnapshot(
+                sha256=target_a_sha,
+                ts_iso="2026-04-24T00:00:00Z",
+                body={"target_total_bytes": 1_000_000_000},
+            ),
+            TargetSnapshot(
+                sha256=target_b_sha,
+                ts_iso="2026-04-24T00:30:00Z",
+                body={"target_total_bytes": 5_000_000_000},
+            ),
+        ],
+    )
+    manifest.write(manifest_path)
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest_path)
+    assert rc == EXIT_OK
+
+
+def test_replay_fails_when_target_history_missing(tmp_path: Path) -> None:
+    """A record referencing an unknown target_sha256 must surface as EXIT_FACADE."""
+    ctx = FacadeContext(base_address=b"\x00" * 20, revision=0)
+    rpc = _StubRpc()
+    journal = tmp_path / "orchestrator.journal.jsonl"
+    manifest_path = tmp_path / "run-manifest.json"
+    with JournalWriter(journal) as w:
+        start = ctx.address_cursor
+        txs = dispatch("eoatx", deadline_bytes=5_000, context=ctx)
+        end = ctx.address_cursor
+        block_hash = rpc.testing_commit_block_v1(
+            [tx.rlp for tx in txs], timestamp_unix=1_700_000_000
+        )
+        w.append(
+            Record(
+                session_id=1,
+                resumed_from_batch=None,
+                ts_iso="2026-04-24T00:00:00Z",
+                batch_id=0,
+                replay_core=ReplayCore(
+                    verb="eoatx",
+                    deadline_bytes=5_000,
+                    start_address="0x" + start.to_bytes(20, "big").hex(),
+                    end_address="0x" + end.to_bytes(20, "big").hex(),
+                    status="ok",
+                    block_hash=block_hash,
+                    block_number=100,
+                    block_timestamp=1_700_000_000,
+                    # Records this sha but the manifest's history is empty.
+                    target_sha256="d" * 64,
+                ),
+                observability=Observability(statecomp_snapshot={}),
+            )
+        )
+    manifest = Manifest(
+        run_id="r",
+        base_address="0x" + ctx.base_address.hex(),
+        revision=0,
+        genesis_sha256="g" * 64,
+        chain_identity_hash="c" * 64,
+        reference_f_version="2026.04.23",
+        plugin_git_sha="p" * 40,
+        nethermind_commit_sha="n" * 40,
+        dotnet_runtime_major=10,
+        cpu_arch="x86_64",
+        replay_context=build_replay_context(FacadeContext(base_address=b"\x00" * 20, revision=0)),
+        target_history=[],  # missing!
+    )
+    manifest.write(manifest_path)
+    rc = replay(journal, "http://stub", rpc=_StubRpc(), manifest_path=manifest_path)
+    assert rc == EXIT_FACADE

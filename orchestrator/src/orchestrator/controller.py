@@ -47,8 +47,10 @@ _RESIDUAL_NORM_FLOOR = 1024.0
 # greedily as the argmax. ``0`` reproduces the original argmax mode; ``1``
 # reproduces full proportional sampling; ``0.1`` gives mostly-greedy with
 # occasional exploration ("ε-greedy" with sampling-from-projection rather
-# than uniform). The RNG is seeded per-batch from (composition_hash, batch_id)
-# so forward runs of the same target reproduce the same pick sequence.
+# than uniform). The RNG is seeded per-batch from (chain_identity_hash,
+# target_sha256, batch_id) so forward runs of the same chain + target
+# reproduce the same pick sequence; a different target.yaml shape explores
+# a different verb stream while the chain identity stays stable.
 EPSILON = float(_os.environ.get("ORCH_EPSILON", "0.0"))
 if not 0.0 <= EPSILON <= 1.0:
     raise ValueError(f"ORCH_EPSILON must be in [0, 1], got {EPSILON}")
@@ -155,30 +157,34 @@ def rehydrate_state(
 def _select_verb_index(
     x_proj: np.ndarray,
     batch_id: int | None,
-    composition_hash: str | None,
+    chain_identity_hash: str | None,
+    target_sha256: str | None = None,
 ) -> tuple[int, bool]:
     """Pick a verb index from the simplex projection.
 
     Returns ``(index, was_sampled)``. With probability ``1 - EPSILON`` we
     take ``argmax(x_proj)`` (greedy exploit). With probability ``EPSILON``
     we sample from ``x_proj`` (weighted explore). The RNG is seeded from
-    ``(composition_hash, batch_id)`` so two forward runs of the same target
-    reproduce the same picks. Falls back to pure argmax if either seed
-    input is missing, the projection produced a degenerate distribution,
-    or ``EPSILON`` is exactly 0.
+    ``(chain_identity_hash, target_sha256, batch_id)`` so two forward runs
+    of the same chain + target reproduce the same picks; a different
+    ``target.yaml`` shape explores a different verb stream while the chain
+    identity stays stable. Falls back to pure argmax if any seed input is
+    missing, the projection produced a degenerate distribution, or
+    ``EPSILON`` is exactly 0.
 
     The ``was_sampled`` bit is used by the caller to choose between
     weight-scaled and full-budget deadline_bytes (decoupling the sampling
     branch from the size formula keeps proportional mode from
     double-counting weight).
     """
-    if EPSILON <= 0.0 or batch_id is None or composition_hash is None:
+    if EPSILON <= 0.0 or batch_id is None or chain_identity_hash is None:
         return int(np.argmax(x_proj)), False
     total = float(x_proj.sum())
     if total <= 0.0 or not np.isfinite(total):
         return int(np.argmax(x_proj)), False
+    seed_input = f"{chain_identity_hash}:{target_sha256 or ''}:{batch_id}"
     seed = int.from_bytes(
-        hashlib.sha256(f"{composition_hash}:{batch_id}".encode()).digest()[:8],
+        hashlib.sha256(seed_input.encode()).digest()[:8],
         "big",
     )
     rng = np.random.default_rng(seed)
@@ -203,6 +209,7 @@ class Controller:
         target: TargetConfig,
         *,
         batch_id: int | None = None,
+        chain_identity_hash: str | None = None,
         composition_hash: str | None = None,
     ) -> BatchPlan:
         """Project the desired scenario mix onto the simplex and pick a verb.
@@ -210,7 +217,12 @@ class Controller:
         Greedy by default (argmax of the projected mix). When ``EPSILON > 0``
         a fraction ``ε`` of batches are sampled from the projected mix
         instead — keeps F estimates fresh across the registry. The RNG is
-        seeded from ``(composition_hash, batch_id)`` for reproducibility.
+        seeded from ``(chain_identity_hash, target.sha256, batch_id)`` for
+        reproducibility — same chain + same target ⇒ same picks; a target
+        swap shifts the explore stream while keeping the chain stable.
+
+        ``composition_hash`` is accepted for back-compat with pre-v2 callers
+        (it is forwarded as ``chain_identity_hash`` if the latter is None).
 
         When ``OVERSHOOT_PENALTY > 0``, the QP gradient is augmented with a
         penalty that discourages mixes whose predicted single-step delta
@@ -222,6 +234,8 @@ class Controller:
         the weight under proportional sampling, which was the root cause of
         the +6 pp accounts overshoot in the prior 1500-batch run.
         """
+        if chain_identity_hash is None and composition_hash is not None:
+            chain_identity_hash = composition_hash
         verbs = list(target.qp_scenarios)
         residual = self._residual(observation, target)  # shape (3,)
         f_matrix = self._f_matrix(verbs)  # shape (3, n)
@@ -241,7 +255,12 @@ class Controller:
         if grad_norm > 1e-12:
             grad = grad / grad_norm
         x_proj = project_simplex(x - target.projection_eta * grad)
-        top_index, was_sampled = _select_verb_index(x_proj, batch_id, composition_hash)
+        top_index, was_sampled = _select_verb_index(
+            x_proj,
+            batch_id,
+            chain_identity_hash,
+            target.source_sha256 if isinstance(target, TargetConfig) else None,
+        )
         top_verb = verbs[top_index]
         weight = float(x_proj[top_index])
         if was_sampled:

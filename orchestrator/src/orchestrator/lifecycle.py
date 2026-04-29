@@ -54,7 +54,8 @@ from .manifest import (
     Manifest,
     ReplayContext,
     Session,
-    compute_composition_hash,
+    TargetSnapshot,
+    compute_chain_identity_hash,
     compute_journal_sha256,
     replay_context_matches,
 )
@@ -63,7 +64,7 @@ from .probe import ProbeExecutor, run_probe, seed_state_from_probe
 from .reference_f import ReferenceF, default_reference_f_path, load_reference_f
 from .rpc import RpcClient
 from .sensor import SensorClient, SensorWaitTimeout, StateObservation
-from .target import TargetConfig
+from .target import LiveTargetWatcher, TargetConfig
 
 _log = logging.getLogger(__name__)
 
@@ -79,6 +80,14 @@ RUN_LOCK_FILENAME = "orchestrator.lock"
 # which case only ``target_reached`` and ``max_batches`` end the loop.
 RESIDUAL_STOP_THRESHOLD = float(os.environ.get("ORCH_RESIDUAL_STOP_THRESHOLD", "0.0"))
 RESIDUAL_STOP_WINDOW = int(os.environ.get("ORCH_RESIDUAL_STOP_WINDOW", "6"))
+
+# Soft-stop poll on target_reached: when the active target shape is fully
+# satisfied we wait this long for an operator to edit ``target.yaml`` (a new
+# target shape resumes the QP loop). After ``IDLE_TIMEOUT_SEC`` of no change
+# the run shuts down with stop_reason "target_reached_idle". The poll cadence
+# is tuned to avoid hot-stat'ing the file system.
+TARGET_REACHED_IDLE_TIMEOUT_SEC = float(os.environ.get("ORCH_IDLE_TIMEOUT_SEC", "60"))
+TARGET_REACHED_POLL_INTERVAL_SEC = float(os.environ.get("ORCH_TARGET_POLL_INTERVAL_SEC", "2"))
 
 
 class StartupMode(enum.Enum):
@@ -154,15 +163,25 @@ class StartupDecision:
 
 def resolve_startup_mode(
     state_dir: Path,
-    composition_hash: str,
-    head_block: int | None,
+    chain_identity_hash: str | None = None,
+    head_block: int | None = None,
     *,
+    composition_hash: str | None = None,
     rpc: RpcClient | None = None,
     facade_ctx: FacadeContext | None = None,
     replay_context: ReplayContext | None = None,
     resume_session_id: int | None = None,
 ) -> StartupDecision:
     """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch.
+
+    ``chain_identity_hash`` gates resume: it covers genesis + signer + chain_id
+    + runtime versions, but NOT ``target.yaml`` (target shape is per-batch now).
+    Two runs with different target.yaml files but the same chain identity will
+    resume each other cleanly.
+
+    ``composition_hash`` is accepted as a back-compat alias for
+    ``chain_identity_hash`` so existing test seeds keep compiling. If both are
+    supplied, ``chain_identity_hash`` wins.
 
     ``head_block`` is required when a journal exists: ``None`` means the RPC check
     failed, and we refuse rather than silently skip the alignment assertion.
@@ -173,13 +192,18 @@ def resolve_startup_mode(
     used to cross-check that the head block's tx set matches what the recorded
     verb+deadline would have produced (review C-RECONCILE-TRUST).
     """
+    if chain_identity_hash is None:
+        chain_identity_hash = composition_hash
+    if chain_identity_hash is None:
+        raise TypeError("resolve_startup_mode requires chain_identity_hash")
+
     journal = state_dir / JOURNAL_FILENAME
     pending = read_pending(state_dir)
 
     if not journal.exists() or journal.stat().st_size == 0:
         return _handle_empty_journal(state_dir, head_block, pending)
 
-    prior = _load_and_verify_prior_manifest(state_dir, composition_hash, replay_context)
+    prior = _load_and_verify_prior_manifest(state_dir, chain_identity_hash, replay_context)
     tail = _read_verified_tail(journal, prior)
     if tail is None:
         return StartupDecision(StartupMode.FRESH, None, "journal empty after verify")
@@ -191,15 +215,15 @@ def resolve_startup_mode(
         )
 
     if pending is not None:
-        # Pending sidecar must belong to the SAME run, not a stale one left by a
-        # prior composition. Empty composition_hash in the pending = legacy file
-        # from before this check existed; reject it too rather than silently
-        # accepting (operator should archive).
-        if pending.composition_hash != composition_hash:
+        # Pending sidecar must belong to the SAME chain, not a stale one left by
+        # a prior chain identity. Empty chain_identity_hash in the pending =
+        # legacy file from before this check existed; reject it too rather than
+        # silently accepting (operator should archive).
+        if pending.chain_identity_hash != chain_identity_hash:
             raise ResumeRefused(
-                f"pending sidecar composition_hash "
-                f"{pending.composition_hash[:8] or '(empty)'}… does not match current "
-                f"{composition_hash[:8]}…; archive {state_dir / PENDING_FILENAME}"
+                f"pending sidecar chain_identity_hash "
+                f"{pending.chain_identity_hash[:8] or '(empty)'}… does not match current "
+                f"{chain_identity_hash[:8]}…; archive {state_dir / PENDING_FILENAME}"
             )
         tail = _reconcile_pending(
             state_dir=state_dir,
@@ -252,13 +276,16 @@ def _handle_empty_journal(
 
 
 def _load_and_verify_prior_manifest(
-    state_dir: Path, composition_hash: str, replay_context: ReplayContext | None
+    state_dir: Path, chain_identity_hash: str, replay_context: ReplayContext | None
 ) -> Manifest | None:
     """Read the prior manifest (if any) and cross-check it against current config.
 
-    ``composition_hash`` covers target+env per design §7. Tx-signing identity lives
-    in ``replay_context``; check it separately so a changed signer / chain between
-    runs refuses resume even when target.yaml is unchanged.
+    ``chain_identity_hash`` covers genesis + signer + chain_id + runtime versions.
+    A different ``target.yaml`` between runs is fine — target shape is a per-batch
+    input now, recorded into ``manifest.target_history`` and not gated here.
+
+    Tx-signing identity lives in ``replay_context``; check it separately so a
+    changed signer / chain between runs refuses resume.
 
     Also guards against legacy-manifest bypass: if the journal is non-empty and
     the prior manifest predates ``ReplayContext`` (``prior.replay_context is
@@ -269,10 +296,10 @@ def _load_and_verify_prior_manifest(
     if not manifest_path.exists():
         return None
     prior = Manifest.read(manifest_path)
-    if prior.composition_hash != composition_hash:
+    if prior.chain_identity_hash != chain_identity_hash:
         raise ResumeRefused(
-            f"composition_hash mismatch: manifest={prior.composition_hash[:8]}… "
-            f"current={composition_hash[:8]}…"
+            f"chain_identity_hash mismatch: manifest={prior.chain_identity_hash[:8]}… "
+            f"current={chain_identity_hash[:8]}…"
         )
     journal_path = state_dir / JOURNAL_FILENAME
     journal_nonempty = journal_path.exists() and journal_path.stat().st_size > 0
@@ -407,6 +434,12 @@ def _reconcile_pending(
                     block_hash=block_hash,
                     block_number=head_block,
                     block_timestamp=block_ts,
+                    # Carry the sidecar's recorded target_sha256 forward so the
+                    # synthesized record points at the correct target_history
+                    # entry. Mid-run target swaps don't gate reconcile (target
+                    # is per-batch), but the journal reference must still be
+                    # right or replay can't reconstruct the dispatch.
+                    target_sha256=pending.target_sha256,
                 ),
                 observability=Observability(
                     observed_flat_bytes=0,
@@ -520,7 +553,8 @@ def make_journaling_probe_executor(
     journal_writer: JournalWriter,
     payload_writer: PayloadStreamWriter,
     state_dir: Path,
-    composition_hash: str,
+    chain_identity_hash: str,
+    active_target: TargetConfig,
     session_id: int,
     resumed_from_batch: int | None,
     batch_id_start: int = 0,
@@ -558,7 +592,8 @@ def make_journaling_probe_executor(
             journal_writer=journal_writer,
             payload_writer=payload_writer,
             state_dir=state_dir,
-            composition_hash=composition_hash,
+            chain_identity_hash=chain_identity_hash,
+            active_target=active_target,
             session_id=session_id,
             resumed_from_batch=resumed_from_batch,
             batch_id=counter["batch_id"],
@@ -690,18 +725,26 @@ def run(
     deps: LifecycleDeps | None = None,
     jwt_path: Path | str | None = None,
     sensor_rpc_url: str | None = None,
+    target_watcher: LiveTargetWatcher | None = None,
 ) -> Path:
-    """Main entry. Returns the path to the manifest written on shutdown."""
+    """Main entry. Returns the path to the manifest written on shutdown.
+
+    ``target`` is the boot target shape. If ``target_watcher`` is supplied, it
+    must already wrap that same target — the QP loop will call ``current()``
+    once per batch to pick up live edits. When ``target_watcher`` is None we
+    treat ``target`` as immutable for the run (legacy behaviour preserved for
+    callers that don't have a backing file, e.g. tests with synthetic targets).
+    """
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    target_sha = target.source_sha256
     ref_f = reference_f or load_reference_f(default_reference_f_path())
-    # Pre-build the facade context + replay snapshot so composition_hash covers
-    # every knob that can change the final state root (spec §C.1).
+    # Pre-build the facade context + replay snapshot so chain_identity_hash
+    # covers every chain-side knob that can change the final state root
+    # (spec §C.1). Target shape is per-batch and recorded into target_history.
     preflight_ctx = build_facade_context(target)
     replay_context = build_replay_context(preflight_ctx)
-    composition_hash = compute_composition_hash(target_sha, env, replay_context)
+    chain_identity_hash = compute_chain_identity_hash(env, replay_context)
 
     own_deps = deps is None
     sensor_url = sensor_rpc_url or rpc_url
@@ -716,11 +759,11 @@ def run(
     with _state_dir_lock(state_dir):
         return _run_locked(
             target=target,
+            target_watcher=target_watcher,
             state_dir=state_dir,
             preflight_ctx=preflight_ctx,
             replay_context=replay_context,
-            composition_hash=composition_hash,
-            target_sha=target_sha,
+            chain_identity_hash=chain_identity_hash,
             ref_f=ref_f,
             env=env,
             max_batches=max_batches,
@@ -734,11 +777,11 @@ def run(
 def _run_locked(
     *,
     target: TargetConfig,
+    target_watcher: LiveTargetWatcher | None,
     state_dir: Path,
     preflight_ctx: FacadeContext,
     replay_context: ReplayContext,
-    composition_hash: str,
-    target_sha: str,
+    chain_identity_hash: str,
     ref_f: ReferenceF,
     env: EnvInfo,
     max_batches: int | None,
@@ -754,8 +797,8 @@ def _run_locked(
     resume_session_id = _extract_last_session_id(state_dir) + 1
     decision = resolve_startup_mode(
         state_dir,
-        composition_hash,
-        head_block,
+        chain_identity_hash=chain_identity_hash,
+        head_block=head_block,
         rpc=rpc,
         facade_ctx=preflight_ctx,
         replay_context=replay_context,
@@ -792,9 +835,15 @@ def _run_locked(
 
     controller = Controller(state)
 
+    # Seed the rolling target-history snapshot tracker. On resume we pull every
+    # snapshot from the prior manifest so replay can look up old batches by
+    # sha256; on fresh runs we start with just the boot target. Either way the
+    # active target is appended if its sha256 isn't yet present.
+    manifest_path = state_dir / MANIFEST_FILENAME
+    target_history = _seed_target_history(manifest_path, target)
+
     journal_path = state_dir / JOURNAL_FILENAME
     payload_path = state_dir / PAYLOAD_FILENAME
-    manifest_path = state_dir / MANIFEST_FILENAME
 
     session_started = _now_iso()
     stop_reason = "max_batches"
@@ -819,7 +868,8 @@ def _run_locked(
                     journal_writer=jw,
                     payload_writer=pw,
                     state_dir=state_dir,
-                    composition_hash=composition_hash,
+                    chain_identity_hash=chain_identity_hash,
+                    active_target=target,
                     session_id=session_id,
                     resumed_from_batch=resumed_from_batch,
                     batch_id_start=batch_id,
@@ -831,19 +881,52 @@ def _run_locked(
             last_observation = sensor.read()
             completed = 0
             consecutive_low_residual = 0
+            active_target = target
             while not stop.is_set():
                 if max_batches is not None and completed >= max_batches:
                     break
+                # Per-batch live reload: stat target.yaml, swap in any new
+                # shape, and journal the change into target_history. The
+                # watcher is the single source of truth from this point on.
+                next_target = (
+                    target_watcher.current() if target_watcher is not None else target
+                )
+                if next_target.sha256 != active_target.sha256:
+                    _log_target_change(active_target, next_target)
+                    _append_snapshot_if_new(target_history, next_target)
+                    # Persist the new history immediately so a crash before the
+                    # next manifest write doesn't lose the snapshot reference.
+                    _write_manifest_with_history(
+                        manifest_path=manifest_path,
+                        target=next_target,
+                        chain_identity_hash=chain_identity_hash,
+                        reference_f_version=ref_f.version,
+                        env=env,
+                        replay_context=replay_context,
+                        target_history=target_history,
+                        sessions=[
+                            *_load_prior_sessions(manifest_path),
+                            Session(
+                                session_id=session_id,
+                                started_at=session_started,
+                                last_batch_id=batch_id - 1 if batch_id > 0 else None,
+                                stop_reason="in_progress",
+                            ),
+                        ],
+                        journal_path=journal_path,
+                        rpc=None,
+                    )
+                    active_target = next_target
                 batch_status, last_observation = _run_one_batch(
                     controller=controller,
-                    target=target,
+                    target=active_target,
                     sensor=sensor,
                     rpc=rpc,
                     facade_ctx=ctx,
                     journal_writer=jw,
                     payload_writer=pw,
                     state_dir=state_dir,
-                    composition_hash=composition_hash,
+                    chain_identity_hash=chain_identity_hash,
                     session_id=session_id,
                     resumed_from_batch=resumed_from_batch,
                     batch_id=batch_id,
@@ -854,9 +937,21 @@ def _run_locked(
                 if batch_status != "ok":
                     stop_reason = batch_status
                     break
-                if _target_reached(last_observation, target):
-                    stop_reason = "target_reached"
-                    break
+                if _target_reached(last_observation, active_target):
+                    # Soft-stop poll: linger for ORCH_IDLE_TIMEOUT_SEC waiting
+                    # for an operator to edit target.yaml. Any sha change resumes
+                    # the QP loop; the timeout fires "target_reached_idle".
+                    polled = _poll_for_target_change(
+                        watcher=target_watcher,
+                        active_sha=active_target.sha256,
+                        stop=stop,
+                    )
+                    if polled is None:
+                        stop_reason = "target_reached_idle"
+                        break
+                    # Continue the main loop; the next iteration will pick up
+                    # the new target via watcher.current() above.
+                    continue
                 # Soft-stop: when the controller's innovation residual_norm
                 # stays below THRESHOLD for WINDOW consecutive batches, we've
                 # plateaued — stop instead of grinding.
@@ -877,13 +972,14 @@ def _run_locked(
             sensor.close()
             rpc.close()
 
+    final_target = locals().get("active_target", target)
     manifest = _build_manifest(
-        target=target,
-        target_sha=target_sha,
-        composition_hash=composition_hash,
+        target=final_target,
+        chain_identity_hash=chain_identity_hash,
         reference_f_version=ref_f.version,
         env=env,
         replay_context=replay_context,
+        target_history=target_history,
         sessions=[
             *_load_prior_sessions(manifest_path),
             Session(
@@ -911,7 +1007,7 @@ def _run_one_batch(
     journal_writer: JournalWriter,
     payload_writer: PayloadStreamWriter,
     state_dir: Path,
-    composition_hash: str,
+    chain_identity_hash: str,
     session_id: int,
     resumed_from_batch: int | None,
     batch_id: int,
@@ -919,7 +1015,7 @@ def _run_one_batch(
 ) -> tuple[str, StateObservation]:
     plan = controller.pick_next_batch(
         pre_observation, target,
-        batch_id=batch_id, composition_hash=composition_hash,
+        batch_id=batch_id, chain_identity_hash=chain_identity_hash,
     )
     return _commit_and_journal(
         plan=plan,
@@ -930,7 +1026,8 @@ def _run_one_batch(
         journal_writer=journal_writer,
         payload_writer=payload_writer,
         state_dir=state_dir,
-        composition_hash=composition_hash,
+        chain_identity_hash=chain_identity_hash,
+        active_target=target,
         session_id=session_id,
         resumed_from_batch=resumed_from_batch,
         batch_id=batch_id,
@@ -948,7 +1045,8 @@ def _commit_and_journal(
     journal_writer: JournalWriter,
     payload_writer: PayloadStreamWriter,
     state_dir: Path,
-    composition_hash: str,
+    chain_identity_hash: str,
+    active_target: TargetConfig,
     session_id: int,
     resumed_from_batch: int | None,
     batch_id: int,
@@ -997,7 +1095,8 @@ def _commit_and_journal(
             batch_id=batch_id,
             verb=plan.verb,
             deadline_bytes=plan.deadline_bytes,
-            composition_hash=composition_hash,
+            chain_identity_hash=chain_identity_hash,
+            target_sha256=active_target.sha256,
             start_address=start_addr,
             end_address=end_addr,
             ts_iso=ts_iso,
@@ -1036,7 +1135,6 @@ def _commit_and_journal(
         }
 
     record = Record(
-        schema=1,
         session_id=session_id,
         resumed_from_batch=resumed_from_batch,
         ts_iso=ts_iso,
@@ -1052,6 +1150,7 @@ def _commit_and_journal(
             if isinstance(block.get("number"), str)
             else int(block.get("number", 0)),
             block_timestamp=block_timestamp,
+            target_sha256=active_target.sha256,
         ),
         observability=Observability(
             observed_flat_bytes=int(obs_diag["observed_flat_bytes"]),
@@ -1115,11 +1214,11 @@ def _block_to_payload(block: dict[str, Any], *, signed_txs: list[bytes]) -> Exec
 def _build_manifest(
     *,
     target: TargetConfig,
-    target_sha: str,
-    composition_hash: str,
+    chain_identity_hash: str,
     reference_f_version: str,
     env: EnvInfo,
     replay_context: ReplayContext,
+    target_history: list[TargetSnapshot],
     sessions: list[Session],
     journal_path: Path,
     rpc: RpcClient | None,
@@ -1145,11 +1244,10 @@ def _build_manifest(
 
     return Manifest(
         run_id=str(uuid.uuid4()),
-        target_yaml_sha256=target_sha,
         base_address="0x" + target.base_address.hex(),
         revision=target.revision,
         genesis_sha256=env.genesis_sha256,
-        composition_hash=composition_hash,
+        chain_identity_hash=chain_identity_hash,
         reference_f_version=reference_f_version,
         plugin_git_sha=env.plugin_git_sha,
         nethermind_commit_sha=env.nethermind_commit_sha,
@@ -1157,6 +1255,7 @@ def _build_manifest(
         cpu_arch=env.cpu_arch,
         replay_context=replay_context,
         sessions=sessions,
+        target_history=list(target_history),
         journal_sha256=journal_sha,
         last_chain_hash_checkpoint=checkpoint_hash,
         last_checkpoint_batch_id=checkpoint_batch,
@@ -1193,6 +1292,138 @@ def _extract_last_session_id(state_dir: Path) -> int:
         if tail is not None:
             journal_sid = tail.session_id
     return max(manifest_sid, journal_sid)
+
+
+def _seed_target_history(
+    manifest_path: Path, current: TargetConfig
+) -> list[TargetSnapshot]:
+    """Load every prior target_history snapshot, then ensure ``current`` is in it.
+
+    Replay reads each batch's target by ``target_sha256``; any sha referenced
+    by the journal must exist in ``manifest.target_history`` or replay fails
+    loudly. Resume preserves the prior list verbatim so old batches still
+    look up correctly, then appends the boot target if its sha is new.
+    """
+    history: list[TargetSnapshot] = []
+    if manifest_path.exists():
+        try:
+            prior = Manifest.read(manifest_path)
+        except (ValueError, OSError):
+            prior = None
+        if prior is not None:
+            history = list(prior.target_history)
+    _append_snapshot_if_new(history, current)
+    return history
+
+
+def _append_snapshot_if_new(
+    history: list[TargetSnapshot], target: TargetConfig
+) -> None:
+    """Append ``target`` to ``history`` iff its sha256 is not already present."""
+    if any(snap.sha256 == target.sha256 for snap in history):
+        return
+    history.append(
+        TargetSnapshot(
+            sha256=target.sha256,
+            ts_iso=_now_iso(),
+            body=dict(target.raw),
+        )
+    )
+
+
+def _log_target_change(prev: TargetConfig, nxt: TargetConfig) -> None:
+    """Emit the single-line target-change banner the spec calls for."""
+    accounts = nxt.mainnet_target.get("accounts", 0.0)
+    storage = nxt.mainnet_target.get("storage", 0.0)
+    code = nxt.mainnet_target.get("code", 0.0)
+    total_mib = nxt.target_total_bytes / (1024 * 1024)
+    _log.info(
+        "target changed: %s… → %s…; new shape acc=%.3f sto=%.3f cod=%.3f total=%.0f MiB",
+        prev.sha256[:8],
+        nxt.sha256[:8],
+        accounts,
+        storage,
+        code,
+        total_mib,
+    )
+
+
+def _write_manifest_with_history(
+    *,
+    manifest_path: Path,
+    target: TargetConfig,
+    chain_identity_hash: str,
+    reference_f_version: str,
+    env: EnvInfo,
+    replay_context: ReplayContext,
+    target_history: list[TargetSnapshot],
+    sessions: list[Session],
+    journal_path: Path,
+    rpc: RpcClient | None,
+) -> None:
+    """Atomically persist the manifest mid-run after a target swap.
+
+    Without this checkpoint a target change followed by a crash would lose the
+    new snapshot — replay would see ``target_sha256`` references with no
+    matching entry in ``target_history`` and refuse. The atomic write swaps
+    the file in one operation so partial writes are impossible.
+    """
+    manifest = _build_manifest(
+        target=target,
+        chain_identity_hash=chain_identity_hash,
+        reference_f_version=reference_f_version,
+        env=env,
+        replay_context=replay_context,
+        target_history=target_history,
+        sessions=sessions,
+        journal_path=journal_path,
+        rpc=rpc,
+    )
+    manifest.write(manifest_path)
+
+
+def _poll_for_target_change(
+    *,
+    watcher: LiveTargetWatcher | None,
+    active_sha: str,
+    stop: threading.Event,
+) -> TargetConfig | None:
+    """Block up to ORCH_IDLE_TIMEOUT_SEC waiting for a target.yaml change.
+
+    Returns the new ``TargetConfig`` as soon as a sha change is observed; or
+    ``None`` if the idle timeout elapses. Wakes early on SIGINT/SIGTERM (the
+    ``stop`` flag) so Ctrl-C still terminates the run promptly.
+
+    With no watcher (synthetic in-memory targets, tests), returns None
+    immediately — there's nothing to observe.
+    """
+    if watcher is None:
+        return None
+    deadline = _monotonic() + TARGET_REACHED_IDLE_TIMEOUT_SEC
+    while not stop.is_set():
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return None
+        sleep_for = min(remaining, TARGET_REACHED_POLL_INTERVAL_SEC)
+        # Use Event.wait for early cancellation: returns True on stop.set(),
+        # False on timeout. Either way we re-check the watcher below.
+        if stop.wait(sleep_for):
+            return None
+        nxt = watcher.current()
+        if nxt.sha256 != active_sha:
+            return nxt
+    return None
+
+
+def _monotonic() -> float:
+    """Wall-clock-independent seconds since process start.
+
+    Wrapped so tests can monkey-patch the timer when exercising the
+    soft-stop poll without sleeping in real time.
+    """
+    import time as _time
+
+    return _time.monotonic()
 
 
 def _now_iso() -> str:
