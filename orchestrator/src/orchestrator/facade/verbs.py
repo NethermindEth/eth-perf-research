@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import spamoor_builders as sb
+import eels_spamoor_builders as sb
 from ._builder import pack_until_deadline
 from .context import FacadeContext, SignedTransaction
 
