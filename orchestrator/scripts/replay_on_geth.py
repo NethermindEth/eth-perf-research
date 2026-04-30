@@ -128,16 +128,43 @@ def _bearer(jwt_path: Path) -> str:
     return token
 
 
+_LATENCY_BUFFER: list[float] = []
+_LATENCY_BUFFER_MAX = 32
+_TIMEOUT_FLOOR_S = 60.0
+_TIMEOUT_P95_MULTIPLIER = 3.0
+
+
+def _record_latency(seconds: float) -> None:
+    _LATENCY_BUFFER.append(seconds)
+    if len(_LATENCY_BUFFER) > _LATENCY_BUFFER_MAX:
+        _LATENCY_BUFFER.pop(0)
+
+
+def _adaptive_timeout() -> float:
+    """Per-call timeout: floor (60 s) until 4 samples, then max(floor, p95 × 3)."""
+    if len(_LATENCY_BUFFER) < 4:
+        return _TIMEOUT_FLOOR_S
+    sorted_buf = sorted(_LATENCY_BUFFER)
+    p95_idx = max(0, int(len(sorted_buf) * 0.95) - 1)
+    p95 = sorted_buf[p95_idx]
+    return max(_TIMEOUT_FLOOR_S, p95 * _TIMEOUT_P95_MULTIPLIER)
+
+
 def _rpc(client: httpx.Client, url: str, method: str, params: list, *, jwt_path: Path | None = None) -> dict:
     headers = {"content-type": "application/json"}
     if jwt_path is not None:
         headers["authorization"] = f"Bearer {_bearer(jwt_path)}"
-    resp = client.post(
-        url,
-        headers=headers,
-        json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
-        timeout=120.0,
-    )
+    timeout_s = _adaptive_timeout()
+    started = time.monotonic()
+    try:
+        resp = client.post(
+            url,
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
+            timeout=timeout_s,
+        )
+    finally:
+        _record_latency(time.monotonic() - started)
     resp.raise_for_status()
     body = resp.json()
     if "error" in body:
