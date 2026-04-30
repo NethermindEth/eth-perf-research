@@ -28,6 +28,9 @@ qp_scenarios:
   - storagerefundtx
 total_batch_bytes: 10000000
 projection_eta: 0.5
+chain_id: 1337
+gas_limit: 30000000
+block_gas_limit: 30000000
 """
 
 
@@ -73,6 +76,9 @@ def test_load_target_happy_path(tmp_path: Path) -> None:
         "qp_scenarios",
         "total_batch_bytes",
         "projection_eta",
+        "chain_id",
+        "gas_limit",
+        "block_gas_limit",
     ],
 )
 def test_load_target_refuses_when_required_field_missing(tmp_path: Path, missing_key: str) -> None:
@@ -110,6 +116,9 @@ revision: 0
 qp_scenarios: []
 total_batch_bytes: 10000000
 projection_eta: 0.5
+chain_id: 1337
+gas_limit: 30000000
+block_gas_limit: 30000000
 """,
     )
     with pytest.raises(ValueError, match="qp_scenarios"):
@@ -151,6 +160,9 @@ qp_scenarios:
   - eoatx
 total_batch_bytes: 1000
 projection_eta: 0.5
+chain_id: 1337
+gas_limit: 30000000
+block_gas_limit: 30000000
 """,
     )
     with pytest.raises(ValueError):
@@ -172,6 +184,9 @@ qp_scenarios:
   - eoatx
 total_batch_bytes: 1000
 projection_eta: 0.5
+chain_id: 1337
+gas_limit: 30000000
+block_gas_limit: 30000000
 """,
     )
     cfg = load_target(path)

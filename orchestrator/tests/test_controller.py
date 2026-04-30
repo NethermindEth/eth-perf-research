@@ -45,6 +45,9 @@ def target():
         ),
         total_batch_bytes=1_000_000,
         projection_eta=0.5,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        block_gas_limit=30_000_000,
         raw={},
         source_sha256="t" * 64,
     )
@@ -85,6 +88,9 @@ def test_closed_loop_convergence_single_axis(reference_f) -> None:
         qp_scenarios=("storagespam",),
         total_batch_bytes=1_000_000,
         projection_eta=0.5,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        block_gas_limit=30_000_000,
         raw={},
         source_sha256="t" * 64,
     )

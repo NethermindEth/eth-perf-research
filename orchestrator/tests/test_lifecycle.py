@@ -58,6 +58,9 @@ def _target() -> TargetConfig:
         ),
         total_batch_bytes=500_000,
         projection_eta=0.5,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        block_gas_limit=30_000_000,
         raw={},
         source_sha256="a" * 64,
     )
@@ -881,6 +884,9 @@ def _three_verb_target() -> TargetConfig:
         qp_scenarios=("eoatx", "calltx", "deploytx"),
         total_batch_bytes=500_000,
         projection_eta=0.5,
+        chain_id=1337,
+        gas_limit=30_000_000,
+        block_gas_limit=30_000_000,
         raw={},
         source_sha256="a" * 64,
     )
@@ -982,6 +988,9 @@ qp_scenarios:
   - deploytx
 total_batch_bytes: 500000
 projection_eta: 0.5
+chain_id: 1337
+gas_limit: 30000000
+block_gas_limit: 30000000
 """
 
 _TARGET_B_YAML = b"""\
@@ -998,6 +1007,9 @@ qp_scenarios:
   - deploytx
 total_batch_bytes: 500000
 projection_eta: 0.5
+chain_id: 1337
+gas_limit: 30000000
+block_gas_limit: 30000000
 """
 
 

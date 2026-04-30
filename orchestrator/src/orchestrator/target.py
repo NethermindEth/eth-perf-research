@@ -37,6 +37,9 @@ class TargetConfig:
     qp_scenarios: tuple[str, ...]
     total_batch_bytes: int
     projection_eta: float
+    chain_id: int
+    gas_limit: int
+    block_gas_limit: int
     raw: dict[str, Any]
     source_sha256: str
     reference_f_path: Path | None = None
@@ -77,6 +80,12 @@ def parse_target(raw_bytes: bytes) -> TargetConfig:
     if not qp_scenarios_raw:
         raise ValueError("qp_scenarios must be a non-empty list")
 
+    gas_limit = int(_require(body, "gas_limit", int))
+    block_gas_limit = int(_require(body, "block_gas_limit", int))
+    if gas_limit <= 0:
+        raise ValueError(f"gas_limit must be positive (got {gas_limit})")
+    if block_gas_limit <= 0:
+        raise ValueError(f"block_gas_limit must be positive (got {block_gas_limit})")
     return TargetConfig(
         mainnet_target={k: float(v) for k, v in mainnet.items()},
         target_total_bytes=int(_require(body, "target_total_bytes", int)),
@@ -85,6 +94,9 @@ def parse_target(raw_bytes: bytes) -> TargetConfig:
         qp_scenarios=tuple(str(v) for v in qp_scenarios_raw),
         total_batch_bytes=int(_require(body, "total_batch_bytes", int)),
         projection_eta=float(_require(body, "projection_eta", (int, float))),
+        chain_id=int(_require(body, "chain_id", int)),
+        gas_limit=gas_limit,
+        block_gas_limit=block_gas_limit,
         reference_f_path=(
             Path(body["reference_f_path"]) if body.get("reference_f_path") is not None else None
         ),

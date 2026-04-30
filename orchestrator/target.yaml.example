@@ -16,7 +16,12 @@ revision:      0
 
 # Chain id for signing txs (must match Nethermind's chainspec).
 chain_id: 1337
+
+# Per-tx gas ceiling.
 gas_limit: 30_000_000
+
+# Per-block dispatcher cap (cumulative gas across one batch ≤ 0.95 × this).
+block_gas_limit: 30_000_000
 
 # Budget per batch (tx-RLP bytes).
 total_batch_bytes: 10_000_000
