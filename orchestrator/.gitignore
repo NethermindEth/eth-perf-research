@@ -14,6 +14,14 @@ target.yaml
 # Per-scenario host scratch (not under target.yaml.example).
 target.yaml.mainnet-100m
 target.yaml.phase2-mainnet
+
+# Lockfile — left to local `uv lock` so PRs don't drag pinned graphs.
+uv.lock
+
+# Ablation harness — split into a follow-up PR after orchestrator core merges.
+scripts/run_ablation.sh
+scripts/summarize_ablations.py
+ablation-runs/
 # Local stack scratch — bind-mount targets / generated reports / per-host paths.
 nethermind-data/
 reports/
