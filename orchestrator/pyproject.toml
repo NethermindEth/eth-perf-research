@@ -24,7 +24,7 @@ dependencies = [
     # (Dmytro's PR) via the sibling pyproject we added in
     # NethermindEth/execution-specs#3. Pinned to a SHA on the branch so the
     # graph stays reproducible until that PR + Dmytro's parent merge to main.
-    "eels-spamoor-builders @ git+https://github.com/NethermindEth/execution-specs.git@7a8168b7294981c88cb3a67c4963fedf7c25ebde#subdirectory=tests/benchmark/spamoor",
+    "eels-spamoor-builders @ git+https://github.com/NethermindEth/execution-specs.git@c1b46499b83489cd9758be135362cf1ddca84dad#subdirectory=tests/benchmark/spamoor",
 ]
 
 [project.optional-dependencies]
