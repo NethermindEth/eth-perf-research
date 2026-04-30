@@ -81,8 +81,10 @@ class Observability:
     alpha_current: float = 0.0  # display-only: mean of alpha_state.values()
     innovation_ratio: float = 0.0
     residual_norm: float = 0.0
-    # Null (not absent) on sensor_wait_timeout — preserves chain-hash determinism.
+    # On sensor_wait_timeout this carries the prior batch's snapshot with
+    # ``statecomp_snapshot_stale=True`` rather than null.
     statecomp_snapshot: dict[str, Any] | None = None
+    statecomp_snapshot_stale: bool = False
     # Diagnostic-only knobs that produced this batch's pick. ``mix_simplex``
     # is the full simplex projection; ``epsilon`` is the explore probability
     # in effect; ``overshoot_penalty`` is the QP overshoot λ. All written into
@@ -92,6 +94,8 @@ class Observability:
     mix_simplex: dict[str, float] | None = None
     epsilon: float | None = None
     overshoot_penalty: float | None = None
+    gas_used: int = 0
+    verb_gas_factors: dict[str, float] | None = None
 
 
 @dataclass
@@ -139,9 +143,12 @@ def _observability_to_jsonable(obs: Observability) -> dict[str, Any]:
         "innovation_ratio": obs.innovation_ratio,
         "residual_norm": obs.residual_norm,
         "statecomp_snapshot": obs.statecomp_snapshot,  # None preserved as JSON null
+        "statecomp_snapshot_stale": obs.statecomp_snapshot_stale,
         "mix_simplex": obs.mix_simplex,
         "epsilon": obs.epsilon,
         "overshoot_penalty": obs.overshoot_penalty,
+        "gas_used": obs.gas_used,
+        "verb_gas_factors": obs.verb_gas_factors,
     }
 
 

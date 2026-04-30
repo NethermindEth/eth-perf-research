@@ -17,6 +17,7 @@ import os
 import platform
 import signal
 import threading
+import time
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -35,7 +36,7 @@ from .controller import (
     init_state,
     rehydrate_state,
 )
-from .facade import FacadeContext, dispatch
+from .facade import FacadeContext, SignedTransaction, dispatch
 from .journal import (
     PENDING_FILENAME,
     JournalReader,
@@ -674,17 +675,60 @@ def _target_reached(observation: StateObservation, target: TargetConfig) -> bool
     )
 
 
+_VERB_GAS_FACTOR_ALPHA = 0.3
+_VERB_GAS_FACTOR_FLOOR = 0.05
+
+_BLOCK_APPLY_LATENCY_WINDOW = 16
+_BLOCK_APPLY_BACKPRESSURE_THRESHOLD_S = 1.5
+_BACKPRESSURE_VERB = "noop"
+_BACKPRESSURE_MIN_SAMPLES = 4
+
+
+def record_block_apply_latency(ctx: FacadeContext, seconds: float) -> None:
+    ctx.block_apply_latencies.append(seconds)
+    if len(ctx.block_apply_latencies) > _BLOCK_APPLY_LATENCY_WINDOW:
+        ctx.block_apply_latencies.pop(0)
+
+
+def under_back_pressure(ctx: FacadeContext) -> bool:
+    """True iff the recent p95 block-apply latency exceeds the threshold."""
+    if len(ctx.block_apply_latencies) < _BACKPRESSURE_MIN_SAMPLES:
+        return False
+    sorted_buf = sorted(ctx.block_apply_latencies)
+    p95_idx = max(0, int(len(sorted_buf) * 0.95) - 1)
+    return sorted_buf[p95_idx] > _BLOCK_APPLY_BACKPRESSURE_THRESHOLD_S
+
+
+def update_verb_gas_factor(
+    ctx: FacadeContext,
+    verb: str,
+    block_gas_used: int,
+    txs: list[SignedTransaction],
+) -> float:
+    """Update ``ctx.verb_gas_factors[verb]`` from a just-committed block.
+
+    Factor = ``block.gas_used / sum(tx.gas_limit)`` smoothed by EWMA.
+    Returns the new factor.
+    """
+    if not txs:
+        return ctx.verb_gas_factors.get(verb, 1.0)
+    sum_limits = sum(tx.gas_limit for tx in txs)
+    if sum_limits <= 0:
+        return ctx.verb_gas_factors.get(verb, 1.0)
+    observed = max(_VERB_GAS_FACTOR_FLOOR, min(1.0, block_gas_used / sum_limits))
+    prev = ctx.verb_gas_factors.get(verb, 1.0)
+    new = _VERB_GAS_FACTOR_ALPHA * observed + (1 - _VERB_GAS_FACTOR_ALPHA) * prev
+    ctx.verb_gas_factors[verb] = new
+    return new
+
+
 def build_facade_context(target: TargetConfig) -> FacadeContext:
-    gas_limit = int(target.raw.get("gas_limit", 30_000_000))
-    # block_gas_limit defaults to per-tx gas_limit so existing target.yaml
-    # files keep working unchanged. Override via an explicit YAML field.
-    block_gas_limit = int(target.raw.get("block_gas_limit", gas_limit))
     return FacadeContext(
         base_address=target.base_address,
         revision=target.revision,
-        chain_id=int(target.raw.get("chain_id", 1337)),
-        gas_limit=gas_limit,
-        block_gas_limit=block_gas_limit,
+        chain_id=target.chain_id,
+        gas_limit=target.gas_limit,
+        block_gas_limit=target.block_gas_limit,
     )
 
 
@@ -1017,6 +1061,18 @@ def _run_one_batch(
         pre_observation, target,
         batch_id=batch_id, chain_identity_hash=chain_identity_hash,
     )
+    # Back-pressure: when block-apply latency trends up, NM's pruner is
+    # behind — insert a noop batch so the pruner has a cheap block to catch
+    # up against. The override only fires for QP-loop batches; probes use
+    # a different code path with verbs fixed by spec §B.2.
+    if (
+        _BACKPRESSURE_VERB in target.qp_scenarios
+        and plan.verb != _BACKPRESSURE_VERB
+        and under_back_pressure(facade_ctx)
+    ):
+        plan = dataclasses.replace(
+            plan, verb=_BACKPRESSURE_VERB, mix={_BACKPRESSURE_VERB: 1.0}
+        )
     return _commit_and_journal(
         plan=plan,
         controller=controller,
@@ -1104,12 +1160,17 @@ def _commit_and_journal(
         ),
     )
 
+    commit_started = time.monotonic()
     block_hash = rpc.testing_commit_block_v1(
         [tx.rlp for tx in txs], timestamp_unix=block_timestamp
     )
     block = rpc.eth_get_block_by_hash(block_hash, full=True)
+    record_block_apply_latency(facade_ctx, time.monotonic() - commit_started)
     payload = _block_to_payload(block, signed_txs=[tx.rlp for tx in txs])
     payload_writer.append(payload)
+
+    block_gas_used = int(payload.gas_used)
+    update_verb_gas_factor(facade_ctx, plan.verb, block_gas_used, txs)
 
     try:
         post = sensor.read(expected_block=pre_observation.block_number + 1)
@@ -1161,10 +1222,13 @@ def _commit_and_journal(
             alpha_current=float(obs_diag["alpha_current"]),
             innovation_ratio=float(obs_diag["innovation_ratio"]),
             residual_norm=float(obs_diag["residual_norm"]),
-            statecomp_snapshot=None if status == "sensor_wait_timeout" else post.raw,
+            statecomp_snapshot=post.raw if post.raw else None,
+            statecomp_snapshot_stale=(status == "sensor_wait_timeout"),
             mix_simplex=dict(plan.mix),
             epsilon=EPSILON,
             overshoot_penalty=OVERSHOOT_PENALTY,
+            gas_used=block_gas_used,
+            verb_gas_factors=dict(facade_ctx.verb_gas_factors),
         ),
     )
     journal_writer.append(record)

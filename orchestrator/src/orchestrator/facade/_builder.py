@@ -64,38 +64,41 @@ def pack_until_deadline(
     Returns at least one tx even if the first tx exceeds the deadline — forward progress
     is more important than strict budget adherence when the budget is tiny.
 
-    When ``gas_budget`` is provided the loop also stops once cumulative
-    ``signable["gas"]`` would exceed ``0.95 * gas_budget``. The 0.95 leaves
-    headroom for intrinsic + base costs that the dispatcher doesn't model
-    (per-tx 21 K base, EIP-2935 history-write, etc.). Used to keep
-    storage-heavy verbs from blowing past the block-gas ceiling.
+    With ``gas_budget``, also stops once cumulative expected gas-used would
+    exceed ``0.95 * gas_budget``. Expected-used = ``signable["gas"] *
+    context.verb_gas_factors[kind]``, floored at the 21 K intrinsic so a
+    near-zero factor can't pack an empty block.
     """
     out: list[SignedTransaction] = []
     accumulated = 0
-    accumulated_gas = 0
+    accumulated_expected_gas = 0
     gas_ceiling = int(gas_budget * 0.95) if gas_budget is not None else None
+    factor = context.verb_gas_factors.get(kind, 1.0)
     starting_cursor = context.address_cursor
     while True:
         signable, diag = build_one(context.address_cursor, context)
         raw = _sign(signable, context)
         tx_size = len(raw)
-        tx_gas = int(signable.get("gas", 0))
+        tx_gas_limit = int(signable.get("gas", 0))
+        tx_expected_gas = max(int(tx_gas_limit * factor), 21_000)
         if out and accumulated + tx_size > deadline_bytes:
             break
         if (
             gas_ceiling is not None
             and out
-            and accumulated_gas + tx_gas > gas_ceiling
+            and accumulated_expected_gas + tx_expected_gas > gas_ceiling
         ):
             break
-        out.append(SignedTransaction(rlp=raw, kind=kind, fields=diag))
+        out.append(
+            SignedTransaction(rlp=raw, kind=kind, fields=diag, gas_limit=tx_gas_limit)
+        )
         accumulated += tx_size
-        accumulated_gas += tx_gas
+        accumulated_expected_gas += tx_expected_gas
         context.address_cursor += 1
         # Safety: if deadline is 0 and we've emitted one tx, stop.
         if accumulated >= deadline_bytes:
             break
-        if gas_ceiling is not None and accumulated_gas >= gas_ceiling:
+        if gas_ceiling is not None and accumulated_expected_gas >= gas_ceiling:
             break
         # Safety: bound the loop to avoid runaway on absurdly-large deadlines in tests.
         if context.address_cursor - starting_cursor > 200_000:

@@ -31,6 +31,7 @@ class SignedTransaction:
     rlp: bytes
     kind: str
     fields: dict[str, Any] = field(default_factory=dict)
+    gas_limit: int = 0
 
 
 @dataclass
@@ -64,6 +65,15 @@ class FacadeContext:
     # would otherwise share a wall-clock timestamp and be rejected by
     # geth/besu/reth on cross-client replay.
     last_block_timestamp: int = 0
+    # Per-verb EWMA of (block.gas_used / sum(tx.gas_limit)). Populated by
+    # ``lifecycle.update_verb_gas_factor``; consumed by ``pack_until_deadline``.
+    # Defaults to 1.0 per verb until the first commit feeds back a real value.
+    verb_gas_factors: dict[str, float] = field(default_factory=dict)
+    # Sliding window of recent block-apply latencies in seconds. Drives the
+    # back-pressure check (`lifecycle.under_back_pressure`) — when NM's pruner
+    # falls behind, blocks take longer; the orchestrator inserts noop batches
+    # to give the pruner room to catch up.
+    block_apply_latencies: list[float] = field(default_factory=list)
     # `repr=False` so `repr(ctx)` never leaks the private key into logs/tracebacks.
     deploy_private_key: bytes = field(default=_LAB_PRIVATE_KEY, repr=False)
     address_stride: int = 1 << 40
