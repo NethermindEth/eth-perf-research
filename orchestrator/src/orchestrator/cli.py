@@ -10,6 +10,7 @@ thinks they're launching. Fields that are *legitimately* optional — e.g. ``--m
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import platform
 from pathlib import Path
@@ -76,6 +77,11 @@ def main(
     reference_f_path: Path | None = typer.Option(None, "--reference-f"),
     manifest_path: Path | None = typer.Option(None, "--manifest"),
     max_batches: int | None = typer.Option(None, "--max-batches"),
+    target_total_bytes_override: int | None = typer.Option(
+        None,
+        "--target-total-bytes-override",
+        help="Override target.yaml's target_total_bytes at startup. 0 / unset = use file value.",
+    ),
 ) -> None:
     if replay is not None:
         # Replay requires a manifest to reconstruct the signer + chain context;
@@ -103,10 +109,15 @@ def main(
         raise typer.Exit(code=2)
 
     target = load_target(target_yaml)
+    if target_total_bytes_override is not None and target_total_bytes_override > 0:
+        target = dataclasses.replace(
+            target, target_total_bytes=target_total_bytes_override
+        )
     # Live-reload watcher: stat target.yaml once per batch and adopt edits
     # immediately. The CLI is the only place that knows the path is real
     # (``deps``-injected runs may be using synthetic in-memory targets), so
-    # the watcher is constructed here.
+    # the watcher is constructed here. NOTE: the override applies to the
+    # initial target only; mid-run YAML reloads pick up the file's value.
     watcher = LiveTargetWatcher(target_yaml, initial=target)
     ref_f = load_reference_f(reference_f_path or default_reference_f_path())
     env = EnvInfo(

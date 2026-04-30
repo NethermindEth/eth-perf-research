@@ -4,7 +4,7 @@ services:
     read_only: true
     volumes:
       - type: bind
-        source: ./nethermind-data
+        source: ./${NETHERMIND_DATA_HOST:-nethermind-data}
         target: /nethermind/db
       - type: bind
         source: ${LAB_GENESIS_PATH:-./lab-genesis.json}
@@ -62,6 +62,7 @@ services:
     restart: "no"
 
   orchestrator:
+    image: ${ORCHESTRATOR_IMAGE:-orchestrator-local:dev}
     build: .
     depends_on:
       nethermind:
@@ -95,10 +96,10 @@ services:
         source: jwt
         target: /run/jwt
       - type: bind
-        source: ./state
+        source: ./${STATE_DIR_HOST:-state}
         target: /app/state
       - type: bind
-        source: ./target.yaml
+        source: ./${TARGET_YAML_HOST:-target.yaml}
         target: /app/target.yaml
         read_only: true
     command:
@@ -109,7 +110,8 @@ services:
       - --plugin-git-sha=1253d26424c5d6ec7352d4ce23bb50452a0402c9
       - --nethermind-commit-sha=1253d26424c5d6ec7352d4ce23bb50452a0402c9
       - --dotnet-runtime-major=10
-      - --max-batches=1500
+      - --max-batches=${MAX_BATCHES:-1500}
+      - --target-total-bytes-override=${TARGET_TOTAL_BYTES_OVERRIDE:-0}
 
 volumes:
   jwt:
