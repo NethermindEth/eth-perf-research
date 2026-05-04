@@ -18,5 +18,6 @@ orchestrator/monitoring/
 orchestrator/scenarios/
 orchestrator/scripts/compare-clients.py
 orchestrator/scripts/orchestrator_report.py
+orchestrator/scripts/replay_on_geth.py
 dagu/config/dags/bloating_demo.yaml
 presentations/

@@ -42,6 +42,27 @@ Replay a completed run:
 uv run orchestrator --replay ./state/orchestrator.journal.jsonl --rpc-url http://localhost:8545
 ```
 
+## Cross-client verification
+
+`payloads.rlp` is an append-only stream of canonical `ExecutionPayloadV3` blocks. Any
+EL client that speaks the Engine API can replay the stream and the resulting `stateRoot`
+on the final block must match the `final_state_root` recorded in `run-manifest.json`.
+
+To verify a completed run on Geth (or any other EL):
+
+1. Boot a fresh archive node against the lab genesis (`state-geth/genesis.json`).
+2. For each payload in `payloads.rlp`, send `engine_newPayloadV4` followed by
+   `engine_forkchoiceUpdatedV3` pinning the new head.
+3. Read `eth_getBlockByNumber("latest")` and compare its `stateRoot` with
+   `manifest.final_state_root`.
+
+Bit-exact match on every payload is the design's normative claim — the journal +
+payload stream is a deterministic byte-level reproduction recipe regardless of which
+EL produced it.
+
+A reference replay harness for Geth lives outside the PR scope; see the local demo
+under `eth-perf-research/dagu/` for an executable example.
+
 ## Docker
 
 ```bash
