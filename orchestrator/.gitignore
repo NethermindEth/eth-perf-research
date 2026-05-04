@@ -35,7 +35,5 @@ nethermind-data-demo/
 state-demo/
 target-demo.yaml
 .env.demo
-# Geth datadir + runtime files; keep state-geth/genesis.json (the committed config).
-state-geth/datadir/
-state-geth/geth.log
-state-geth/jwt.hex
+# Geth runtime artefacts (entire dir is local-only — no committed contents).
+state-geth/

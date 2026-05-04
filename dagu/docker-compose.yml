@@ -13,13 +13,11 @@ services:
       - ./config/logs:/root/.local # to keep history and logs
       - ./init.sh:/init.sh # Mount the initialization scrip
       - /var/run/docker.sock:/var/run/docker.sock # optional. required for docker in docker
-      # Identity-map the orchestrator dir + lab genesis: Dagu shells out to
-      # `docker compose` against the host daemon, so bind-mount sources have
-      # to resolve to the same absolute path inside this container as on the
-      # host. Set ORCHESTRATOR_HOST_DIR and LAB_GENESIS_HOST_PATH in .env
-      # (see .env.example).
+      # Identity-map the orchestrator dir: Dagu shells out to `docker compose`
+      # against the host daemon, so bind-mount sources have to resolve to the
+      # same absolute path inside this container as on the host. Set
+      # ORCHESTRATOR_HOST_DIR in .env (see .env.example).
       - ${ORCHESTRATOR_HOST_DIR:?set ORCHESTRATOR_HOST_DIR in dagu/.env}:${ORCHESTRATOR_HOST_DIR}
-      - ${LAB_GENESIS_HOST_PATH:?set LAB_GENESIS_HOST_PATH in dagu/.env}:${LAB_GENESIS_HOST_PATH}:ro
     command: sh -c "chmod +x /init.sh && /init.sh && dagu start-all"
     user: "0:0"
     entrypoint: [] # Override any default entrypoint

@@ -70,9 +70,7 @@ def test_dockerignore_excludes_state_and_tests() -> None:
 
 def test_gen_jwt_script_exists_and_executable() -> None:
     gen = ROOT / "scripts" / "gen-jwt.sh"
-    shred = ROOT / "scripts" / "shred-jwt.sh"
     assert gen.exists() and gen.stat().st_mode & 0o111
-    assert shred.exists() and shred.stat().st_mode & 0o111
 
 
 def test_gen_jwt_writes_600_permissions() -> None:

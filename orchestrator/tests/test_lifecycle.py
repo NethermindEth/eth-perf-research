@@ -76,7 +76,7 @@ def test_resolve_resume_when_valid(tmp_path: Path) -> None:
     env = _env()
     comp_hash = compute_chain_identity_hash(env)
 
-    # Seed: a journal record + manifest matching composition_hash.
+    # Seed: a journal record + manifest matching chain_identity_hash.
     journal = tmp_path / "orchestrator.journal.jsonl"
     with JournalWriter(journal) as w:
         w.append(_record(batch_id=0))
@@ -98,7 +98,7 @@ def test_resolve_resume_when_valid(tmp_path: Path) -> None:
     assert decision.mode is StartupMode.RESUME
 
 
-def test_refuse_when_composition_hash_mismatch(tmp_path: Path) -> None:
+def test_refuse_when_chain_identity_hash_mismatch(tmp_path: Path) -> None:
     target = _target()
     env = _env()
     journal = tmp_path / "orchestrator.journal.jsonl"
@@ -284,7 +284,7 @@ def test_reconcile_refuses_on_tx_set_mismatch(tmp_path: Path) -> None:
         )
 
 
-def test_pending_composition_hash_mismatch_refused(tmp_path: Path) -> None:
+def test_pending_chain_identity_hash_mismatch_refused(tmp_path: Path) -> None:
     """H-PENDING-CH: sidecar from a different composition must not be trusted."""
     env = _env()
     _target()
@@ -681,7 +681,7 @@ def test_resume_refused_when_nonce_mismatches_cursor(
         w.append(rec)
 
     # Build a manifest that matches the current run config so we get past
-    # composition_hash + replay_context gates.
+    # chain_identity_hash + replay_context gates.
     from orchestrator.lifecycle import build_facade_context, build_replay_context
     from orchestrator.manifest import Manifest, compute_chain_identity_hash
 

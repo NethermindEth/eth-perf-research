@@ -77,7 +77,7 @@ steps:
       m = json.load(open('state/run-manifest.json'))
       s = m['sessions'][0]
       print(f\"session_id={s['session_id']} last_batch={s['last_batch_id']} stop={s['stop_reason']}\")
-      print(f\"composition_hash={m['composition_hash']}\")
+      print(f\"chain_identity_hash={m['chain_identity_hash']}\")
       print(f\"genesis_sha256={m['genesis_sha256']}\")
       print(f\"plugin_git_sha={m['plugin_git_sha']}\")
       "

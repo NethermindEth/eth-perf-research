@@ -323,7 +323,7 @@ def test_argmax_selection_picks_dominant_verb(reference_f, target, monkeypatch) 
 def test_proportional_selection_is_seeded_deterministic(
     reference_f, target, monkeypatch
 ) -> None:
-    """proportional mode with same (composition_hash, batch_id) reproduces."""
+    """proportional mode with same (chain_identity_hash, batch_id) reproduces."""
     import orchestrator.controller as ctl_mod
 
     monkeypatch.setattr(ctl_mod, "EPSILON", 1.0)
@@ -340,12 +340,12 @@ def test_proportional_selection_is_seeded_deterministic(
         for i in range(20)
     ]
     assert seq_a == seq_b
-    # Different composition_hash → different stream (sanity, may rarely collide).
+    # Different chain_identity_hash → different stream (sanity, may rarely collide).
     seq_c = [
         ctrl_b.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="y" * 64).verb
         for i in range(20)
     ]
-    assert seq_a != seq_c, "different composition_hash should produce different picks"
+    assert seq_a != seq_c, "different chain_identity_hash should produce different picks"
 
 
 def test_proportional_distribution_tracks_simplex(reference_f, target, monkeypatch) -> None:
@@ -379,7 +379,7 @@ def test_proportional_distribution_tracks_simplex(reference_f, target, monkeypat
 def test_proportional_falls_back_to_argmax_without_seed(
     reference_f, target, monkeypatch
 ) -> None:
-    """Missing batch_id / composition_hash makes proportional mode degenerate to argmax."""
+    """Missing batch_id / chain_identity_hash makes proportional mode degenerate to argmax."""
     import numpy as np
 
     import orchestrator.controller as ctl_mod

@@ -43,9 +43,6 @@ EXPECTED_PREALLOCS: dict[str, str | None] = {
 LAB_GENESIS = (
     Path(__file__).resolve().parent.parent / "lab-genesis.json"
 )
-GETH_GENESIS = (
-    Path(__file__).resolve().parent.parent / "state-geth" / "genesis.json"
-)
 
 
 def _normalize_addr(key: str) -> str:
@@ -79,16 +76,3 @@ def test_lab_genesis_prealloc(addr: str, expected_code: str | None) -> None:
         )
 
 
-@pytest.mark.parametrize("addr,expected_code", EXPECTED_PREALLOCS.items())
-def test_geth_genesis_prealloc(addr: str, expected_code: str | None) -> None:
-    """Cross-client replay: state-geth/genesis.json must mirror lab-genesis."""
-    accounts = _load_alloc(GETH_GENESIS, "alloc")
-    entry = accounts.get(addr)
-    assert entry is not None, f"{addr}: missing from state-geth/genesis.json"
-    if expected_code is None:
-        assert "code" not in entry
-        balance = entry.get("balance", "0")
-        assert balance not in ("0", "0x0")
-    else:
-        actual = entry.get("code", "")
-        assert actual.lower() == expected_code.lower()
