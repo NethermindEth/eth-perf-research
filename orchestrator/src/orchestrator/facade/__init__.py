@@ -22,7 +22,7 @@ from .verbs import VERB_SPECS, build_adapter
 
 Adapter = Callable[..., list[SignedTransaction]]
 
-# Env-gated so legacy runs see no behaviour change. Set "1" or "true" to opt in.
+# Env-gated so operators can disable for ablation experiments. Set "1" or "true" to opt in.
 GAS_AWARE_DISPATCH = os.environ.get("ORCH_GAS_AWARE_DISPATCH", "0").lower() in (
     "1",
     "true",

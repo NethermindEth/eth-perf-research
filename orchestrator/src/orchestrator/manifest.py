@@ -52,7 +52,7 @@ class ReplayContext:
     # ``block_gas_limit`` shifts the dispatcher's tx-count threshold. Two runs
     # with identical chain identity but different ``block_gas_limit`` produce
     # different tx sets and different block hashes, so it is part of the
-    # chain_identity_hash preimage. Defaulted to 0 for legacy-manifest back-compat.
+    # chain_identity_hash preimage.
     block_gas_limit: int = 0
 
 
@@ -146,9 +146,9 @@ class Manifest:
         replay_ctx = ReplayContext(**replay_raw) if replay_raw else None
         target_history_raw = body.pop("target_history", [])
         target_history = [TargetSnapshot(**snap) for snap in target_history_raw]
-        # Filter to known fields so newer manifests with extra keys don't crash
-        # older readers. Unknown keys are ignored; missing required keys will
-        # raise from ``cls(...)`` as usual.
+        # Filter to known fields so a future manifest with extra keys still
+        # loads. Unknown keys are ignored; missing required keys raise from
+        # ``cls(...)`` as usual.
         known = {f.name for f in dataclasses.fields(cls)}
         filtered = {k: v for k, v in body.items() if k in known}
         return cls(
@@ -200,7 +200,7 @@ def replay_context_matches(a: ReplayContext | None, b: ReplayContext | None) -> 
 
     Returns ``True`` iff every field that affects tx/block hashes is identical.
 
-    - Both None → compatible (pre-ReplayContext journals replayed by old code).
+    - Both None → compatible.
     - Both set → require structural equality.
     - Exactly one set → incompatible; caller must raise ``ResumeRefused``.
     """

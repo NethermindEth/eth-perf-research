@@ -116,8 +116,8 @@ def _resolve_target_for_record(
 ) -> TargetSnapshot | None:
     """Look up the target snapshot referenced by ``record.replay_core.target_sha256``.
 
-    Returns the snapshot, or ``None`` for legacy records without a
-    target_sha256 (treated as "use whatever was in the manifest"). Raises
+    Returns the snapshot, or ``None`` when ``target_sha256`` is empty
+    (treated as "use whatever was in the manifest"). Raises
     ``ReplayError`` when the sha is non-empty but missing from the index —
     that signals a corrupt or truncated manifest and the operator must
     archive state/.
@@ -176,10 +176,8 @@ def _context_from_manifest(
     except ValueError:
         return None
     key = deploy_private_key if deploy_private_key is not None else b"\x11" * 32
-    # Pre-block_gas_limit manifests serialized 0; FacadeContext defaults its
-    # ``block_gas_limit`` to ``gas_limit`` to match the live-run convention in
-    # ``build_facade_context``. This keeps replay reproducing the same
-    # gas-aware dispatch decisions for legacy journals too.
+    # Manifests that recorded ``block_gas_limit=0`` fall back to ``gas_limit``
+    # to match the live-run convention in ``build_facade_context``.
     block_gas_limit = (
         replay_ctx.block_gas_limit
         if replay_ctx.block_gas_limit > 0

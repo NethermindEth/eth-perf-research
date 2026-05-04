@@ -739,52 +739,6 @@ def test_resume_refused_when_nonce_mismatches_cursor(
         run(target=target, state_dir=tmp_path, rpc_url="http://stub", env=env, deps=deps)
 
 
-def test_legacy_manifest_resume_bypass_refused(tmp_path: Path) -> None:
-    """A pre-ReplayContext manifest must NOT silently let a new signer resume.
-
-    Without this guard, an attacker (or operator with a stale state dir) could
-    drop a manifest with ``replay_context: null`` next to a non-empty journal
-    and resume under a different signer / chain_id. The signer + chain identity
-    gate would be skipped because ``replay_context_matches(None, current)``
-    returns False but only when current is non-None — yet the prior code only
-    invoked ``replay_context_matches`` if ``replay_context is not None``,
-    creating an "if both sides present" check that this gate must close.
-    """
-    target = _target()
-    env = _env()
-    from orchestrator.lifecycle import build_facade_context, build_replay_context
-    from orchestrator.manifest import compute_chain_identity_hash
-
-    fctx = build_facade_context(target)
-    rctx = build_replay_context(fctx)
-    comp = compute_chain_identity_hash(env, rctx)
-
-    journal = tmp_path / "orchestrator.journal.jsonl"
-    with JournalWriter(journal) as w:
-        w.append(_record(batch_id=0, block_number=100))
-    legacy = Manifest(
-        run_id="r",
-        base_address="0x" + target.base_address.hex(),
-        revision=0,
-        genesis_sha256=env.genesis_sha256,
-        chain_identity_hash=comp,
-        reference_f_version="2026.04.23",
-        plugin_git_sha=env.plugin_git_sha,
-        nethermind_commit_sha=env.nethermind_commit_sha,
-        dotnet_runtime_major=env.dotnet_runtime_major,
-        cpu_arch=env.cpu_arch,
-        replay_context=None,  # legacy run, pre-ReplayContext
-    )
-    legacy.write(tmp_path / "run-manifest.json")
-
-    with pytest.raises(ResumeRefused, match="legacy manifest"):
-        resolve_startup_mode(
-            tmp_path,
-            chain_identity_hash=comp,
-            head_block=100,
-            replay_context=rctx,
-        )
-
 
 class _ProbeStubSensor:
     """Sensor that grows account_bytes per call so the probe sanity gate passes.

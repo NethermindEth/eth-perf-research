@@ -106,16 +106,11 @@ def rehydrate_state(
 ) -> ControllerState:
     """Rebuild controller state from the last journal record's observability block.
 
-    Reconstructs F/σ/α from the tail so resume is not a cold start. Per-(verb, axis) α
-    is stored in ``Observability.alpha_state``; on legacy journals where that field is
-    absent we broadcast the scalar ``alpha_current`` to every slot.
+    Reconstructs F/σ/α from the tail so resume is not a cold start.
     """
     scenarios = list(qp_scenarios)
     state = init_state(reference_f, scenarios)
-    scalar_alpha = (
-        float(tail_observability.alpha_current) if tail_observability.alpha_current else A_MIN
-    )
-    alpha_state = getattr(tail_observability, "alpha_state", {}) or {}
+    alpha_state = tail_observability.alpha_state
     for verb in scenarios:
         coeffs = tail_observability.coeffs_after.get(verb)
         if coeffs is not None and all(axis in coeffs for axis in AXES):
@@ -126,8 +121,6 @@ def rehydrate_state(
         per_verb = alpha_state.get(verb)
         if per_verb and all(axis in per_verb for axis in AXES):
             state.alpha[verb] = {axis: float(per_verb[axis]) for axis in AXES}
-        else:
-            state.alpha[verb] = dict.fromkeys(AXES, scalar_alpha)
     state.batch_id = last_batch_id + 1
     return state
 

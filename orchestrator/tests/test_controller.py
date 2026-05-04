@@ -250,6 +250,11 @@ def test_rehydrate_state_restores_f_sigma_alpha(reference_f) -> None:
             "eoatx": {"accounts": 10.0, "storage": 2.0, "code": 1.0},
             "storagespam": {"accounts": 1.0, "storage": 50.0, "code": 1.0},
         },
+        alpha_state={
+            "eoatx": {"accounts": 0.187, "storage": 0.187, "code": 0.187},
+            "storagespam": {"accounts": 0.187, "storage": 0.187, "code": 0.187},
+            "deploytx": {"accounts": 0.187, "storage": 0.187, "code": 0.187},
+        },
         alpha_current=0.187,
         innovation_ratio=0.1,
         residual_norm=5.0,
@@ -267,7 +272,6 @@ def test_rehydrate_state_restores_f_sigma_alpha(reference_f) -> None:
     assert state.F["deploytx"]["code"] == pytest.approx(
         reference_f.per_scenario("deploytx")["code"]
     )
-    # α is now per-(verb, axis); legacy scalar alpha_current broadcasts to every slot.
     assert state.alpha["eoatx"]["accounts"] == pytest.approx(0.187)
     assert state.alpha["deploytx"]["storage"] == pytest.approx(0.187)
     assert state.batch_id == 43  # last + 1
@@ -390,7 +394,7 @@ def test_proportional_falls_back_to_argmax_without_seed(
 
 
 def test_epsilon_zero_reproduces_argmax_exactly(reference_f, target, monkeypatch) -> None:
-    """ε=0 is the identity case — must reproduce the legacy argmax behaviour."""
+    """ε=0 must reproduce pure argmax (the identity case for the verb sampler)."""
     import orchestrator.controller as ctl_mod
 
     monkeypatch.setattr(ctl_mod, "EPSILON", 0.0)

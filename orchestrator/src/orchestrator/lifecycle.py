@@ -202,9 +202,8 @@ def resolve_startup_mode(
 
     if pending is not None:
         # Pending sidecar must belong to the SAME chain, not a stale one left by
-        # a prior chain identity. Empty chain_identity_hash in the pending =
-        # legacy file from before this check existed; reject it too rather than
-        # silently accepting (operator should archive).
+        # a prior chain identity. Empty chain_identity_hash rejects too
+        # (operator should archive).
         if pending.chain_identity_hash != chain_identity_hash:
             raise ResumeRefused(
                 f"pending sidecar chain_identity_hash "
@@ -268,11 +267,6 @@ def _load_and_verify_prior_manifest(
 
     Tx-signing identity lives in ``replay_context``; check it separately so a
     changed signer / chain between runs refuses resume.
-
-    Also guards against legacy-manifest bypass: if the journal is non-empty and
-    the prior manifest predates ``ReplayContext`` (``prior.replay_context is
-    None``), allowing the new run to resume would silently skip the signer +
-    chain identity gate. Refuse so the operator must archive the old run.
     """
     manifest_path = state_dir / MANIFEST_FILENAME
     if not manifest_path.exists():
@@ -282,17 +276,6 @@ def _load_and_verify_prior_manifest(
         raise ResumeRefused(
             f"chain_identity_hash mismatch: manifest={prior.chain_identity_hash[:8]}… "
             f"current={chain_identity_hash[:8]}…"
-        )
-    journal_path = state_dir / JOURNAL_FILENAME
-    journal_nonempty = journal_path.exists() and journal_path.stat().st_size > 0
-    if (
-        journal_nonempty
-        and prior.replay_context is None
-        and replay_context is not None
-    ):
-        raise ResumeRefused(
-            "legacy manifest has no replay_context; refusing to resume on a "
-            "non-empty journal — start fresh or re-run on the original code"
         )
     if replay_context is not None and not replay_context_matches(
         prior.replay_context, replay_context
@@ -693,8 +676,8 @@ def run(
     ``target`` is the boot target shape. If ``target_watcher`` is supplied, it
     must already wrap that same target — the QP loop will call ``current()``
     once per batch to pick up live edits. When ``target_watcher`` is None we
-    treat ``target`` as immutable for the run (legacy behaviour preserved for
-    callers that don't have a backing file, e.g. tests with synthetic targets).
+    treat ``target`` as immutable for the run (callers without a backing file,
+    e.g. tests with synthetic targets, use this path).
     """
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
