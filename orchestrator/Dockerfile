@@ -1,7 +1,11 @@
 # Multi-stage build. Builder resolves the wheel + lock; runtime is non-root + slim.
 FROM python:3.12-slim AS builder
 
-RUN pip install --no-cache-dir uv
+# git is required for uv to fetch eels-spamoor-builders (a git+https dep).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv
 
 WORKDIR /app
 COPY pyproject.toml uv.lock* ./
