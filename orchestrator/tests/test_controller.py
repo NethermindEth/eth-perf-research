@@ -6,6 +6,7 @@ import pytest
 
 from orchestrator.controller import (
     OVERSHOOT_GRACE_BATCHES,
+    BatchPlan,
     Controller,
     ControllerInstability,
     init_state,
@@ -116,6 +117,25 @@ def test_closed_loop_convergence_single_axis(reference_f) -> None:
             break
     # Controller must have made substantial progress; allow for simulator discretization.
     assert cumulative.storage_bytes >= 0.90 * target.byte_target("storage")
+
+
+def test_apply_observation_updates_avg_tx_rlp(reference_f, target) -> None:
+    """``avg_tx_rlp`` must converge toward the dispatched bytes-per-tx — the
+    deadline cap reads it to translate per-tx caps into RLP-byte deadlines."""
+    state = init_state(reference_f, target.qp_scenarios)
+    ctrl = Controller(state)
+    plan = BatchPlan(verb="storagespam", deadline_bytes=1_000, mix={"storagespam": 1.0})
+    pre = _obs()
+    post = _obs(st=200_000)
+    # First call seeds avg_tx_rlp[verb] = observed value (prev defaults to it).
+    ctrl.apply_observation(pre, post, plan, tx_count=400, dispatched_rlp_bytes=1_000_000)
+    assert state.avg_tx_rlp["storagespam"] == pytest.approx(2500.0)
+    # Subsequent calls EWMA toward the new observation (alpha=0.3 in apply_observation).
+    ctrl.apply_observation(post, post, plan, tx_count=200, dispatched_rlp_bytes=200_000)
+    expected = 0.3 * (200_000 / 200) + 0.7 * 2500.0
+    assert state.avg_tx_rlp["storagespam"] == pytest.approx(expected)
+    # Verbs that haven't been dispatched stay absent → cap falls back to default.
+    assert "eoatx" not in state.avg_tx_rlp
 
 
 def test_probe_seeds_all_qp_scenarios(reference_f) -> None:
