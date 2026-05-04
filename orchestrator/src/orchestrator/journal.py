@@ -69,7 +69,7 @@ class Observability:
     coeffs_before: dict[str, dict[str, float]] = field(default_factory=dict)
     coeffs_after: dict[str, dict[str, float]] = field(default_factory=dict)
     # Per-(verb, axis) α — authoritative for resume state reconstruction.
-    # ``alpha_current`` is a display-only scalar mean, kept for back-compat.
+    # ``alpha_current`` is a display-only scalar mean.
     # On write both are populated consistently; on resume, ``alpha_state`` wins.
     alpha_state: dict[str, dict[str, float]] = field(default_factory=dict)
     sigma_innov: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -345,7 +345,6 @@ def _dict_to_record(d: dict[str, Any]) -> Record:
         )
     rc = ReplayCore(**d["replay_core"])
     obs_data = d["observability"]
-    obs_data.pop("overshoot_penalty", None)  # dropped field; tolerate older records
     obs = Observability(**obs_data)
     return Record(
         schema=record_schema,
@@ -439,7 +438,7 @@ def clear_pending(state_dir: Path | str) -> None:
 @functools.cache
 def load_schema() -> dict[str, Any]:
     """Return the JSON Schema for a journal record (cached read)."""
-    schema_path = Path(__file__).parent / "schemas" / "journal_v2.json"
+    schema_path = Path(__file__).parent / "schemas" / "journal.json"
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
