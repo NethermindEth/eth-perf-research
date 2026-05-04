@@ -79,15 +79,7 @@ services:
       # Overshoot detector relaxed for the demo (default 0.20 trips often on
       # near-convergence runs). 10.0 keeps the safety net for runaways.
       - ORCH_OVERSHOOT_THRESHOLD=10.0
-      # Convergence knobs (see final-design-v3.md §4.1 + Appendix D ablation).
-      # Defaults below are the post-ablation ship recommendations:
-      #   ε=0.1: 15% faster + 50% more F coverage than argmax (winning)
-      #   gas_aware=1: cap cumulative batch gas at 0.95×block_gas_limit
-      #   penalty=0: current λ formulation overwhelms gradient; do not enable
-      #   residual_stop=0: target_reached fires first on byte-bound runs
-      # Override via shell env when running experiments / ablations.
       - ORCH_EPSILON=${ORCH_EPSILON:-0.1}
-      - ORCH_OVERSHOOT_PENALTY=${ORCH_OVERSHOOT_PENALTY:-0.0}
       - ORCH_GAS_AWARE_DISPATCH=${ORCH_GAS_AWARE_DISPATCH:-1}
       - ORCH_RESIDUAL_STOP_THRESHOLD=${ORCH_RESIDUAL_STOP_THRESHOLD:-0.0}
       - ORCH_RESIDUAL_STOP_WINDOW=${ORCH_RESIDUAL_STOP_WINDOW:-6}

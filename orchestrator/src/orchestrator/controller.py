@@ -42,10 +42,6 @@ EPSILON = float(_os.environ.get("ORCH_EPSILON", "0.0"))
 if not 0.0 <= EPSILON <= 1.0:
     raise ValueError(f"ORCH_EPSILON must be in [0, 1], got {EPSILON}")
 
-OVERSHOOT_PENALTY = float(_os.environ.get("ORCH_OVERSHOOT_PENALTY", "0.0"))
-if OVERSHOOT_PENALTY < 0:
-    raise ValueError(f"ORCH_OVERSHOOT_PENALTY must be ≥ 0, got {OVERSHOOT_PENALTY}")
-
 
 class ControllerInstability(Exception):
     """Raised when the overshoot trigger fires; run should abort."""
@@ -191,11 +187,6 @@ class Controller:
         endgame = cum >= float(target.target_total_bytes) and (current_arr < target_arr).any()
         residual_for_grad = np.maximum(0.0, residual) if endgame else residual
         grad = 2.0 * f_matrix.T @ (f_matrix @ x - residual_for_grad)
-        if OVERSHOOT_PENALTY > 0.0:
-            n_full = max(1.0, float(target.total_batch_bytes))
-            predicted_delta = (f_matrix @ x) * n_full
-            overshoot = np.maximum(0.0, predicted_delta - residual)
-            grad = grad + OVERSHOOT_PENALTY * 2.0 * f_matrix.T @ overshoot * n_full
         grad_norm = float(np.linalg.norm(grad))
         if grad_norm > 1e-12:
             grad = grad / grad_norm

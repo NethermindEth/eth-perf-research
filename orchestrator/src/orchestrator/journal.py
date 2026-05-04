@@ -80,15 +80,12 @@ class Observability:
     # ``statecomp_snapshot_stale=True`` rather than null.
     statecomp_snapshot: dict[str, Any] | None = None
     statecomp_snapshot_stale: bool = False
-    # Diagnostic-only knobs that produced this batch's pick. ``mix_simplex``
-    # is the full simplex projection; ``epsilon`` is the explore probability
-    # in effect; ``overshoot_penalty`` is the QP overshoot λ. All written into
+    # Diagnostic-only knobs in effect for this batch's pick. Written into
     # Observability (not ReplayCore) so the chain-hash stays deterministic
-    # regardless of these knob values. ``None`` on records produced before
-    # the field existed (back-compat for older journals).
+    # regardless of knob values. ``None`` on records produced before the
+    # field existed.
     mix_simplex: dict[str, float] | None = None
     epsilon: float | None = None
-    overshoot_penalty: float | None = None
     gas_used: int = 0
     verb_gas_factors: dict[str, float] | None = None
 
@@ -141,7 +138,6 @@ def _observability_to_jsonable(obs: Observability) -> dict[str, Any]:
         "statecomp_snapshot_stale": obs.statecomp_snapshot_stale,
         "mix_simplex": obs.mix_simplex,
         "epsilon": obs.epsilon,
-        "overshoot_penalty": obs.overshoot_penalty,
         "gas_used": obs.gas_used,
         "verb_gas_factors": obs.verb_gas_factors,
     }
@@ -348,7 +344,9 @@ def _dict_to_record(d: dict[str, Any]) -> Record:
             batch_id=d.get("batch_id") if isinstance(d, dict) else None,
         )
     rc = ReplayCore(**d["replay_core"])
-    obs = Observability(**d["observability"])
+    obs_data = d["observability"]
+    obs_data.pop("overshoot_penalty", None)  # dropped field; tolerate older records
+    obs = Observability(**obs_data)
     return Record(
         schema=record_schema,
         session_id=d["session_id"],

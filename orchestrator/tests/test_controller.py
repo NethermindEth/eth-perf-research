@@ -427,35 +427,6 @@ def test_epsilon_mixture_explores_more_than_argmax(reference_f, target, monkeypa
     assert len(eps_verbs) >= len(argmax_verbs)
 
 
-def test_overshoot_penalty_changes_picks_when_lambda_positive(
-    reference_f, target, monkeypatch
-) -> None:
-    """λ>0 must change the projection: tested by checking the simplex mix differs."""
-    import orchestrator.controller as ctl_mod
-
-    monkeypatch.setattr(ctl_mod, "EPSILON", 0.0)
-    monkeypatch.setattr(ctl_mod, "OVERSHOOT_PENALTY", 0.0)
-    state_a = init_state(reference_f, target.qp_scenarios)
-    ctrl_a = Controller(state_a)
-    plan_a = ctrl_a.pick_next_batch(
-        _obs(acc=10, st=10, co=10, bn=1), target,
-        batch_id=1, chain_identity_hash="z" * 64,
-    )
-
-    monkeypatch.setattr(ctl_mod, "OVERSHOOT_PENALTY", 100.0)
-    state_b = init_state(reference_f, target.qp_scenarios)
-    ctrl_b = Controller(state_b)
-    plan_b = ctrl_b.pick_next_batch(
-        _obs(acc=10, st=10, co=10, bn=1), target,
-        batch_id=1, chain_identity_hash="z" * 64,
-    )
-    # With heavy penalty the simplex weights should differ (penalty changes
-    # the gradient before projection). At minimum the *mix* dictionary should
-    # not be identical — the picked verb may or may not change depending on
-    # which verb dominates after the penalty.
-    assert plan_a.mix != plan_b.mix
-
-
 def test_residual_norm_cached_on_state(reference_f, target) -> None:
     """``apply_observation`` must stash residual_norm on ControllerState."""
     state = init_state(reference_f, target.qp_scenarios)

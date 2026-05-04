@@ -29,7 +29,6 @@ import httpx
 
 from .controller import (
     EPSILON,
-    OVERSHOOT_PENALTY,
     BatchPlan,
     Controller,
     ControllerInstability,
@@ -1101,7 +1100,6 @@ def _commit_and_journal(
             statecomp_snapshot_stale=(status == "sensor_wait_timeout"),
             mix_simplex=dict(plan.mix),
             epsilon=EPSILON,
-            overshoot_penalty=OVERSHOOT_PENALTY,
             gas_used=block_gas_used,
             verb_gas_factors=dict(facade_ctx.verb_gas_factors),
         ),
