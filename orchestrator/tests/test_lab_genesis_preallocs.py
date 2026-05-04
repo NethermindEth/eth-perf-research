@@ -59,6 +59,7 @@ def _load_alloc(path: Path, accounts_key: str) -> dict[str, dict]:
     return {_normalize_addr(k): v for k, v in accounts.items()}
 
 
+@pytest.mark.skipif(not LAB_GENESIS.exists(), reason="lab-genesis.json not committed; pair with NM repo")
 @pytest.mark.parametrize("addr,expected_code", EXPECTED_PREALLOCS.items())
 def test_lab_genesis_prealloc(addr: str, expected_code: str | None) -> None:
     accounts = _load_alloc(LAB_GENESIS, "accounts")

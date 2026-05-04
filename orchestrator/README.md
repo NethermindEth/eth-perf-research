@@ -13,9 +13,24 @@ normative specification.
 
 ## Quick start
 
+The canonical invocation is via Docker Compose, which injects all required env vars:
+
+```bash
+docker compose up orchestrator
+```
+
+For direct invocation (see `uv run orchestrator --help` for the full list of required flags):
+
 ```bash
 uv sync
-uv run orchestrator --target-yaml target.yaml --state-dir ./state --rpc-url http://localhost:8545
+uv run orchestrator \
+  --rpc-url http://localhost:8545 \
+  --state-dir ./state \
+  --target-yaml target.yaml \
+  --genesis-sha256 <hex-sha256-of-genesis.json> \
+  --plugin-git-sha <git-sha> \
+  --nethermind-commit-sha <git-sha> \
+  --dotnet-runtime-major 8
 ```
 
 Resume mode is auto-detected: if `state/orchestrator.journal.jsonl` exists, the orchestrator
