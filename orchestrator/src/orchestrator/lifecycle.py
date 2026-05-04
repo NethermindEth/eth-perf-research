@@ -1181,7 +1181,9 @@ def _commit_and_journal(
 
     if status == "ok":
         obs_diag: dict[str, Any] = controller.apply_observation(
-            pre_observation, post, plan, tx_count=max(len(txs), 1)
+            pre_observation, post, plan,
+            tx_count=max(len(txs), 1),
+            dispatched_rlp_bytes=sum(len(tx.rlp) for tx in txs),
         )
     else:
         obs_diag = {

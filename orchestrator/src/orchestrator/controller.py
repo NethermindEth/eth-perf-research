@@ -75,6 +75,9 @@ class BatchPlan:
     mix: dict[str, float]  # full simplex snapshot for observability
 
 
+_DEFAULT_AVG_TX_RLP = 1500.0
+
+
 @dataclass
 class ControllerState:
     F: dict[str, dict[str, float]]
@@ -88,6 +91,7 @@ class ControllerState:
     # lifecycle's soft-stop (ORCH_RESIDUAL_STOP_THRESHOLD) can read it
     # without recomputing. Inf until the first observation.
     last_residual_norm: float = float("inf")
+    avg_tx_rlp: dict[str, float] = field(default_factory=dict)
 
     def alpha_mean(self) -> float:
         """Scalar summary for the journal's legacy ``alpha_current`` field."""
@@ -159,40 +163,33 @@ def _select_verb_index(
     batch_id: int | None,
     chain_identity_hash: str | None,
     target_sha256: str | None = None,
-) -> tuple[int, bool]:
+) -> int:
     """Pick a verb index from the simplex projection.
 
-    Returns ``(index, was_sampled)``. With probability ``1 - EPSILON`` we
-    take ``argmax(x_proj)`` (greedy exploit). With probability ``EPSILON``
-    we sample from ``x_proj`` (weighted explore). The RNG is seeded from
-    ``(chain_identity_hash, target_sha256, batch_id)`` so two forward runs
-    of the same chain + target reproduce the same picks; a different
+    With probability ``1 - EPSILON`` take ``argmax(x_proj)`` (greedy exploit);
+    otherwise sample from ``x_proj`` (weighted explore). The RNG is seeded
+    from ``(chain_identity_hash, target_sha256, batch_id)`` so two forward
+    runs of the same chain + target reproduce the same picks; a different
     ``target.yaml`` shape explores a different verb stream while the chain
     identity stays stable. Falls back to pure argmax if any seed input is
     missing, the projection produced a degenerate distribution, or
     ``EPSILON`` is exactly 0.
-
-    The ``was_sampled`` bit is used by the caller to choose between
-    weight-scaled and full-budget deadline_bytes (decoupling the sampling
-    branch from the size formula keeps proportional mode from
-    double-counting weight).
     """
     if EPSILON <= 0.0 or batch_id is None or chain_identity_hash is None:
-        return int(np.argmax(x_proj)), False
+        return int(np.argmax(x_proj))
     total = float(x_proj.sum())
     if total <= 0.0 or not np.isfinite(total):
-        return int(np.argmax(x_proj)), False
+        return int(np.argmax(x_proj))
     seed_input = f"{chain_identity_hash}:{target_sha256 or ''}:{batch_id}"
     seed = int.from_bytes(
         hashlib.sha256(seed_input.encode()).digest()[:8],
         "big",
     )
     rng = np.random.default_rng(seed)
-    # Two-stage flip: first decide explore vs exploit, then act.
     if rng.random() >= EPSILON:
-        return int(np.argmax(x_proj)), False
-    p = x_proj / total  # guard against numerical drift after the projection
-    return int(rng.choice(len(p), p=p)), True
+        return int(np.argmax(x_proj))
+    p = x_proj / total
+    return int(rng.choice(len(p), p=p))
 
 
 class Controller:
@@ -223,30 +220,26 @@ class Controller:
 
         ``composition_hash`` is accepted for back-compat with pre-v2 callers
         (it is forwarded as ``chain_identity_hash`` if the latter is None).
-
-        When ``OVERSHOOT_PENALTY > 0``, the QP gradient is augmented with a
-        penalty that discourages mixes whose predicted single-step delta
-        would push any axis past its remaining budget. Default 0 = identical
-        gradient as today's projector.
-
-        Sampled batches use the *full* ``total_batch_bytes`` budget; greedy
-        batches scale by mix weight. This decoupling avoids double-counting
-        the weight under proportional sampling, which was the root cause of
-        the +6 pp accounts overshoot in the prior 1500-batch run.
         """
         if chain_identity_hash is None and composition_hash is not None:
             chain_identity_hash = composition_hash
         verbs = list(target.qp_scenarios)
-        residual = self._residual(observation, target)  # shape (3,)
-        f_matrix = self._f_matrix(verbs)  # shape (3, n)
-        x = np.full(len(verbs), 1.0 / len(verbs))  # warm start
-        # Squared-residual gradient (the term the original projector used).
-        grad = 2.0 * f_matrix.T @ (f_matrix @ x - residual)
-        # Optional overshoot penalty: predict per-axis state delta from a
-        # full-budget batch executed at mix x and penalize anything that
-        # would push us past the remaining residual on any axis.
+        residual = self._residual(observation, target)
+        f_matrix = self._f_matrix(verbs)
+        x = np.full(len(verbs), 1.0 / len(verbs))
+        current_arr = np.array(
+            [observation.account_bytes, observation.storage_bytes, observation.code_bytes],
+            dtype=np.float64,
+        )
+        target_arr = np.array([target.byte_target(a) for a in AXES], dtype=np.float64)
+        cum = float(current_arr.sum())
+        # State is monotone non-decreasing: at endgame (cum past target_total
+        # with ≥1 axis still under absolute target) clip the negative residual
+        # components so the under-served axis isn't drowned out in the gradient.
+        endgame = cum >= float(target.target_total_bytes) and (current_arr < target_arr).any()
+        residual_for_grad = np.maximum(0.0, residual) if endgame else residual
+        grad = 2.0 * f_matrix.T @ (f_matrix @ x - residual_for_grad)
         if OVERSHOOT_PENALTY > 0.0:
-            # Per-tx average bytes, scaled to a full batch.
             n_full = max(1.0, float(target.total_batch_bytes))
             predicted_delta = (f_matrix @ x) * n_full
             overshoot = np.maximum(0.0, predicted_delta - residual)
@@ -255,18 +248,46 @@ class Controller:
         if grad_norm > 1e-12:
             grad = grad / grad_norm
         x_proj = project_simplex(x - target.projection_eta * grad)
-        top_index, was_sampled = _select_verb_index(
-            x_proj,
+        # Per-axis trajectory cap. n_txs is bounded by headroom / per-tx
+        # *excess over the proportional rate*; under-emitters don't constrain
+        # — they just move the line closer in our favor. Without this cap a
+        # single full-budget eoatx batch (F_a=160, p_a·F_sum≈14) blows the
+        # accounts line by 10× even when the terminal target is far away.
+        progress = min(cum / max(float(target.target_total_bytes), 1.0), 1.0)
+        desired_arr = progress * target_arr
+        p_arr = np.array([target.mainnet_target[a] for a in AXES], dtype=np.float64)
+        # Floor tolerance: p=0 axes would otherwise force 1-tx batches.
+        tolerance = np.maximum(p_arr, 0.005) * float(target.total_batch_bytes)
+        headroom = np.maximum(0.0, desired_arr - current_arr) + tolerance
+        max_n_txs = np.full(len(verbs), np.inf)
+        for i, v in enumerate(verbs):
+            f_row = np.array([self.state.F[v][a] for a in AXES], dtype=np.float64)
+            f_sum = float(f_row.sum())
+            if f_sum <= 0:
+                continue
+            excess = f_row - p_arr * f_sum
+            over = excess > 0
+            if over.any():
+                max_n_txs[i] = float(np.min(headroom[over] / excess[over]))
+        feasible = max_n_txs >= 1.0
+        select_from = x_proj * feasible if feasible.any() else x_proj
+        s = float(select_from.sum())
+        if s > 0:
+            select_from = select_from / s
+        top_index = _select_verb_index(
+            select_from,
             batch_id,
             chain_identity_hash,
             target.source_sha256 if isinstance(target, TargetConfig) else None,
         )
         top_verb = verbs[top_index]
-        weight = float(x_proj[top_index])
-        if was_sampled:
-            deadline = max(1, int(target.total_batch_bytes))
+        avg_rlp = self.state.avg_tx_rlp.get(top_verb, _DEFAULT_AVG_TX_RLP)
+        n_safe = max_n_txs[top_index]
+        if np.isfinite(n_safe):
+            safe_deadline = int(n_safe * avg_rlp)
+            deadline = max(1, min(int(target.total_batch_bytes), safe_deadline))
         else:
-            deadline = max(1, int(target.total_batch_bytes * weight))
+            deadline = max(1, int(target.total_batch_bytes))
         mix = {v: float(w) for v, w in zip(verbs, x_proj, strict=False)}
         return BatchPlan(verb=top_verb, deadline_bytes=deadline, mix=mix)
 
@@ -277,14 +298,21 @@ class Controller:
         plan: BatchPlan,
         *,
         tx_count: int = 1,
+        dispatched_rlp_bytes: int | None = None,
     ) -> dict[str, Any]:
         """Apply the adaptive-α update; returns a diagnostic dict for the journal.
 
         `tx_count` scales F (bytes per tx) to batch-total bytes for both the per-axis
         coefficient update (F is updated with observed/tx_count) and the overshoot check.
+        ``dispatched_rlp_bytes`` feeds the EWMA the next batch's deadline cap reads
+        from ``state.avg_tx_rlp[verb]``.
         """
         if tx_count <= 0:
             raise ValueError("tx_count must be positive")
+        if dispatched_rlp_bytes is not None and dispatched_rlp_bytes > 0:
+            observed_avg = dispatched_rlp_bytes / tx_count
+            prev = self.state.avg_tx_rlp.get(plan.verb, observed_avg)
+            self.state.avg_tx_rlp[plan.verb] = 0.3 * observed_avg + 0.7 * prev
         observed = {
             "accounts": float(post.account_bytes - pre.account_bytes),
             "storage": float(post.storage_bytes - pre.storage_bytes),
@@ -331,8 +359,10 @@ class Controller:
             [observation.account_bytes, observation.storage_bytes, observation.code_bytes],
             dtype=np.float64,
         )
+        cum = float(current.sum())
+        progress = min(cum / max(float(target.target_total_bytes), 1.0), 1.0)
         desired = np.array(
-            [target.byte_target(a) for a in AXES],
+            [progress * target.byte_target(a) for a in AXES],
             dtype=np.float64,
         )
         return desired - current
