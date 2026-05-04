@@ -130,7 +130,9 @@ def _bearer(jwt_path: Path) -> str:
 
 _LATENCY_BUFFER: list[float] = []
 _LATENCY_BUFFER_MAX = 32
-_TIMEOUT_FLOOR_S = 60.0
+# Geth's idle pauses (log-index head rendering, snapshot generation, GC)
+# routinely run 30-90 s on cold archive replay; 60 s tripped on those.
+_TIMEOUT_FLOOR_S = 180.0
 _TIMEOUT_P95_MULTIPLIER = 3.0
 
 
