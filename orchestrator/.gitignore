@@ -18,6 +18,10 @@ target.yaml.phase2-mainnet
 # Lockfile — left to local `uv lock` so PRs don't drag pinned graphs.
 uv.lock
 
+# Local compose override that restores the demo-profile services
+# (monitoring + phase3) and NM Metrics flags; out of PR scope.
+docker-compose.override.yml
+
 # Ablation harness — split into a follow-up PR after orchestrator core merges.
 scripts/run_ablation.sh
 scripts/summarize_ablations.py
