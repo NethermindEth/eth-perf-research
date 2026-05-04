@@ -12,7 +12,6 @@ AXES = ("accounts", "storage", "code")
 @dataclass(frozen=True)
 class ReferenceF:
     version: str
-    tolerance: float
     coefficients: dict[str, dict[str, float]]
     source_path: Path
 
@@ -38,7 +37,6 @@ def load_reference_f(path: Path | str) -> ReferenceF:
             raise ValueError(f"REFERENCE_F[{verb}] missing axes: {sorted(missing)}")
     return ReferenceF(
         version=body["version"],
-        tolerance=float(body.get("tolerance", 0.30)),
         coefficients={v: {a: float(axes[a]) for a in AXES} for v, axes in coeffs.items()},
         source_path=path,
     )

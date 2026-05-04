@@ -7,9 +7,7 @@ Lifecycle:
 
 Overshoot detection uses a rolling window: fires ``ControllerInstability`` when
 at least ``OVERSHOOT_WINDOW_TRIPS`` of the last ``OVERSHOOT_WINDOW`` batches (after
-the grace period) had a residual-norm ratio exceeding ``OVERSHOOT_THRESHOLD``. A
-single clean batch no longer resets the counter — previously that let a perfect
-sawtooth oscillation run forever.
+the grace period) had a residual-norm ratio exceeding ``OVERSHOOT_THRESHOLD``.
 """
 
 from __future__ import annotations
@@ -34,31 +32,16 @@ if TYPE_CHECKING:
 
 import os as _os
 
-# Overshoot detector knobs — env-tunable so demo / smoke runs can relax the
-# safety net without recompiling. Production defaults are unchanged.
 OVERSHOOT_THRESHOLD = float(_os.environ.get("ORCH_OVERSHOOT_THRESHOLD", "0.20"))
 OVERSHOOT_WINDOW = int(_os.environ.get("ORCH_OVERSHOOT_WINDOW", "6"))
 OVERSHOOT_WINDOW_TRIPS = int(_os.environ.get("ORCH_OVERSHOOT_WINDOW_TRIPS", "4"))
 OVERSHOOT_GRACE_BATCHES = int(_os.environ.get("ORCH_OVERSHOOT_GRACE_BATCHES", "5"))
 _RESIDUAL_NORM_FLOOR = 1024.0
 
-# Verb-selection mixture. ``ORCH_EPSILON`` (default ``0.0``) is the probability
-# that the next verb is *sampled* from the simplex weights instead of taken
-# greedily as the argmax. ``0`` reproduces the original argmax mode; ``1``
-# reproduces full proportional sampling; ``0.1`` gives mostly-greedy with
-# occasional exploration ("ε-greedy" with sampling-from-projection rather
-# than uniform). The RNG is seeded per-batch from (chain_identity_hash,
-# target_sha256, batch_id) so forward runs of the same chain + target
-# reproduce the same pick sequence; a different target.yaml shape explores
-# a different verb stream while the chain identity stays stable.
 EPSILON = float(_os.environ.get("ORCH_EPSILON", "0.0"))
 if not 0.0 <= EPSILON <= 1.0:
     raise ValueError(f"ORCH_EPSILON must be in [0, 1], got {EPSILON}")
 
-# Overshoot penalty (λ) for the QP gradient. When > 0, the projection's
-# gradient is augmented with ``λ · 2·F · max(0, F·x·N - residual)`` so mixes
-# whose predicted single-step delta would push any axis past its target are
-# pulled back. Default 0 (disabled, identical to today's projector).
 OVERSHOOT_PENALTY = float(_os.environ.get("ORCH_OVERSHOOT_PENALTY", "0.0"))
 if OVERSHOOT_PENALTY < 0:
     raise ValueError(f"ORCH_OVERSHOOT_PENALTY must be ≥ 0, got {OVERSHOOT_PENALTY}")
@@ -94,7 +77,6 @@ class ControllerState:
     avg_tx_rlp: dict[str, float] = field(default_factory=dict)
 
     def alpha_mean(self) -> float:
-        """Scalar summary for the journal's legacy ``alpha_current`` field."""
         all_vals = [v for per in self.alpha.values() for v in per.values()]
         return sum(all_vals) / len(all_vals) if all_vals else A_MIN
 
@@ -103,7 +85,6 @@ def init_state(
     reference_f: ReferenceF,
     qp_scenarios: Iterable[str],
 ) -> ControllerState:
-    """Initialize F from REFERENCE_F for the QP scenarios; σ starts at SIGMA_FLOOR."""
     scenarios = list(qp_scenarios)
     F: dict[str, dict[str, float]] = {}
     sigma: dict[str, dict[str, float]] = {}
@@ -129,12 +110,9 @@ def rehydrate_state(
 ) -> ControllerState:
     """Rebuild controller state from the last journal record's observability block.
 
-    Design §C.3 step 6 requires F/σ/α to be reconstructed from the tail, not re-seeded
-    from REFERENCE_F — otherwise every resume is a cold start and multi-session journals
-    diverge from an uninterrupted run's ``final_state_root`` (spec §C.1).
-
-    Per-(verb, axis) α is stored in ``Observability.alpha_state``; on legacy journals
-    where that field is absent we broadcast the scalar ``alpha_current`` to every slot.
+    Reconstructs F/σ/α from the tail so resume is not a cold start. Per-(verb, axis) α
+    is stored in ``Observability.alpha_state``; on legacy journals where that field is
+    absent we broadcast the scalar ``alpha_current`` to every slot.
     """
     scenarios = list(qp_scenarios)
     state = init_state(reference_f, scenarios)
@@ -164,17 +142,7 @@ def _select_verb_index(
     chain_identity_hash: str | None,
     target_sha256: str | None = None,
 ) -> int:
-    """Pick a verb index from the simplex projection.
-
-    With probability ``1 - EPSILON`` take ``argmax(x_proj)`` (greedy exploit);
-    otherwise sample from ``x_proj`` (weighted explore). The RNG is seeded
-    from ``(chain_identity_hash, target_sha256, batch_id)`` so two forward
-    runs of the same chain + target reproduce the same picks; a different
-    ``target.yaml`` shape explores a different verb stream while the chain
-    identity stays stable. Falls back to pure argmax if any seed input is
-    missing, the projection produced a degenerate distribution, or
-    ``EPSILON`` is exactly 0.
-    """
+    """Pick a verb index from the simplex projection (argmax or ε-sampled)."""
     if EPSILON <= 0.0 or batch_id is None or chain_identity_hash is None:
         return int(np.argmax(x_proj))
     total = float(x_proj.sum())
@@ -207,22 +175,8 @@ class Controller:
         *,
         batch_id: int | None = None,
         chain_identity_hash: str | None = None,
-        composition_hash: str | None = None,
     ) -> BatchPlan:
-        """Project the desired scenario mix onto the simplex and pick a verb.
-
-        Greedy by default (argmax of the projected mix). When ``EPSILON > 0``
-        a fraction ``ε`` of batches are sampled from the projected mix
-        instead — keeps F estimates fresh across the registry. The RNG is
-        seeded from ``(chain_identity_hash, target.sha256, batch_id)`` for
-        reproducibility — same chain + same target ⇒ same picks; a target
-        swap shifts the explore stream while keeping the chain stable.
-
-        ``composition_hash`` is accepted for back-compat with pre-v2 callers
-        (it is forwarded as ``chain_identity_hash`` if the latter is None).
-        """
-        if chain_identity_hash is None and composition_hash is not None:
-            chain_identity_hash = composition_hash
+        """Project the desired scenario mix onto the simplex and pick a verb."""
         verbs = list(target.qp_scenarios)
         residual = self._residual(observation, target)
         f_matrix = self._f_matrix(verbs)
@@ -233,9 +187,7 @@ class Controller:
         )
         target_arr = np.array([target.byte_target(a) for a in AXES], dtype=np.float64)
         cum = float(current_arr.sum())
-        # State is monotone non-decreasing: at endgame (cum past target_total
-        # with ≥1 axis still under absolute target) clip the negative residual
-        # components so the under-served axis isn't drowned out in the gradient.
+        # Clip negative residuals at endgame so the under-served axis isn't drowned out.
         endgame = cum >= float(target.target_total_bytes) and (current_arr < target_arr).any()
         residual_for_grad = np.maximum(0.0, residual) if endgame else residual
         grad = 2.0 * f_matrix.T @ (f_matrix @ x - residual_for_grad)
@@ -248,11 +200,8 @@ class Controller:
         if grad_norm > 1e-12:
             grad = grad / grad_norm
         x_proj = project_simplex(x - target.projection_eta * grad)
-        # Per-axis trajectory cap. n_txs is bounded by headroom / per-tx
-        # *excess over the proportional rate*; under-emitters don't constrain
-        # — they just move the line closer in our favor. Without this cap a
-        # single full-budget eoatx batch (F_a=160, p_a·F_sum≈14) blows the
-        # accounts line by 10× even when the terminal target is far away.
+        # Per-axis cap: without it a single full-budget eoatx batch (F_a=160,
+        # p_a·F_sum≈14) blows the accounts line by 10× before the target is reached.
         progress = min(cum / max(float(target.target_total_bytes), 1.0), 1.0)
         desired_arr = progress * target_arr
         p_arr = np.array([target.mainnet_target[a] for a in AXES], dtype=np.float64)
@@ -300,13 +249,7 @@ class Controller:
         tx_count: int = 1,
         dispatched_rlp_bytes: int | None = None,
     ) -> dict[str, Any]:
-        """Apply the adaptive-α update; returns a diagnostic dict for the journal.
-
-        `tx_count` scales F (bytes per tx) to batch-total bytes for both the per-axis
-        coefficient update (F is updated with observed/tx_count) and the overshoot check.
-        ``dispatched_rlp_bytes`` feeds the EWMA the next batch's deadline cap reads
-        from ``state.avg_tx_rlp[verb]``.
-        """
+        """Apply the adaptive-α update; returns a diagnostic dict for the journal."""
         if tx_count <= 0:
             raise ValueError("tx_count must be positive")
         if dispatched_rlp_bytes is not None and dispatched_rlp_bytes > 0:
@@ -322,7 +265,6 @@ class Controller:
         coeffs_before = dict(self.state.F[verb])
         max_abs_ratio = 0.0
         for axis in AXES:
-            # Per-(verb, axis) α per design §2.4: "rule applied per-column of F".
             result = update_coeff(
                 self.state.F[verb][axis],
                 observed[axis] / tx_count,
@@ -333,7 +275,6 @@ class Controller:
             self.state.sigma[verb][axis] = result.sigma_new
             self.state.alpha[verb][axis] = result.alpha_new
             max_abs_ratio = max(max_abs_ratio, result.abs_ratio)
-        # L2 norm-ratio of the residual vector; matches design §4 semantics.
         commanded_vec = np.array(
             [self.state.F[verb][axis] * tx_count for axis in AXES], dtype=np.float64
         )
@@ -374,13 +315,7 @@ class Controller:
         return np.array(rows, dtype=np.float64)
 
     def _check_overshoot(self, residual_norm: float, commanded: np.ndarray) -> None:
-        """Windowed overshoot detector (H3).
-
-        A single clean batch no longer resets the trip counter — a sawtooth
-        oscillation with pattern [bad, bad, ok, bad, bad, ok, …] will saturate
-        the window after ~9 batches and fire. The detector is gated by the
-        grace period so probe-era transients don't trip it.
-        """
+        """Windowed overshoot detector gated by the grace period."""
         if self.state.batch_id < OVERSHOOT_GRACE_BATCHES:
             return
         denom = max(float(np.linalg.norm(commanded)), _RESIDUAL_NORM_FLOOR)

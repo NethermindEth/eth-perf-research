@@ -67,7 +67,7 @@ def _target() -> TargetConfig:
 
 
 def test_resolve_fresh_when_no_journal(tmp_path: Path) -> None:
-    decision = resolve_startup_mode(tmp_path, composition_hash="abc", head_block=None)
+    decision = resolve_startup_mode(tmp_path, chain_identity_hash="abc", head_block=None)
     assert decision.mode is StartupMode.FRESH
 
 
@@ -94,7 +94,7 @@ def test_resolve_resume_when_valid(tmp_path: Path) -> None:
     )
     manifest.write(tmp_path / "run-manifest.json")
 
-    decision = resolve_startup_mode(tmp_path, composition_hash=comp_hash, head_block=100)
+    decision = resolve_startup_mode(tmp_path, chain_identity_hash=comp_hash, head_block=100)
     assert decision.mode is StartupMode.RESUME
 
 
@@ -118,7 +118,7 @@ def test_refuse_when_composition_hash_mismatch(tmp_path: Path) -> None:
     )
     manifest.write(tmp_path / "run-manifest.json")
     with pytest.raises(ResumeRefused):
-        resolve_startup_mode(tmp_path, composition_hash="RIGHT", head_block=100)
+        resolve_startup_mode(tmp_path, chain_identity_hash="RIGHT", head_block=100)
 
 
 def test_refuse_when_head_drifted(tmp_path: Path) -> None:
@@ -164,7 +164,7 @@ def test_reconcile_pending_clears_when_head_matches_tail(tmp_path: Path) -> None
 def test_refuse_when_journal_empty_but_chain_head_nonzero(tmp_path: Path) -> None:
     """C-EMPTY-JOURNAL: a truncated/missing journal + live chain must not fresh-start."""
     with pytest.raises(ResumeRefused, match="journal empty but Nethermind head"):
-        resolve_startup_mode(tmp_path, composition_hash="c" * 64, head_block=42)
+        resolve_startup_mode(tmp_path, chain_identity_hash="c" * 64, head_block=42)
 
 
 def test_refuse_when_journal_empty_but_pending_present(tmp_path: Path) -> None:
@@ -186,7 +186,7 @@ def test_refuse_when_journal_empty_but_pending_present(tmp_path: Path) -> None:
         ),
     )
     with pytest.raises(ResumeRefused, match="state ambiguous"):
-        resolve_startup_mode(tmp_path, composition_hash="c" * 64, head_block=0)
+        resolve_startup_mode(tmp_path, chain_identity_hash="c" * 64, head_block=0)
 
 
 def test_reconcile_refuses_on_tx_hash_mismatch(tmp_path: Path) -> None:
@@ -320,7 +320,7 @@ def test_resume_refuses_on_journal_schema_violation(tmp_path: Path) -> None:
     raw = journal.read_bytes()
     journal.write_bytes(raw[:-10])  # drop newline + trailing bytes
     with pytest.raises(ResumeRefused, match="schema violation"):
-        resolve_startup_mode(tmp_path, composition_hash="c" * 64, head_block=100)
+        resolve_startup_mode(tmp_path, chain_identity_hash="c" * 64, head_block=100)
 
 
 def test_state_dir_lock_refuses_second_holder(tmp_path: Path) -> None:

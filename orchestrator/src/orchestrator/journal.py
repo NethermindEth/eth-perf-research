@@ -52,17 +52,13 @@ class ReplayCore:
     )
     block_hash: str
     block_number: int
-    # Unix-epoch seconds passed to ``testing_commitBlockV1`` as
-    # ``payloadAttributes.timestamp``. The EL folds this into the committed
-    # block's header hash, so replay must re-supply the same value to satisfy
-    # §C.1 replay-equivalence. Chain-hash-preimage critical.
+    # Unix-epoch seconds passed to ``testing_commitBlockV1``. The EL folds
+    # this into the block header hash; replay must re-supply the same value.
+    # Chain-hash-preimage critical.
     block_timestamp: int = 0
-    # sha256 of the ``target.yaml`` bytes that produced this batch. Per-batch
-    # so live target reload can flip the target shape between consecutive
-    # records without breaking the chain. Replay looks the value up in
-    # ``manifest.target_history`` to reconstruct the exact target. Required by
-    # schema v2 — chain-hash-preimage critical so two runs with different
-    # targets at the same batch_id produce different chain_hashes.
+    # sha256 of the ``target.yaml`` bytes that produced this batch. Replay
+    # looks it up in ``manifest.target_history`` to reconstruct the exact
+    # target. Chain-hash-preimage critical.
     target_sha256: str = ""
     chain_hash: str = ""  # set by the writer
 
@@ -73,9 +69,8 @@ class Observability:
     coeffs_before: dict[str, dict[str, float]] = field(default_factory=dict)
     coeffs_after: dict[str, dict[str, float]] = field(default_factory=dict)
     # Per-(verb, axis) α — authoritative for resume state reconstruction.
-    # ``alpha_current`` is a display-only scalar mean of this field, kept for
-    # back-compat with plotters / dashboards that pre-date per-verb α. On write,
-    # both are populated consistently; on resume, ``alpha_state`` wins.
+    # ``alpha_current`` is a display-only scalar mean, kept for back-compat.
+    # On write both are populated consistently; on resume, ``alpha_state`` wins.
     alpha_state: dict[str, dict[str, float]] = field(default_factory=dict)
     sigma_innov: dict[str, dict[str, float]] = field(default_factory=dict)
     alpha_current: float = 0.0  # display-only: mean of alpha_state.values()
@@ -131,7 +126,7 @@ def _observability_to_jsonable(obs: Observability) -> dict[str, Any]:
     ``asdict`` would deep-copy the snapshot dict (hundreds of keys on a real
     sensor response); since the record is immediately JSON-encoded and the
     snapshot is never mutated after capture, reference-sharing is safe and
-    10-30× faster per batch (TRIZ Prior Action / review P3).
+    10-30× faster per batch.
     """
     return {
         "observed_flat_bytes": obs.observed_flat_bytes,
@@ -328,7 +323,7 @@ class JournalReader:
 
         Callers that previously checkpointed a trusted (prev_hash, batch_id) pair
         (e.g. manifest.last_chain_hash_checkpoint) pass them here so resume cost
-        stays O(tail_size) instead of O(journal_size) — review H7.
+        stays O(tail_size) instead of O(journal_size).
         """
         prev = prev_hash
         for record in self:
@@ -374,7 +369,7 @@ class PendingBatch:
 
     If the orchestrator crashes between commit and journal append, the resume path
     sees this sidecar and reconciles with Nethermind's head to synthesize the
-    missing record — closing the atomicity gap flagged by review C3.
+    missing record.
 
     ``chain_identity_hash`` ties the sidecar to the exact chain identity that
     wrote it. An operator who changes the chain (genesis, signer, runtime)
@@ -404,8 +399,8 @@ def write_pending(state_dir: Path | str, pending: PendingBatch) -> None:
     """Atomically write the pending-batch sidecar with fsync.
 
     Uses ``O_NOFOLLOW | O_EXCL`` on the tmp file so a pre-planted symlink cannot
-    redirect the write (security M-PENDING-SYMLINK). The tmp is unlinked and
-    re-created each call to keep O_EXCL meaningful.
+    redirect the write. The tmp is unlinked and re-created each call to keep
+    O_EXCL meaningful.
     """
     path = Path(state_dir) / PENDING_FILENAME
     tmp = path.with_suffix(".tmp")
@@ -445,12 +440,7 @@ def clear_pending(state_dir: Path | str) -> None:
 
 @functools.cache
 def load_schema() -> dict[str, Any]:
-    """Return the JSON Schema for a journal record (cached read).
-
-    Schema bumped to v2 in the live-target-reload work: ``replay_core`` now
-    carries ``target_sha256`` (per-batch reference into ``manifest.target_history``).
-    Pre-v2 records are rejected by ``_dict_to_record`` with an explicit message.
-    """
+    """Return the JSON Schema for a journal record (cached read)."""
     schema_path = Path(__file__).parent / "schemas" / "journal_v2.json"
     return json.loads(schema_path.read_text(encoding="utf-8"))
 

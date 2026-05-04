@@ -23,8 +23,7 @@ def _sign(tx_fields: dict[str, Any], context: FacadeContext) -> bytes:
 
     Reusing ``context.account`` avoids per-call key derivation; merging with a
     pre-bound ``base_tx_fields()`` template replaces four ``setdefault`` probes
-    with a single C-level dict merge. Over a multi-day run at ~100 txs/batch
-    this is measurable (review H8 + P1 / TRIZ Prior Action).
+    with a single C-level dict merge.
 
     EELS builders return ``to``/``data`` as hex strings; the canonical signing
     path here uses ``bytes``/``bytes | None``. Normalize both so callers can

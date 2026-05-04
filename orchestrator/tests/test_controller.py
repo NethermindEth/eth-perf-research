@@ -291,8 +291,8 @@ def test_argmax_selection_picks_dominant_verb(reference_f, target, monkeypatch) 
     state = init_state(reference_f, target.qp_scenarios)
     ctrl = Controller(state)
     # Two calls with the same input must return the same verb (no randomness).
-    plan_a = ctrl.pick_next_batch(_obs(), target, batch_id=0, composition_hash="c" * 64)
-    plan_b = ctrl.pick_next_batch(_obs(), target, batch_id=42, composition_hash="d" * 64)
+    plan_a = ctrl.pick_next_batch(_obs(), target, batch_id=0, chain_identity_hash="c" * 64)
+    plan_b = ctrl.pick_next_batch(_obs(), target, batch_id=42, chain_identity_hash="d" * 64)
     assert plan_a.verb == plan_b.verb
 
 
@@ -308,17 +308,17 @@ def test_proportional_selection_is_seeded_deterministic(
     ctrl_a = Controller(state_a)
     ctrl_b = Controller(state_b)
     seq_a = [
-        ctrl_a.pick_next_batch(_obs(), target, batch_id=i, composition_hash="z" * 64).verb
+        ctrl_a.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="z" * 64).verb
         for i in range(20)
     ]
     seq_b = [
-        ctrl_b.pick_next_batch(_obs(), target, batch_id=i, composition_hash="z" * 64).verb
+        ctrl_b.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="z" * 64).verb
         for i in range(20)
     ]
     assert seq_a == seq_b
     # Different composition_hash → different stream (sanity, may rarely collide).
     seq_c = [
-        ctrl_b.pick_next_batch(_obs(), target, batch_id=i, composition_hash="y" * 64).verb
+        ctrl_b.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="y" * 64).verb
         for i in range(20)
     ]
     assert seq_a != seq_c, "different composition_hash should produce different picks"
@@ -335,12 +335,12 @@ def test_proportional_distribution_tracks_simplex(reference_f, target, monkeypat
     ctrl = Controller(state)
     # Reference simplex weights: same observation, same projection across calls,
     # so the *expected* distribution is the simplex weights from one snapshot.
-    snapshot = ctrl.pick_next_batch(_obs(), target, batch_id=0, composition_hash="x" * 64)
+    snapshot = ctrl.pick_next_batch(_obs(), target, batch_id=0, chain_identity_hash="x" * 64)
     expected_mix = snapshot.mix
     n_samples = 4000
     counts: collections.Counter[str] = collections.Counter()
     for i in range(n_samples):
-        plan = ctrl.pick_next_batch(_obs(), target, batch_id=i, composition_hash="x" * 64)
+        plan = ctrl.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="x" * 64)
         counts[plan.verb] += 1
     # Compare empirical vs expected for verbs with non-trivial weight (>1 %).
     for verb, weight in expected_mix.items():
@@ -363,7 +363,7 @@ def test_proportional_falls_back_to_argmax_without_seed(
     monkeypatch.setattr(ctl_mod, "EPSILON", 1.0)
     state = init_state(reference_f, target.qp_scenarios)
     ctrl = Controller(state)
-    plan_seeded = ctrl.pick_next_batch(_obs(), target, batch_id=0, composition_hash="x" * 64)
+    plan_seeded = ctrl.pick_next_batch(_obs(), target, batch_id=0, chain_identity_hash="x" * 64)
     plan_unseeded = ctrl.pick_next_batch(_obs(), target)  # no kwargs
     expected = list(plan_seeded.mix)[int(np.argmax(list(plan_seeded.mix.values())))]
     assert plan_unseeded.verb == expected
@@ -377,7 +377,7 @@ def test_epsilon_zero_reproduces_argmax_exactly(reference_f, target, monkeypatch
     state = init_state(reference_f, target.qp_scenarios)
     ctrl = Controller(state)
     seq = [
-        ctrl.pick_next_batch(_obs(), target, batch_id=i, composition_hash="z" * 64).verb
+        ctrl.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="z" * 64).verb
         for i in range(15)
     ]
     # Without exploration, identical observations must yield identical picks.
@@ -392,7 +392,7 @@ def test_epsilon_mixture_explores_more_than_argmax(reference_f, target, monkeypa
     state_a = init_state(reference_f, target.qp_scenarios)
     ctrl_a = Controller(state_a)
     argmax_verbs = {
-        ctrl_a.pick_next_batch(_obs(), target, batch_id=i, composition_hash="z" * 64).verb
+        ctrl_a.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="z" * 64).verb
         for i in range(50)
     }
 
@@ -400,7 +400,7 @@ def test_epsilon_mixture_explores_more_than_argmax(reference_f, target, monkeypa
     state_b = init_state(reference_f, target.qp_scenarios)
     ctrl_b = Controller(state_b)
     eps_verbs = {
-        ctrl_b.pick_next_batch(_obs(), target, batch_id=i, composition_hash="z" * 64).verb
+        ctrl_b.pick_next_batch(_obs(), target, batch_id=i, chain_identity_hash="z" * 64).verb
         for i in range(50)
     }
     # ε=0 should converge on a single verb; ε=0.5 should hit more.
@@ -419,7 +419,7 @@ def test_overshoot_penalty_changes_picks_when_lambda_positive(
     ctrl_a = Controller(state_a)
     plan_a = ctrl_a.pick_next_batch(
         _obs(acc=10, st=10, co=10, bn=1), target,
-        batch_id=1, composition_hash="z" * 64,
+        batch_id=1, chain_identity_hash="z" * 64,
     )
 
     monkeypatch.setattr(ctl_mod, "OVERSHOOT_PENALTY", 100.0)
@@ -427,7 +427,7 @@ def test_overshoot_penalty_changes_picks_when_lambda_positive(
     ctrl_b = Controller(state_b)
     plan_b = ctrl_b.pick_next_batch(
         _obs(acc=10, st=10, co=10, bn=1), target,
-        batch_id=1, composition_hash="z" * 64,
+        batch_id=1, chain_identity_hash="z" * 64,
     )
     # With heavy penalty the simplex weights should differ (penalty changes
     # the gradient before projection). At minimum the *mix* dictionary should
@@ -441,7 +441,7 @@ def test_residual_norm_cached_on_state(reference_f, target) -> None:
     state = init_state(reference_f, target.qp_scenarios)
     ctrl = Controller(state)
     assert state.last_residual_norm == float("inf")  # initial sentinel
-    plan = ctrl.pick_next_batch(_obs(), target, batch_id=0, composition_hash="x" * 64)
+    plan = ctrl.pick_next_batch(_obs(), target, batch_id=0, chain_identity_hash="x" * 64)
     pre = _obs()
     post = StateObservation(
         block_number=1, account_bytes=100, storage_bytes=50, code_bytes=10,

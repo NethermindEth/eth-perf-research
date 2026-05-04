@@ -64,19 +64,17 @@ def _build_unique_storage_burner_init(idx: int) -> bytes:
 
 
 # Marker sequence used by storagerefundtx to make "SSTORE→0" intent visible in
-# tests without having to disassemble EVM bytecode. Kept exported for
-# back-compat: 0x55 (SSTORE opcode) followed by 32 zero bytes.
+# tests without having to disassemble EVM bytecode.
+# 0x55 (SSTORE opcode) followed by 32 zero bytes.
 # EELS' storagerefundtx selector ``fe0d94c1`` + 32-byte zero slot count produces
 # the same ``55 || 0x00*32`` byte sequence inside calldata, so the marker
 # remains discoverable in the signed RLP.
 SSTORE_TO_ZERO_MARKER = bytes.fromhex("55" + "00" * 32)
 
 
-# ----------------------------------------------------------------------------
 # Placeholder addresses pre-deployed in lab-genesis.json. Each EELS builder
 # targets one of these when invoked with ``reuse_contract=True`` (or, for
 # factorydeploytx, with a non-empty ``factory_address``).
-# ----------------------------------------------------------------------------
 
 SPAMOOR_PLACEHOLDERS: dict[str, str] = {
     "calltx": "0x1111111111111111111111111111111111111111",
@@ -108,11 +106,6 @@ class VerbSpec:
     value: int = 0
 
 
-# ----------------------------------------------------------------------------
-# Local helpers retained for ``noop`` (and tests).
-# ----------------------------------------------------------------------------
-
-
 def _self_to(ctx: FacadeContext, _idx: int) -> bytes:
     """Self-transfer recipient — used by the no-op verb."""
     addr_hex = ctx.account.address.lower().removeprefix("0x")
@@ -130,14 +123,6 @@ def _blob_to(_ctx: FacadeContext, _idx: int) -> bytes:
 def _blob_data(_ctx: FacadeContext, _idx: int) -> bytes:
     # Stub payload until type-3 + KZG sidecars are wired through ``_sign``.
     return b"\xff" * 32
-
-
-# ----------------------------------------------------------------------------
-# EELS-backed builders. Each returns ``(signable, diag)`` for ``build_one``.
-# We always invoke EELS with ``count=1`` and the placeholder target so a single
-# call yields exactly one execution tx; the dispatch loop in
-# ``pack_until_deadline`` already drives multiple calls in sequence.
-# ----------------------------------------------------------------------------
 
 
 _BASE_FIELDS_TO_STRIP = ("chainId", "maxFeePerGas", "maxPriorityFeePerGas", "type", "accessList")
@@ -362,7 +347,6 @@ def _noop_build(
     return signable, {}
 
 
-# Map verb name -> builder. Each builder returns ``(signable, diag)``.
 _VERB_BUILDERS: dict[str, Callable[[FacadeContext, int], tuple[dict[str, Any], dict[str, Any]]]] = {
     "eoatx": _eoatx_build,
     "calltx": _calltx_build,

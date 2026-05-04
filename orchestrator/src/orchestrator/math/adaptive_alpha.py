@@ -1,14 +1,10 @@
-"""Huber-saturated innovation update with tanh-scheduled learning rate.
-
-See final-design-v3.md §2.4 for the exact formula. Per-axis, per-verb.
-"""
+"""Huber-saturated innovation update with tanh-scheduled learning rate. Per-axis, per-verb."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
-# Design-v3 defaults (§4).
 A_MIN = 0.02
 A_MAX = 0.30
 C = 0.08
@@ -24,7 +20,6 @@ class AlphaUpdate:
     f_new: float
     sigma_new: float
     alpha_new: float
-    raw_innovation: float
     saturated_innovation: float
     abs_ratio: float
 
@@ -65,7 +60,6 @@ def update_coeff(
         f_new=f_new,
         sigma_new=sigma_new,
         alpha_new=alpha_new,
-        raw_innovation=raw,
         saturated_innovation=sat,
         abs_ratio=abs_ratio,
     )

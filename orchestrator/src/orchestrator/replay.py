@@ -40,7 +40,7 @@ def replay(
     rpc: RpcClient | None = None,
     deploy_private_key: bytes | None = None,
 ) -> int:
-    """Return exit code per §C.2.
+    """Return exit code per the module docstring legend.
 
     The manifest is **required**: it holds the ``ReplayContext`` (base_address,
     revision, chain_id, gas_limit, signer fingerprint) needed to reconstruct the
@@ -138,7 +138,7 @@ def _replay_one_record(record: Record, ctx: FacadeContext, rpc: RpcClient) -> in
     """Replay a single journal record against the live RPC.
 
     Returns ``EXIT_OK`` on success, or one of the specific exit codes on the first
-    mismatch. H4: ``block_hash`` is verified regardless of ``status`` so a tampered
+    mismatch. ``block_hash`` is verified regardless of ``status`` so a tampered
     journal with ``status="sensor_wait_timeout"`` cannot bypass block identity.
     """
     rc = record.replay_core
@@ -153,7 +153,7 @@ def _replay_one_record(record: Record, ctx: FacadeContext, rpc: RpcClient) -> in
 
     try:
         # Re-supply the journaled block timestamp; the EL folds it into the
-        # block hash, so any drift here breaks §C.1 replay-equivalence.
+        # block hash, so any drift here breaks replay-equivalence.
         block_hash = rpc.testing_commit_block_v1(
             [tx.rlp for tx in txs], timestamp_unix=rc.block_timestamp
         )

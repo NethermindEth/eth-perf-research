@@ -112,10 +112,10 @@ def _state_dir_lock(state_dir: Path) -> Generator[None, None, None]:
     silently returns success without actually locking. After acquiring, we write
     a unique identity token, ``os.fsync``, re-read, and compare. If the read-back
     differs from what we wrote, two processes are colliding on a no-op lock and
-    we refuse (review C3 / skeptic F-2).
+    we refuse.
 
     File is opened with ``O_NOFOLLOW`` + mode ``0o600`` so a pre-planted symlink
-    cannot redirect the lock write (security M-SYMLINK).
+    cannot redirect the lock write.
     """
     lock_path = state_dir / RUN_LOCK_FILENAME
     # O_NOFOLLOW: refuse to open if the path is a symlink. The lock file must be
@@ -164,25 +164,15 @@ class StartupDecision:
 
 def resolve_startup_mode(
     state_dir: Path,
-    chain_identity_hash: str | None = None,
+    chain_identity_hash: str,
     head_block: int | None = None,
     *,
-    composition_hash: str | None = None,
     rpc: RpcClient | None = None,
     facade_ctx: FacadeContext | None = None,
     replay_context: ReplayContext | None = None,
     resume_session_id: int | None = None,
 ) -> StartupDecision:
     """Pre-flight check for fresh vs resume. Raises `ResumeRefused` on mismatch.
-
-    ``chain_identity_hash`` gates resume: it covers genesis + signer + chain_id
-    + runtime versions, but NOT ``target.yaml`` (target shape is per-batch now).
-    Two runs with different target.yaml files but the same chain identity will
-    resume each other cleanly.
-
-    ``composition_hash`` is accepted as a back-compat alias for
-    ``chain_identity_hash`` so existing test seeds keep compiling. If both are
-    supplied, ``chain_identity_hash`` wins.
 
     ``head_block`` is required when a journal exists: ``None`` means the RPC check
     failed, and we refuse rather than silently skip the alignment assertion.
@@ -191,12 +181,8 @@ def resolve_startup_mode(
     we reconcile with Nethermind head to synthesize the missing record and clear
     the sidecar. Requires ``rpc`` to be non-None on that path; ``facade_ctx`` is
     used to cross-check that the head block's tx set matches what the recorded
-    verb+deadline would have produced (review C-RECONCILE-TRUST).
+    verb+deadline would have produced.
     """
-    if chain_identity_hash is None:
-        chain_identity_hash = composition_hash
-    if chain_identity_hash is None:
-        raise TypeError("resolve_startup_mode requires chain_identity_hash")
 
     journal = state_dir / JOURNAL_FILENAME
     pending = read_pending(state_dir)
@@ -236,11 +222,7 @@ def resolve_startup_mode(
             resume_session_id=resume_session_id,
         )
     if head_block < tail.replay_core.block_number:
-        # Spec §1 assumes reorg-free by construction; head cannot regress. If it
-        # did, we're pointed at the wrong data dir, the DB rolled back, or the
-        # reorg-free invariant was violated externally. Surface that instead of
-        # the generic "not in {N, N+1}" message (design-compliance #5).
-        raise ResumeRefused(
+            raise ResumeRefused(
             f"Nethermind head {head_block} < journal tail {tail.replay_core.block_number}; "
             f"spec §1 reorg-free invariant violated (corruption, wrong data dir, "
             f"or external DB rollback). Archive state/ before restart."
@@ -259,9 +241,9 @@ def _handle_empty_journal(
 ) -> StartupDecision:
     """Resolve the empty-or-missing-journal case.
 
-    An empty journal while the chain already advanced = operator intervention
-    territory (review C-EMPTY-JOURNAL); fresh-start would commit block N+1 against
-    a stale parent. An empty journal with a pending sidecar is similarly ambiguous.
+    An empty journal while the chain already advanced means fresh-start would
+    commit block N+1 against a stale parent. An empty journal with a pending
+    sidecar is similarly ambiguous.
     """
     if head_block and head_block > 0:
         raise ResumeRefused(
@@ -327,7 +309,7 @@ def _load_and_verify_prior_manifest(
 def _read_verified_tail(journal: Path, prior: Manifest | None) -> Record | None:
     """Verify the journal chain hash and return the tail record (or None if empty).
 
-    H7: if a prior manifest checkpoint exists, verify only the suffix past it;
+    If a prior manifest checkpoint exists, verify only the suffix past it;
     otherwise verify the whole chain. Schema violation on resume is translated to
     ``ResumeRefused`` so the caller can instruct the operator to archive+restart.
     """
@@ -365,18 +347,16 @@ def _reconcile_pending(
     - ``head == tail.block_number``: the commit never fired. Drop the sidecar.
     - ``head == tail.block_number + 1``: the commit happened but the journal append
       did not. Fetch the real block, cross-check its tx set against what the pending
-      verb+deadline would dispatch (review C-RECONCILE-TRUST), synthesize a record
+      verb+deadline would dispatch, synthesize a record
       with ``status="reconciled_unobserved"``, append it, then drop the sidecar.
     Anything else: refuse — the state on disk is ambiguous.
     """
     # Pending == tail.batch_id means the journal append succeeded but the
     # clear_pending call failed (disk full, ENOSPC after fsync, etc). The
-    # batch is already durable in the journal; just drop the stale sidecar
-    # and continue (skeptic F-9).
+    # batch is already durable in the journal; just drop the stale sidecar.
     if pending.batch_id == tail.batch_id:
         clear_pending(state_dir)
         return tail
-    # Pending is always for the batch immediately after the journal tail.
     if pending.batch_id != tail.batch_id + 1:
         raise ResumeRefused(
             f"pending sidecar batch_id={pending.batch_id} inconsistent with "
@@ -400,24 +380,10 @@ def _reconcile_pending(
         # actually used (it could differ if the EL clamps to parent+1).
         raw_ts = block.get("timestamp", 0)
         block_ts = int(raw_ts, 16) if isinstance(raw_ts, str) else int(raw_ts)
-        # Cross-check the head block's tx count against what the pending verb+
-        # deadline_bytes would have dispatched. Catches a misbehaving or compromised
-        # Nethermind that auto-mined an empty block (or committed a different tx
-        # set) between the commit call and our resume (review C-RECONCILE-TRUST).
         if facade_ctx is not None:
             _verify_reconciled_tx_set(facade_ctx, pending, block)
         journal_path = state_dir / JOURNAL_FILENAME
         with JournalWriter(journal_path) as writer:
-            # Carry the tail's F/σ/α forward so the next resume doesn't cold-start
-            # the controller. The unobserved batch didn't change those coefficients
-            # (apply_observation never ran for it), so tail.observability is
-            # authoritative. Status uses the new `reconciled_unobserved` value so
-            # downstream tooling can filter reconciled records without conflating
-            # them with explicit `aborted` shutdowns (spec §8 reserved for that).
-            # Stamp with the *new* session's id so the record has a matching
-            # Session entry in the manifest once shutdown runs. Falling back to
-            # pending.session_id preserves legacy behavior when the caller
-            # didn't compute a resume_session_id (should only happen in tests).
             synthesized_session_id = (
                 resume_session_id if resume_session_id is not None else pending.session_id
             )
@@ -435,11 +401,6 @@ def _reconcile_pending(
                     block_hash=block_hash,
                     block_number=head_block,
                     block_timestamp=block_ts,
-                    # Carry the sidecar's recorded target_sha256 forward so the
-                    # synthesized record points at the correct target_history
-                    # entry. Mid-run target swaps don't gate reconcile (target
-                    # is per-batch), but the journal reference must still be
-                    # right or replay can't reconstruct the dispatch.
                     target_sha256=pending.target_sha256,
                 ),
                 observability=Observability(
@@ -475,7 +436,7 @@ def _verify_reconciled_tx_set(
     or misbehaving Nethermind pass by committing an equal-sized but differently-
     signed tx set — the synthesized record would record the chain's block_hash
     while replay on another client would produce a different block_hash,
-    violating §C.1 silently (round-3 C1 / skeptic F-5 / TRIZ H1).
+    violating replay-equivalence silently.
     """
     from eth_utils.crypto import keccak
 
@@ -502,47 +463,6 @@ def _verify_reconciled_tx_set(
             )
 
 
-def make_default_probe_executor(
-    *,
-    rpc: RpcClient,
-    sensor: SensorClient,
-    facade_ctx: FacadeContext,
-    reference_f: ReferenceF,
-) -> ProbeExecutor:
-    """Build a ProbeExecutor wired to the live facade + rpc + sensor stack.
-
-    Used by ``_run_locked`` when no explicit executor is injected and the mode
-    is FRESH. Without this, the probe sequence (spec §B.2) was silently skipped
-    from the CLI path — fresh runs seeded F from REFERENCE_F and lost the §B.2
-    sanity gate (round-3 C4 / design-compliance HIGH #1).
-
-    Probe blocks are committed but NOT journaled here. The journaling-capable
-    variant lives at ``make_journaling_probe_executor``: it threads the same
-    pending/commit/journal pipeline the QP loop uses, so probe blocks land in
-    ``payloads.rlp`` and the journal at ``batch_id`` 0..n-1 (spec §B.2). The
-    bare executor stays available for tests that don't need a journal/payload
-    writer in scope.
-    """
-
-    def _execute(verb: str, tx_count: int) -> tuple[StateObservation, StateObservation]:
-        # Budget = tx_count × reference-F byte-rate (approx). Dispatch ignores
-        # exact sizing and packs until the adapter fills the budget.
-        ref = reference_f.per_scenario(verb)
-        deadline_bytes = max(
-            1,
-            int(abs(ref["accounts"]) + abs(ref["storage"]) + abs(ref["code"])) * tx_count,
-        )
-        pre = sensor.read()
-        dispatched = dispatch(verb, deadline_bytes, facade_ctx)
-        rpc.testing_commit_block_v1(
-            [tx.rlp for tx in dispatched],
-            timestamp_unix=_now_unix(),
-        )
-        post = sensor.read(expected_block=pre.block_number + 1)
-        return pre, post
-
-    return _execute
-
 
 def make_journaling_probe_executor(
     *,
@@ -560,7 +480,7 @@ def make_journaling_probe_executor(
     resumed_from_batch: int | None,
     batch_id_start: int = 0,
 ) -> ProbeExecutor:
-    """Probe executor that journals each probe block (spec §B.2).
+    """Probe executor that journals each probe block.
 
     Every invocation goes through ``_commit_and_journal`` — the same pipeline
     as the QP main loop — so probe records share the pending sidecar, payload
@@ -581,8 +501,6 @@ def make_journaling_probe_executor(
             int(abs(ref["accounts"]) + abs(ref["storage"]) + abs(ref["code"])) * tx_count,
         )
         pre = sensor.read()
-        # Synthesize a single-verb plan inline — controller.pick_next_batch
-        # MUST NOT run for probes (their verb sequence is fixed by spec §B.2).
         plan = BatchPlan(verb=verb, deadline_bytes=deadline_bytes, mix={verb: 1.0})
         status, post = _commit_and_journal(
             plan=plan,
@@ -783,9 +701,6 @@ def run(
     state_dir.mkdir(parents=True, exist_ok=True)
 
     ref_f = reference_f or load_reference_f(default_reference_f_path())
-    # Pre-build the facade context + replay snapshot so chain_identity_hash
-    # covers every chain-side knob that can change the final state root
-    # (spec §C.1). Target shape is per-batch and recorded into target_history.
     preflight_ctx = build_facade_context(target)
     replay_context = build_replay_context(preflight_ctx)
     chain_identity_hash = compute_chain_identity_hash(env, replay_context)
@@ -796,10 +711,6 @@ def run(
     rpc = deps.rpc if deps else RpcClient(rpc_url, jwt_path=jwt_path)
     probe_exec = deps.probe_executor if deps else None
 
-    # Single-writer guarantee: refuse to start if another orchestrator already
-    # holds the state-dir lock (review C-NO-LOCK). The lock is released only
-    # after the manifest is written, so crash mid-run leaves the lock file but
-    # fcntl drops the advisory lock on process exit.
     with _state_dir_lock(state_dir):
         return _run_locked(
             target=target,
@@ -835,9 +746,6 @@ def _run_locked(
     own_deps: bool,
 ) -> Path:
     head_block = _fetch_head_block(rpc)
-    # Compute the new session id up-front so the reconcile path can stamp the
-    # synthesized record with it (skeptic F-3 fix). This also eliminates a
-    # duplicate manifest read that the old _extract_last_session_id did later.
     resume_session_id = _extract_last_session_id(state_dir) + 1
     decision = resolve_startup_mode(
         state_dir,
@@ -855,8 +763,6 @@ def _run_locked(
         assert decision.last_record is not None  # narrow for type checker
         session_id = resume_session_id
         resumed_from_batch: int | None = decision.last_record.batch_id
-        # Spec §C.3 step 6: reconstruct F/σ/α from the journal tail so controller
-        # continuity survives resume. Without this every session is a cold start.
         state = rehydrate_state(
             ref_f,
             target.qp_scenarios,
@@ -866,10 +772,6 @@ def _run_locked(
         batch_id = decision.last_record.batch_id + 1
         ctx.address_cursor = int(decision.last_record.replay_core.end_address, 16)
         ctx.last_block_timestamp = decision.last_record.replay_core.block_timestamp
-        # Resume guard: refuse if the rehydrated cursor doesn't match the EOA's
-        # on-chain nonce. A mid-batch crash that leaked partial txs onto the
-        # chain (or operator intervention via direct RPC) silently desyncs
-        # otherwise — replay would re-sign already-mined nonces.
         _verify_nonce_aligned(rpc, ctx)
     else:
         session_id = 1
@@ -879,10 +781,6 @@ def _run_locked(
 
     controller = Controller(state)
 
-    # Seed the rolling target-history snapshot tracker. On resume we pull every
-    # snapshot from the prior manifest so replay can look up old batches by
-    # sha256; on fresh runs we start with just the boot target. Either way the
-    # active target is appended if its sha256 isn't yet present.
     manifest_path = state_dir / MANIFEST_FILENAME
     target_history = _seed_target_history(manifest_path, target)
 
@@ -899,10 +797,6 @@ def _run_locked(
             PayloadStreamWriter(payload_path) as pw,
         ):
             if is_fresh:
-                # C4 + spec §B.2: probe BEFORE the QP loop so F is seeded from
-                # measured observations. Probe blocks are journaled at batch_id
-                # 0..n-1 via the same pending/commit/journal pipeline as QP
-                # batches; the QP loop then starts at batch_id = n_probes.
                 active_probe = probe_exec or make_journaling_probe_executor(
                     controller=controller,
                     sensor=sensor,
@@ -982,9 +876,6 @@ def _run_locked(
                     stop_reason = batch_status
                     break
                 if _target_reached(last_observation, active_target):
-                    # Soft-stop poll: linger for ORCH_IDLE_TIMEOUT_SEC waiting
-                    # for an operator to edit target.yaml. Any sha change resumes
-                    # the QP loop; the timeout fires "target_reached_idle".
                     polled = _poll_for_target_change(
                         watcher=target_watcher,
                         active_sha=active_target.sha256,
@@ -993,12 +884,7 @@ def _run_locked(
                     if polled is None:
                         stop_reason = "target_reached_idle"
                         break
-                    # Continue the main loop; the next iteration will pick up
-                    # the new target via watcher.current() above.
                     continue
-                # Soft-stop: when the controller's innovation residual_norm
-                # stays below THRESHOLD for WINDOW consecutive batches, we've
-                # plateaued — stop instead of grinding.
                 if RESIDUAL_STOP_THRESHOLD > 0:
                     if controller.state.last_residual_norm < RESIDUAL_STOP_THRESHOLD:
                         consecutive_low_residual += 1
@@ -1062,9 +948,7 @@ def _run_one_batch(
         batch_id=batch_id, chain_identity_hash=chain_identity_hash,
     )
     # Back-pressure: when block-apply latency trends up, NM's pruner is
-    # behind — insert a noop batch so the pruner has a cheap block to catch
-    # up against. The override only fires for QP-loop batches; probes use
-    # a different code path with verbs fixed by spec §B.2.
+    # behind — insert a noop batch so the pruner has a cheap block to catch up.
     if (
         _BACKPRESSURE_VERB in target.qp_scenarios
         and plan.verb != _BACKPRESSURE_VERB
@@ -1110,33 +994,22 @@ def _commit_and_journal(
 ) -> tuple[str, StateObservation]:
     """Dispatch ``plan``, commit its block, journal the result, and return ``(status, post)``.
 
-    Shared seam between the QP main loop and the §B.2 probe sequence: both supply
-    a ``BatchPlan`` (the main loop via ``controller.pick_next_batch``, the probe
-    via a hand-built ``BatchPlan(verb=v, deadline_bytes=d, mix={v: 1.0})``). The
-    full pending → commit → payload → sense → apply_observation → journal →
-    clear-pending pipeline is identical, so probe records are crash-recoverable
-    on the same code path the main loop uses.
-
-    NOTE: probe records carry the same chain-hash invariant as QP records. Old
-    journals produced before probes were journaled (batch_id 0 was the first QP
-    batch) will fail to verify under this code; archive state/ when upgrading.
+    Shared seam between the QP main loop and the probe sequence: both supply
+    a ``BatchPlan``. The full pending → commit → payload → sense →
+    apply_observation → journal → clear-pending pipeline is identical, so probe
+    records are crash-recoverable on the same code path the main loop uses.
     """
     start_cursor = facade_ctx.address_cursor
     txs = dispatch(plan.verb, plan.deadline_bytes, facade_ctx)
     end_cursor = facade_ctx.address_cursor
-    # Store cursors as 20-byte-padded hex so the journal schema (^0x[0-9a-fA-F]+$)
-    # remains uniform and replay can recover them with a single int() call.
     start_addr = "0x" + start_cursor.to_bytes(20, "big").hex()
     end_addr = "0x" + end_cursor.to_bytes(20, "big").hex()
 
-    # C3: write a pending-batch sidecar BEFORE the commit. If we crash between
+    # Write a pending-batch sidecar BEFORE the commit. If we crash between
     # commit and journal append, resume uses this to synthesize the missing record.
     ts_iso = _now_iso()
-    # Generate the EL block timestamp ONCE per batch and capture it in the
-    # sidecar + journal so replay re-supplies the same value. The wall clock is
-    # an off-spec input that gets folded into the committed block hash by the
-    # EL; if we let ``rpc`` re-read ``time.time()`` on each replay, every replay
-    # produces a different block hash and §C.1 fails. The Engine API requires
+    # Generate the EL block timestamp once per batch and capture it in the
+    # sidecar + journal so replay re-supplies the same value. The Engine API requires
     # strictly increasing timestamps; on rapid commits (probe phase fires 7
     # blocks within one second) `_now_unix()` returns the same int, so we floor
     # at ``parent.timestamp + 1`` — Nethermind tolerated the duplicate, geth /
@@ -1234,7 +1107,6 @@ def _commit_and_journal(
         ),
     )
     journal_writer.append(record)
-    # Pending sidecar is only meaningful while journal append is incomplete.
     clear_pending(state_dir)
     return status, post
 
@@ -1298,8 +1170,6 @@ def _build_manifest(
             _log.warning("final state_root fetch failed: %s", exc)
 
     journal_sha = compute_journal_sha256(journal_path) if journal_path.exists() else ""
-    # H7 checkpoint: if we got here the chain is known-good end-to-end; record the
-    # tail's chain_hash + batch_id so the next resume verifies only the suffix.
     checkpoint_hash = ""
     checkpoint_batch = -1
     if journal_path.exists() and journal_path.stat().st_size > 0:
@@ -1510,14 +1380,7 @@ def _now_unix() -> int:
 
 @contextlib.contextmanager
 def _signal_handlers() -> Generator[threading.Event, None, None]:
-    """Install SIGINT/SIGTERM handlers that set a ``threading.Event``; restore on exit.
-
-    Previous version replaced the process-wide SIGINT handler and never restored
-    it, which made pytest's own Ctrl-C trap permanently vanish for any test that
-    invoked ``run()`` on the main thread. Using ``threading.Event`` instead of a
-    custom flag class trims one abstraction (TRIZ simplifier #5): the loop checks
-    ``stop.is_set()`` just as cheaply.
-    """
+    """Install SIGINT/SIGTERM handlers that set a ``threading.Event``; restore on exit."""
     flag = threading.Event()
 
     def _handle(*_: Any) -> None:

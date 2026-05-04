@@ -49,13 +49,10 @@ class ReplayContext:
     gas_limit: int
     address_stride: int
     deploy_pubkey_sha256: str
-    # ``block_gas_limit`` shifts the dispatcher's tx-count threshold for the
-    # same ``(verb, deadline_bytes)`` pair (heavy-gas verbs cap earlier). Two
-    # runs with identical chain identity but different ``block_gas_limit``
-    # produce different tx sets and different block hashes, so it is part of
-    # the chain_identity_hash preimage. Defaulted to 0 for legacy-manifest
-    # back-compat (older runs round-trip into a sentinel that
-    # ``replay_context_matches`` will refuse against any concrete value).
+    # ``block_gas_limit`` shifts the dispatcher's tx-count threshold. Two runs
+    # with identical chain identity but different ``block_gas_limit`` produce
+    # different tx sets and different block hashes, so it is part of the
+    # chain_identity_hash preimage. Defaulted to 0 for legacy-manifest back-compat.
     block_gas_limit: int = 0
 
 
@@ -96,15 +93,11 @@ class Manifest:
     # exact target each batch was dispatched against.
     target_history: list[TargetSnapshot] = field(default_factory=list)
     journal_sha256: str = ""
-    # H7: checkpoint for incremental chain verification on resume. Successive
+    # Checkpoint for incremental chain verification on resume. Successive
     # runs verify only the suffix past ``last_checkpoint_batch_id``.
     last_chain_hash_checkpoint: str = ""
     last_checkpoint_batch_id: int = -1
     final_state_root: str | None = None
-    # Fields for Ed25519 manifest signing (design §13) will land when signing
-    # lands — removed pre-feature to avoid shipping a "signature: null" slot
-    # that could be mistaken for a valid unsigned manifest (review YAGNI /
-    # security M-MANIFEST-SIG-THEATRE).
     schema: int = MANIFEST_SCHEMA
 
     def to_dict(self) -> dict[str, Any]:
@@ -141,11 +134,6 @@ class Manifest:
     @classmethod
     def read(cls, path: Path | str) -> Manifest:
         body = json.loads(Path(path).read_text(encoding="utf-8"))
-        # Refuse pre-v2 manifests with a clear message — schema v1 had a single
-        # composition_hash that gated resume on target.yaml content. With
-        # per-batch target reload (v2), the resume gate is chain_identity_hash
-        # and target_sha256 is per-record; a v1 manifest cannot be safely
-        # adopted because its replay records have no target_sha256 to look up.
         manifest_schema = body.get("schema")
         if manifest_schema is not None and int(manifest_schema) < MANIFEST_SCHEMA:
             raise ValueError(
@@ -212,11 +200,6 @@ def replay_context_matches(a: ReplayContext | None, b: ReplayContext | None) -> 
 
     Returns ``True`` iff every field that affects tx/block hashes is identical.
 
-    Tightened from round-2: the old "legacy-None is compatible with anything"
-    shim was an unauthenticated bypass — a manifest with ``replay_context: null``
-    could be dropped alongside a valid journal and silently skip the signer+chain
-    gate (review C2 / skeptic F-1 / security M-REPLAY-NULL-SKIP). Now:
-
     - Both None → compatible (pre-ReplayContext journals replayed by old code).
     - Both set → require structural equality.
     - Exactly one set → incompatible; caller must raise ``ResumeRefused``.
@@ -229,11 +212,7 @@ def replay_context_matches(a: ReplayContext | None, b: ReplayContext | None) -> 
 
 
 def compute_journal_sha256(journal_path: Path | str) -> str:
-    """sha256 over the concatenation of every record's `replay_core` bytes.
-
-    Matches design §7's "hash over all replay_core bytes" so replay can re-derive
-    and match without re-reading observability fields.
-    """
+    """sha256 over the concatenation of every record's `replay_core` bytes."""
     from .journal import JournalReader, serialize_replay_core
 
     digest = hashlib.sha256()

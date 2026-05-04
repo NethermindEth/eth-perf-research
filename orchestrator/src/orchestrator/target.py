@@ -62,10 +62,7 @@ def load_target(path: Path | str) -> TargetConfig:
 def parse_target(raw_bytes: bytes) -> TargetConfig:
     """Parse + validate raw YAML bytes into a ``TargetConfig``.
 
-    Hashing and parsing both consume the same byte buffer, so a partial mid-edit
-    cannot produce a config whose ``source_sha256`` doesn't match its body. The
-    live watcher relies on this atomicity: it reads bytes once, hashes once,
-    parses once.
+    Hash and parse the same buffer so ``source_sha256`` always matches the body.
     """
     body = yaml.safe_load(raw_bytes) or {}
 
@@ -215,8 +212,6 @@ def _validate_mainnet_target(mainnet: dict[str, float]) -> None:
     if missing:
         raise ValueError(f"mainnet_target missing axes: {sorted(missing)}")
     total = sum(float(mainnet[a]) for a in required)
-    # Spec §B.3 fractions (0.141/0.817/0.043) sum to 1.001 due to rounding in the
-    # Paradigm 2024 report; accept any rounding noise up to 1 pp. Larger skews are
-    # genuine misconfiguration and still raise.
+    # Accept rounding noise up to 1 pp; larger skews are genuine misconfiguration.
     if abs(total - 1.0) > 0.01:
         raise ValueError(f"mainnet_target axes must sum to 1.0 (got {total:.6f})")

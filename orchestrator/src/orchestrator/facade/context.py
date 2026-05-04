@@ -121,11 +121,6 @@ class FacadeContext:
             raise ValueError(f"address derivation overflows 20 bytes at index {index}")
         return addr_int.to_bytes(20, "big")
 
-    def next_salt(self) -> bytes:
-        salt = self.salt_cursor.to_bytes(32, "big")
-        self.salt_cursor += 1
-        return salt
-
     def deploy_pubkey_sha256(self) -> str:
         """Stable fingerprint of the signer without leaking the private key."""
         return hashlib.sha256(self.deploy_private_key).hexdigest()
