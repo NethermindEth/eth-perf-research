@@ -45,7 +45,8 @@
             "aborted",
             "controller_instability",
             "sensor_wait_timeout",
-            "reconciled_unobserved"
+            "reconciled_unobserved",
+            "partial_committed"
           ]
         },
         "block_hash": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },

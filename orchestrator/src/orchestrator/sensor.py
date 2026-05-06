@@ -18,6 +18,7 @@ Only three byte counters feed the controller; the rest travels into the journal 
 
 from __future__ import annotations
 
+import os as _os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,7 +62,9 @@ class SensorClient:
     """
 
     POLL_INTERVAL_S = 0.1
-    DEFAULT_TIMEOUT_S = 5.0
+    # Increase via ORCH_SENSOR_TIMEOUT_S when the plugin's incremental diff is
+    # slow (large state, FlatDb backend recovering after a long pause).
+    DEFAULT_TIMEOUT_S = float(_os.environ.get("ORCH_SENSOR_TIMEOUT_S", "5.0"))
 
     def __init__(
         self,

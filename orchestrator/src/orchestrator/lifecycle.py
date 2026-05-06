@@ -15,6 +15,7 @@ import fcntl
 import logging
 import os
 import platform
+import re
 import signal
 import threading
 import time
@@ -62,7 +63,7 @@ from .manifest import (
 from .payloads import ExecutionPayloadV3, PayloadStreamWriter
 from .probe import ProbeExecutor, run_probe, seed_state_from_probe
 from .reference_f import ReferenceF, default_reference_f_path, load_reference_f
-from .rpc import RpcClient
+from .rpc import RpcClient, RpcError
 from .sensor import SensorClient, SensorWaitTimeout, StateObservation
 from .target import LiveTargetWatcher, TargetConfig
 
@@ -244,10 +245,15 @@ def _handle_empty_journal(
     sidecar is similarly ambiguous.
     """
     if head_block and head_block > 0:
-        raise ResumeRefused(
-            f"journal empty but Nethermind head is {head_block}; archive "
-            f"state/ and restart fresh, or restore a backup"
-        )
+        # Forking-an-existing-chain mode: when the orchestrator drives a
+        # mainnet-forked bloatnet (head ≫ 0 by construction) the empty-journal
+        # + advanced-head combination is intentional.
+        if not os.environ.get("ORCH_ALLOW_NON_ZERO_FRESH_HEAD"):
+            raise ResumeRefused(
+                f"journal empty but Nethermind head is {head_block}; archive "
+                f"state/ and restart fresh, or restore a backup, or set "
+                f"ORCH_ALLOW_NON_ZERO_FRESH_HEAD=1 to fork-from-existing-head"
+            )
     if pending is not None:
         raise ResumeRefused(
             "journal empty but pending sidecar present — state ambiguous; "
@@ -623,13 +629,20 @@ def update_verb_gas_factor(
 
 
 def build_facade_context(target: TargetConfig) -> FacadeContext:
-    return FacadeContext(
+    kwargs: dict[str, Any] = dict(
         base_address=target.base_address,
         revision=target.revision,
         chain_id=target.chain_id,
         gas_limit=target.gas_limit,
         block_gas_limit=target.block_gas_limit,
     )
+    # Allow operators to override the lab key (e.g. when bloating a
+    # mainnet-forked chain where chain_id=1 trips the lab-key safety check).
+    if (key_hex := os.environ.get("ORCH_DEPLOY_PRIVATE_KEY")):
+        kwargs["deploy_private_key"] = bytes.fromhex(key_hex.removeprefix("0x"))
+    if (cursor_env := os.environ.get("ORCH_INITIAL_ADDRESS_CURSOR")):
+        kwargs["address_cursor"] = int(cursor_env, 0)
+    return FacadeContext(**kwargs)
 
 
 def build_replay_context(ctx: FacadeContext) -> ReplayContext:
@@ -794,9 +807,12 @@ def _run_locked(
                     resumed_from_batch=resumed_from_batch,
                     batch_id_start=batch_id,
                 )
-                results = run_probe(ref_f, target.qp_scenarios, active_probe)
-                seed_state_from_probe(state, results)
-                batch_id = len(results)
+                if os.environ.get("ORCH_SKIP_PROBE"):
+                    batch_id = 0
+                else:
+                    results = run_probe(ref_f, target.qp_scenarios, active_probe)
+                    seed_state_from_probe(state, results)
+                    batch_id = len(results)
 
             last_observation = sensor.read()
             completed = 0
@@ -1016,10 +1032,29 @@ def _commit_and_journal(
     )
 
     commit_started = time.monotonic()
-    block_hash = rpc.testing_commit_block_v1(
-        [tx.rlp for tx in txs], timestamp_unix=block_timestamp
-    )
-    block = rpc.eth_get_block_by_hash(block_hash, full=True)
+    partial_inclusion = False
+    block_hash: str
+    try:
+        block_hash = rpc.testing_commit_block_v1(
+            [tx.rlp for tx in txs], timestamp_unix=block_timestamp
+        )
+        block = rpc.eth_get_block_by_hash(block_hash, full=True)
+    except RpcError as exc:
+        # Partial-inclusion: Nethermind committed a prefix of the batch (the
+        # accepted txs already advanced the sender's nonce on chain) and
+        # rejected the tail. Truncate to the landed prefix so the journal,
+        # cursor, and controller feedback all describe what's actually on
+        # chain. Anything else re-raises and the run dies as before.
+        included = _parse_partial_inclusion(exc)
+        if included is None or included == 0:
+            raise
+        partial_inclusion = True
+        txs = txs[:included]
+        block = rpc.eth_get_block_by_number(pre_observation.block_number + 1, full=True)
+        block_hash = block["hash"]
+        facade_ctx.address_cursor = start_cursor + included
+        end_cursor = facade_ctx.address_cursor
+        end_addr = "0x" + end_cursor.to_bytes(20, "big").hex()
     record_block_apply_latency(facade_ctx, time.monotonic() - commit_started)
     payload = _block_to_payload(block, signed_txs=[tx.rlp for tx in txs])
     payload_writer.append(payload)
@@ -1029,12 +1064,12 @@ def _commit_and_journal(
 
     try:
         post = sensor.read(expected_block=pre_observation.block_number + 1)
-        status = "ok"
+        status = "partial_committed" if partial_inclusion else "ok"
     except SensorWaitTimeout:
         post = pre_observation  # stale; will be refreshed next batch
         status = "sensor_wait_timeout"
 
-    if status == "ok":
+    if status in ("ok", "partial_committed"):
         obs_diag: dict[str, Any] = controller.apply_observation(
             pre_observation, post, plan,
             tx_count=max(len(txs), 1),
@@ -1090,6 +1125,21 @@ def _commit_and_journal(
     journal_writer.append(record)
     clear_pending(state_dir)
     return status, post
+
+
+# `expected N transactions but only M were included` — Nethermind's partial-
+# commit error. Returning the included count lets the caller truncate to the
+# prefix that actually landed; the chain has advanced by exactly one block.
+_PARTIAL_INCLUSION_RE = re.compile(r"only (\d+) (?:were|of \d+) included|only (\d+) of \d+ were included")
+
+
+def _parse_partial_inclusion(exc: RpcError) -> int | None:
+    if exc.code != -32000:
+        return None
+    match = _PARTIAL_INCLUSION_RE.search(exc.server_message)
+    if match is None:
+        return None
+    return int(match.group(1) or match.group(2))
 
 
 def _block_to_payload(block: dict[str, Any], *, signed_txs: list[bytes]) -> ExecutionPayloadV3:

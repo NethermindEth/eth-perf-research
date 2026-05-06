@@ -48,7 +48,7 @@ class ReplayCore:
     start_address: str  # hex string "0x…"
     end_address: str
     status: (
-        str  # ok | aborted | controller_instability | sensor_wait_timeout | reconciled_unobserved
+        str  # ok | aborted | controller_instability | sensor_wait_timeout | reconciled_unobserved | partial_committed
     )
     block_hash: str
     block_number: int
