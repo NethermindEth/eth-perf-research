@@ -1,0 +1,35 @@
+// Wire protocol between the Python orchestrator and the Go tx-signer subprocess.
+// Length-prefixed (4-byte BE) Protobuf over stdio.
+syntax = "proto3";
+
+package txsigner;
+
+option go_package = "github.com/NethermindEth/eth-perf-research/tx-signer/pb";
+
+message AccessTuple {
+  bytes address = 1;                  // 20 bytes
+  repeated bytes storage_keys = 2;    // each 32 bytes
+}
+
+message TxIn {
+  uint64 chain_id = 1;
+  uint64 nonce = 2;
+  bytes  max_priority_fee_per_gas = 3; // big-endian uint256
+  bytes  max_fee_per_gas = 4;          // big-endian uint256
+  uint64 gas = 5;
+  bytes  to = 6;                       // 20 bytes; empty for contract creation
+  bytes  value = 7;                    // big-endian uint256
+  bytes  data = 8;
+  repeated AccessTuple access_list = 9;
+}
+
+message SignRequest {
+  uint64 id = 1;
+  repeated TxIn txs = 2;
+}
+
+message SignResponse {
+  uint64 id = 1;
+  repeated bytes raw = 2;              // signed EIP-1559 RLP bytes (with type-2 prefix)
+  repeated string errors = 3;
+}
