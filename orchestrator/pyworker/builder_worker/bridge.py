@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from orchestrator._proto import txsigner_pb2
@@ -11,6 +12,13 @@ from orchestrator.facade.verbs import _VERB_BUILDERS
 from ._proto import builder_pb2
 
 log = logging.getLogger(__name__)
+
+
+def _deploy_private_key_from_env() -> bytes | None:
+    raw = os.environ.get("ORCH_DEPLOY_PRIVATE_KEY", "").strip()
+    if not raw:
+        return None
+    return bytes.fromhex(raw.removeprefix("0x"))
 
 
 def build(req: builder_pb2.BuildBatchRequest) -> builder_pb2.BuildBatchResponse:
@@ -38,7 +46,7 @@ def build(req: builder_pb2.BuildBatchRequest) -> builder_pb2.BuildBatchResponse:
 
 
 def _ctx_from_proto(p: builder_pb2.FacadeCtxParams) -> FacadeContext:
-    return FacadeContext(
+    kwargs: dict[str, Any] = dict(
         base_address=bytes(p.base_address),
         revision=p.revision,
         chain_id=p.chain_id,
@@ -48,6 +56,10 @@ def _ctx_from_proto(p: builder_pb2.FacadeCtxParams) -> FacadeContext:
         address_stride=p.address_stride or (1 << 40),
         salt_cursor=p.salt_cursor,
     )
+    pk = _deploy_private_key_from_env()
+    if pk is not None:
+        kwargs["deploy_private_key"] = pk
+    return FacadeContext(**kwargs)
 
 
 def _signable_to_proto(signable: dict[str, Any]) -> txsigner_pb2.TxIn:

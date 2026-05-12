@@ -113,7 +113,7 @@ func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *
 		return nil, fmt.Errorf("lifecycle: testing_commitBlockV1: %w", err)
 	}
 
-	block, err := d.rpc.BlockByHash(ctx, blockHash, true)
+	block, err := d.rpc.BlockByHash(ctx, blockHash, false)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: BlockByHash %s: %w", blockHash.Hex(), err)
 	}

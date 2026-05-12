@@ -92,7 +92,7 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 	journalExists := jErr == nil && jStat.Size() > 0
 
 	if !journalExists {
-		if head.Number == 0 {
+		if head.Number == 0 || os.Getenv("ORCH_ALLOW_NON_ZERO_FRESH_HEAD") == "1" {
 			return &startupDecision{
 				Mode:         modeFresh,
 				JournalPath:  jp,
@@ -101,7 +101,7 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 			}, nil
 		}
 		return nil, fmt.Errorf(
-			"lifecycle: empty journal but chain head=%d; expected genesis (refuse to bloat over an unknown chain)",
+			"lifecycle: empty journal but chain head=%d; expected genesis (set ORCH_ALLOW_NON_ZERO_FRESH_HEAD=1 to bypass)",
 			head.Number,
 		)
 	}

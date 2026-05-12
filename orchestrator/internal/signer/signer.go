@@ -36,6 +36,11 @@ func New(hexKey string) (*Signer, error) {
 	return &Signer{privKey: priv}, nil
 }
 
+// Address returns the public Ethereum address derived from the signer's key.
+func (s *Signer) Address() common.Address {
+	return crypto.PubkeyToAddress(s.privKey.PublicKey)
+}
+
 // SignBatch signs txs in parallel (bounded by GOMAXPROCS workers) and returns
 // signed RLP bytes in input order. Cancels early if ctx is done.
 func (s *Signer) SignBatch(ctx context.Context, txs []*orchpb.TxIn) ([][]byte, error) {

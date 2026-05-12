@@ -12,10 +12,13 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/builderpool"
@@ -188,11 +191,35 @@ func Run(ctx context.Context, cfg Config) error {
 		hydrateStateFromTail(state, decision.TailRecord)
 	}
 
-	// 9. Facade context.
+	// 9. Facade context. Base address from $ORCH_BASE_ADDRESS (hex), else zeros.
+	// Initial nonce from $ORCH_INITIAL_ADDRESS_CURSOR override, else queried from RPC.
 	facadeCtx := buildFacadeContext(rawTarget, chainID, head.GasLimit)
+	if hex := strings.TrimPrefix(os.Getenv("ORCH_BASE_ADDRESS"), "0x"); hex != "" {
+		b, err := decodeBaseAddress(hex)
+		if err != nil {
+			return fmt.Errorf("lifecycle: ORCH_BASE_ADDRESS: %w", err)
+		}
+		facadeCtx.BaseAddress = b
+	}
+	if raw := os.Getenv("ORCH_INITIAL_ADDRESS_CURSOR"); raw != "" {
+		v, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return fmt.Errorf("lifecycle: ORCH_INITIAL_ADDRESS_CURSOR: %w", err)
+		}
+		facadeCtx.AddressCursor = v
+	} else if decision.Mode == modeFresh {
+		n, err := rpcCli.TransactionCount(ctx, signr.Address())
+		if err != nil {
+			return fmt.Errorf("lifecycle: query master nonce: %w", err)
+		}
+		facadeCtx.AddressCursor = n
+		slog.Info("lifecycle: master nonce primed from RPC", "address", signr.Address().Hex(), "nonce", n)
+	}
 
-	// 10. Initial observation from sensor.
-	initialSnap, err := sens.Read(ctx, head.Number)
+	// 10. Initial observation from sensor. Use expected=0: we don't care which
+	// block we start from — the sensor often lags chain head by 1 block, and
+	// the controller will see post-commit deltas anyway.
+	initialSnap, err := sens.Read(ctx, 0)
 	if err != nil {
 		return fmt.Errorf("lifecycle: initial sensor read: %w", err)
 	}
@@ -294,6 +321,24 @@ func defaultVerbs() []string {
 		"storagespam", "erc20_bloater", "erc20tx", "uniswap_swaps",
 		"storagerefundtx", "gasburnertx", "evm_fuzz", "noop",
 	}
+}
+
+// decodeBaseAddress parses a 20-byte hex string (0x optional, padded left with zeros).
+func decodeBaseAddress(s string) ([]byte, error) {
+	s = strings.TrimPrefix(s, "0x")
+	if len(s)%2 == 1 {
+		s = "0" + s
+	}
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > 20 {
+		return nil, fmt.Errorf("base address > 20 bytes (got %d)", len(raw))
+	}
+	out := make([]byte, 20)
+	copy(out[20-len(raw):], raw)
+	return out, nil
 }
 
 // buildFacadeContext creates a fresh facade.Context for this run.
