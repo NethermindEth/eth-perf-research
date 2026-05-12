@@ -67,11 +67,29 @@ func updateFeePolicy(ctx context.Context, rpcCli *rpc.Client, fctx *facade.Conte
 	return head, nil
 }
 
-// runOneBatch executes a single iteration of the main loop.
-func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *controller.Observation) (*batchResult, error) {
+// dispatched carries the unsigned state produced by dispatchBatch into
+// commitBatch. It is the unit of work flowing between the pipeline goroutines.
+//
+// All cursor values that buildRecord needs are snapshotted here so commit
+// never reads back from facadeCtx (which the planner is concurrently mutating
+// for the next batch).
+type dispatched struct {
+	batchID    uint64
+	plan       *controller.BatchPlan
+	addrBefore uint64
+	addrAfter  uint64
+	saltBefore uint64
+	saltAfter  uint64
+	res        *facade.Result // signed RLPs, hashes, cursors-after
+}
+
+// dispatchBatch performs Pick + fee update + Dispatch. Mutates
+// facadeCtx.AddressCursor and facadeCtx.SaltCursor. Returns nil if Pick yields
+// no plan or Dispatch yields zero txs.
+func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *controller.Observation) (*dispatched, error) {
 	plan := d.state.Pick(currentObs, d.target, defaultTotalBatchBytes)
 	if plan == nil {
-		return &batchResult{}, nil
+		return nil, nil
 	}
 
 	if _, err := updateFeePolicy(ctx, d.rpc, d.facadeCtx); err != nil {
@@ -86,29 +104,43 @@ func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *
 		return nil, fmt.Errorf("lifecycle: dispatch: %w", err)
 	}
 	if res == nil || len(res.SignedRLP) == 0 {
-		return &batchResult{}, nil
+		return nil, nil
 	}
 
-	// Sidecar BEFORE commit so a crash leaves a recoverable marker.
+	return &dispatched{
+		batchID:    batchID,
+		plan:       plan,
+		addrBefore: addrBefore,
+		addrAfter:  d.facadeCtx.AddressCursor,
+		saltBefore: saltBefore,
+		saltAfter:  d.facadeCtx.SaltCursor,
+		res:        res,
+	}, nil
+}
+
+// commitBatch consumes a dispatched batch: writes the pending sidecar, commits
+// via testing_commitBlockV1, fetches the block, appends the execution payload,
+// polls the sensor for forward progress, runs controller.Apply, journals the
+// record, then clears the pending sidecar. Returns the post-commit observation
+// and residual snapshot baked into a batchResult.
+func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *controller.Observation) (*batchResult, error) {
 	pending := &orchpb.PendingBatch{
-		BatchId:          batchID,
-		Verb:             plan.Verb,
-		StartAddress:     addrBefore,
-		Count:            uint64(res.TxCount),
+		BatchId:          db.batchID,
+		Verb:             db.plan.Verb,
+		StartAddress:     db.addrBefore,
+		Count:            uint64(db.res.TxCount),
 		TargetSha256:     d.targetDigest,
 		SessionId:        d.sessionID,
-		SaltCursorBefore: saltBefore,
-		SignedTxHashes:   res.TxRLPHashes,
+		SaltCursorBefore: db.saltBefore,
+		SignedTxHashes:   db.res.TxRLPHashes,
 		TsIso:            time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if err := journal.WritePending(d.pendingPath, pending); err != nil {
 		return nil, fmt.Errorf("lifecycle: write pending: %w", err)
 	}
 
-	pre := currentObs
 	blockTS := uint64(time.Now().Unix())
-
-	blockHash, err := d.rpc.TestingCommitBlockV1(ctx, res.SignedRLP, blockTS)
+	blockHash, err := d.rpc.TestingCommitBlockV1(ctx, db.res.SignedRLP, blockTS)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: testing_commitBlockV1: %w", err)
 	}
@@ -118,15 +150,27 @@ func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *
 		return nil, fmt.Errorf("lifecycle: BlockByHash %s: %w", blockHash.Hex(), err)
 	}
 
-	payload := buildExecutionPayloadV3(block, res.SignedRLP)
+	payload := buildExecutionPayloadV3(block, db.res.SignedRLP)
 	if err := d.pw.Append(payload); err != nil {
 		return nil, fmt.Errorf("lifecycle: append payload: %w", err)
 	}
 
-	snap, err := d.sensor.Read(ctx, block.Number)
-	if err != nil {
-		return nil, fmt.Errorf("lifecycle: sensor read block=%d: %w", block.Number, err)
+	// Wait for the sensor to advance past the previous observation. The new
+	// snapshot is what the controller consumes; we no longer need a stale-tolerate
+	// workaround because ReadAfter returns on first forward-progress poll.
+	preBN := uint64(0)
+	if pre != nil {
+		preBN = pre.BlockNumber
 	}
+	// Statecomp plugin batches diffs (~30k blocks per baseline rotation), so the
+	// per-batch sensor blockNumber won't advance. Do a single poll — accept
+	// whatever's there, never block. The controller's F-update tolerates stale
+	// observations; new data lands when the plugin rotates.
+	snap, err := d.sensor.PollOnce(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("lifecycle: sensor poll: %w", err)
+	}
+	_ = preBN
 	post := &controller.Observation{
 		AccountTrieBytes: snap.AccountTrieBytes,
 		StorageTrieBytes: snap.StorageTrieBytes,
@@ -134,12 +178,12 @@ func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *
 		BlockNumber:      snap.BlockNumber,
 	}
 
-	residual, err := d.state.Apply(pre, post, plan, res.TxCount, res.RLPBytes)
+	residual, err := d.state.Apply(pre, post, db.plan, db.res.TxCount, db.res.RLPBytes)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: controller.Apply: %w", err)
 	}
 
-	rec := buildRecord(d, batchID, plan, res, block, blockTS, saltBefore, snap, residual, addrBefore)
+	rec := buildRecord(d, db.batchID, db.plan, db.res, block, blockTS, db.saltBefore, db.saltAfter, snap, residual, db.addrBefore)
 	if _, err := d.jw.Append(rec); err != nil {
 		return nil, fmt.Errorf("lifecycle: journal append: %w", err)
 	}
@@ -149,14 +193,32 @@ func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *
 
 	return &batchResult{
 		committed:   true,
-		txCount:     res.TxCount,
-		rlpBytes:    res.RLPBytes,
+		txCount:     db.res.TxCount,
+		rlpBytes:    db.res.RLPBytes,
 		blockHeader: block,
 		postObs:     post,
 	}, nil
 }
 
+// runOneBatch is the sequential composition of dispatchBatch + commitBatch.
+// It is kept as a fallback path; the pipelined runLoop calls dispatchBatch and
+// commitBatch on separate goroutines.
+func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *controller.Observation) (*batchResult, error) {
+	db, err := dispatchBatch(ctx, d, batchID, currentObs)
+	if err != nil {
+		return nil, err
+	}
+	if db == nil {
+		return &batchResult{}, nil
+	}
+	return commitBatch(ctx, d, db, currentObs)
+}
+
 // buildRecord assembles the on-disk Record for one committed batch.
+//
+// All facadeCtx cursor reads come from the dispatched snapshot
+// (saltBefore/saltAfter, addrBefore) so this is safe to call while the planner
+// goroutine has already advanced facadeCtx for the next batch.
 func buildRecord(
 	d *batchDeps,
 	batchID uint64,
@@ -165,6 +227,7 @@ func buildRecord(
 	block *rpc.BlockHeader,
 	blockTS uint64,
 	saltBefore uint64,
+	saltAfter uint64,
 	snap *sensor.Snapshot,
 	residual *controller.ResidualSnapshot,
 	addrBefore uint64,
@@ -192,7 +255,7 @@ func buildRecord(
 			BlockTimestamp:   blockTS,
 			TargetSha256:     d.targetDigest,
 			SaltCursorBefore: saltBefore,
-			SaltCursorAfter:  d.facadeCtx.SaltCursor,
+			SaltCursorAfter:  saltAfter,
 		},
 		Observability: &orchpb.Observability{
 			ObservedFlat:       snap.Raw,

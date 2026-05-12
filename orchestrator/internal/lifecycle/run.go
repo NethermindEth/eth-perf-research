@@ -19,6 +19,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/builderpool"
@@ -272,7 +274,7 @@ func Run(ctx context.Context, cfg Config) error {
 		targetDigest: targetSha256Bytes(rawTarget.SHA256),
 	}
 
-	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, &currentObs, targetCh, rawTarget, mf)
+	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, currentObs, targetCh, rawTarget, mf)
 
 	// 14. Finalise manifest.
 	finishISO := time.Now().UTC().Format(time.RFC3339Nano)
@@ -356,77 +358,192 @@ func buildFacadeContext(t *target.Target, chainID, gasLimit uint64) *facade.Cont
 	}
 }
 
-// runLoop drives runOneBatch repeatedly until a termination condition fires.
-// Returns the termination reason and the last committed block (or nil).
+// runLoop drives the dispatch+commit pipeline until a termination condition
+// fires. Returns the termination reason and the last committed block (or nil).
+//
+// Two goroutines coordinated via a sync.WaitGroup (not errgroup): we want a
+// graceful drain when the planner stops on a normal termination predicate
+// (target reached, batch limit), so the commit goroutine MUST run until
+// close(pipe) regardless of whether the parent ctx is cancelled.
+//
+//   - PLANNER: reads the latest observation, calls dispatchBatch, sends the
+//     result to the commit goroutine. Owns batch-id increment, target reload,
+//     and termination predicates (so we don't dispatch a batch we'd discard).
+//     Closes pipe before returning.
+//   - COMMIT:  receives *dispatched, calls commitBatch, updates the shared
+//     observation pointer + lastBlock. Drains pipe to completion.
+//
+// The channel cap=1 provides natural backpressure: the planner blocks when the
+// commit goroutine is busy, so we never queue more than one unsent batch.
 func runLoop(
 	ctx context.Context,
 	cfg Config,
 	deps *batchDeps,
 	ctrlTarget **controller.Target,
-	currentObs **controller.Observation,
+	currentObs *controller.Observation,
 	targetCh chan *target.Target,
 	rawTarget *target.Target,
 	mf *manifest.Manifest,
 ) (string, *rpc.BlockHeader) {
-	var lastBlock *rpc.BlockHeader
-	batchID := deps.resumedFrom
-	if batchID > 0 {
-		batchID++ // continue after the resume point
+	startBatchID := deps.resumedFrom
+	if startBatchID > 0 {
+		startBatchID++
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return terminationSignal, lastBlock
-		case newT := <-targetCh:
-			_, newCtrl, _ := refreshTarget(newT)
-			*ctrlTarget = newCtrl
-			deps.target = newCtrl
-			deps.targetDigest = targetSha256Bytes(newT.SHA256)
-			mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
-				AppliedAtBatch: int(batchID),
-				AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
-				TargetSHA256:   newT.SHA256,
-				Shares:         cloneShares(newT.Shares),
-				TotalBytes:     newT.TotalBytes,
-			})
-			slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
-		default:
-		}
+	// Shared state.
+	obsPtr := &atomic.Pointer[controller.Observation]{}
+	obsPtr.Store(currentObs)
 
-		if deps.state.HasInstability(overshootThreshold, overshootWindowSize, overshootMaxTrips, overshootGrace) {
-			return terminationOvershoot, lastBlock
-		}
-		if reachedTarget(*currentObs, *ctrlTarget) {
-			return terminationTargetMet, lastBlock
-		}
-		if cfg.MaxBatches > 0 && batchID >= uint64(cfg.MaxBatches) {
-			return terminationBatchLimit, lastBlock
-		}
+	lastBlockPtr := &atomic.Pointer[rpc.BlockHeader]{}
 
-		res, err := runOneBatch(ctx, deps, batchID, *currentObs)
-		if err != nil {
-			if ctx.Err() != nil {
-				return terminationSignal, lastBlock
-			}
-			slog.Error("lifecycle: batch failed", "batch_id", batchID, "err", err)
-			return "error: " + err.Error(), lastBlock
-		}
-		if !res.committed {
-			// Forward-progress safety: skip without advancing batchID, but
-			// avoid a tight loop by sleeping briefly.
+	var (
+		termOnce   sync.Once
+		termReason atomic.Pointer[string]
+	)
+	setTerm := func(reason string) {
+		termOnce.Do(func() {
+			r := reason
+			termReason.Store(&r)
+		})
+	}
+
+	pipe := make(chan *dispatched, 1)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// PLANNER goroutine.
+	go func() {
+		defer wg.Done()
+		defer close(pipe)
+		batchID := startBatchID
+		idleBackoff := 50 * time.Millisecond
+
+		for {
+			// 1. Drain target reloads and respect cancellation.
 			select {
 			case <-ctx.Done():
-				return terminationSignal, lastBlock
-			case <-time.After(50 * time.Millisecond):
+				setTerm(terminationSignal)
+				return
+			case newT := <-targetCh:
+				_, newCtrl, _ := refreshTarget(newT)
+				*ctrlTarget = newCtrl
+				deps.target = newCtrl
+				deps.targetDigest = targetSha256Bytes(newT.SHA256)
+				mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
+					AppliedAtBatch: int(batchID),
+					AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
+					TargetSHA256:   newT.SHA256,
+					Shares:         cloneShares(newT.Shares),
+					TotalBytes:     newT.TotalBytes,
+				})
+				slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
+			default:
 			}
-			continue
-		}
 
-		lastBlock = res.blockHeader
-		*currentObs = res.postObs
-		batchID++
+			// 2. Termination predicates — check BEFORE dispatching so we don't
+			// build a batch we'd discard.
+			threshold := overshootThreshold
+			if env := os.Getenv("ORCH_OVERSHOOT_THRESHOLD"); env != "" {
+				if v, err := strconv.ParseFloat(env, 64); err == nil {
+					threshold = v
+				}
+			}
+			if deps.state.HasInstability(threshold, overshootWindowSize, overshootMaxTrips, overshootGrace) {
+				setTerm(terminationOvershoot)
+				return
+			}
+			obsSnapshot := obsPtr.Load()
+			if reachedTarget(obsSnapshot, *ctrlTarget) {
+				setTerm(terminationTargetMet)
+				return
+			}
+			if cfg.MaxBatches > 0 && batchID >= uint64(cfg.MaxBatches) {
+				setTerm(terminationBatchLimit)
+				return
+			}
+
+			// 3. Dispatch.
+			db, err := dispatchBatch(ctx, deps, batchID, obsSnapshot)
+			if err != nil {
+				if ctx.Err() != nil {
+					setTerm(terminationSignal)
+					return
+				}
+				slog.Error("lifecycle: dispatch failed", "batch_id", batchID, "err", err)
+				setTerm("error: " + err.Error())
+				return
+			}
+			if db == nil {
+				// No plan or zero txs — back off briefly without advancing batchID.
+				select {
+				case <-ctx.Done():
+					setTerm(terminationSignal)
+					return
+				case <-time.After(idleBackoff):
+				}
+				continue
+			}
+
+			// 4. Send to commit goroutine (backpressure: cap=1).
+			select {
+			case <-ctx.Done():
+				setTerm(terminationSignal)
+				return
+			case pipe <- db:
+			}
+			batchID++
+		}
+	}()
+
+	// COMMIT goroutine. Drains pipe to completion even on shutdown so we never
+	// orphan a dispatched batch (which would leave a stale pending sidecar).
+	go func() {
+		defer wg.Done()
+		for db := range pipe {
+			pre := obsPtr.Load()
+			// Use a fresh background ctx for commit when the parent is already
+			// cancelled but we still have one in-flight batch the planner sent:
+			// otherwise testing_commitBlockV1 would fail with ctx.Err() and we'd
+			// lose the work the planner already did.
+			commitCtx := ctx
+			if ctx.Err() != nil {
+				// Bail: parent cancelled and we don't want to retry network work.
+				// Leave the dispatched batch unconsumed (the pending sidecar from
+				// dispatchBatch was NOT written; commit writes it).
+				continue
+			}
+			res, err := commitBatch(commitCtx, deps, db, pre)
+			if err != nil {
+				if ctx.Err() != nil {
+					// Cancellation during commit. Stop draining.
+					continue
+				}
+				slog.Error("lifecycle: commit failed", "batch_id", db.batchID, "err", err)
+				setTerm("error: " + err.Error())
+				continue
+			}
+			if res != nil && res.committed {
+				obsPtr.Store(res.postObs)
+				lastBlockPtr.Store(res.blockHeader)
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	// Drain residual pending sidecar in case commit was interrupted mid-flight
+	// (commitBatch normally clears it; on cancel-during-commit we may have left
+	// a stale marker). Best-effort: errors are logged but don't fail the run.
+	if err := journal.ClearPending(deps.pendingPath); err != nil {
+		slog.Warn("lifecycle: clear pending on shutdown", "err", err)
 	}
+
+	reason := terminationSignal
+	if r := termReason.Load(); r != nil {
+		reason = *r
+	}
+	return reason, lastBlockPtr.Load()
 }
 
 // refreshTarget reloads the target and returns the controller projection.

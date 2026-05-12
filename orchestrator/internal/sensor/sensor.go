@@ -15,7 +15,7 @@ import (
 
 const (
 	defaultPollInterval = 100 * time.Millisecond
-	defaultDeadline     = 5 * time.Second
+	defaultDeadline     = 2 * time.Second
 )
 
 // ErrSensorTimeout is returned when blockNumber fails to reach the expected
@@ -77,7 +77,7 @@ func New(c *rpc.Client, opts ...SensorOption) *Sensor {
 }
 
 // Read polls statecomp_get until the returned blockNumber >= expected, or until
-// the deadline (default 5s) expires. Returns the matching snapshot on success.
+// the deadline (default 2s) expires. Returns the matching snapshot on success.
 //
 // On timeout, ErrSensorTimeout is returned together with the most recent
 // snapshot (which may be nil if no successful poll occurred). The two are
@@ -86,7 +86,36 @@ func New(c *rpc.Client, opts ...SensorOption) *Sensor {
 //
 // The caller's ctx is respected: cancellation returns immediately with
 // ctx.Err() wrapped.
+//
+// Read is a thin wrapper over ReadAfter: it waits for blockNumber > expected-1.
 func (s *Sensor) Read(ctx context.Context, expected uint64) (*Snapshot, error) {
+	if expected >= 1 {
+		return s.ReadAfter(ctx, expected-1)
+	}
+	// expected == 0: any poll satisfies "blockNumber >= 0", so we just return
+	// the first successful poll (or timeout).
+	return s.readAtLeast(ctx, 0)
+}
+
+// ReadAfter polls statecomp_get until the returned blockNumber > floor, or
+// until the deadline expires. Same error contract as Read: on timeout returns
+// (last_seen, ErrSensorTimeout) where last_seen may be nil if no poll
+// succeeded.
+func (s *Sensor) ReadAfter(ctx context.Context, floor uint64) (*Snapshot, error) {
+	return s.readForward(ctx, floor)
+}
+
+// PollOnce calls statecomp_get exactly once and returns whatever it sees.
+// No deadline beyond the caller's context; no looping. Suitable for callers
+// (like the orchestrator's commit loop) that don't actually need forward
+// progress — they just want a fresh observation if one is available, or
+// nothing if it costs too much.
+func (s *Sensor) PollOnce(ctx context.Context) (*Snapshot, error) {
+	return s.poll(ctx)
+}
+
+// readForward polls until blockNumber > floor or the deadline fires.
+func (s *Sensor) readForward(ctx context.Context, floor uint64) (*Snapshot, error) {
 	deadline := time.Now().Add(s.deadline)
 	dctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
@@ -95,25 +124,55 @@ func (s *Sensor) Read(ctx context.Context, expected uint64) (*Snapshot, error) {
 	ticker := time.NewTicker(s.pollInterval)
 	defer ticker.Stop()
 
-	// Poll immediately before waiting for the first tick.
 	for {
 		snap, err := s.poll(dctx)
 		if err == nil {
 			last = snap
-			if snap.BlockNumber >= expected {
+			if snap.BlockNumber > floor {
 				return snap, nil
 			}
 		}
 
-		// Wait for next tick or cancellation.
 		select {
 		case <-dctx.Done():
 			cause := dctx.Err()
 			if errors.Is(cause, context.DeadlineExceeded) {
-				return last, errors.Join(ErrSensorTimeout, fmt.Errorf("sensor: expected blockNumber %d, last seen %d: %w",
-					expected, blockNumberOf(last), cause))
+				return last, errors.Join(ErrSensorTimeout, fmt.Errorf("sensor: expected blockNumber > %d, last seen %d: %w",
+					floor, blockNumberOf(last), cause))
 			}
-			// Parent context cancelled.
+			return last, fmt.Errorf("sensor: context cancelled: %w", cause)
+		case <-ticker.C:
+		}
+	}
+}
+
+// readAtLeast polls until blockNumber >= minimum (used by Read(ctx, 0) to
+// return the first successful poll regardless of block number).
+func (s *Sensor) readAtLeast(ctx context.Context, minimum uint64) (*Snapshot, error) {
+	deadline := time.Now().Add(s.deadline)
+	dctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	var last *Snapshot
+	ticker := time.NewTicker(s.pollInterval)
+	defer ticker.Stop()
+
+	for {
+		snap, err := s.poll(dctx)
+		if err == nil {
+			last = snap
+			if snap.BlockNumber >= minimum {
+				return snap, nil
+			}
+		}
+
+		select {
+		case <-dctx.Done():
+			cause := dctx.Err()
+			if errors.Is(cause, context.DeadlineExceeded) {
+				return last, errors.Join(ErrSensorTimeout, fmt.Errorf("sensor: expected blockNumber >= %d, last seen %d: %w",
+					minimum, blockNumberOf(last), cause))
+			}
 			return last, fmt.Errorf("sensor: context cancelled: %w", cause)
 		case <-ticker.C:
 		}

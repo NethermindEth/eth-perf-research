@@ -158,6 +158,93 @@ func TestReadCancelledContextReturnsPromptly(t *testing.T) {
 	}
 }
 
+// TestReadAfter exercises ReadAfter's three core contracts.
+func TestReadAfter(t *testing.T) {
+	t.Run("returns_first_block_above_floor", func(t *testing.T) {
+		var counter atomic.Uint64
+		counter.Store(5)
+
+		_, c := newStatecompServer(t, func() uint64 { return counter.Load() })
+
+		// Simulate the chain advancing past the floor.
+		go func() {
+			for i := uint64(6); i <= 10; i++ {
+				time.Sleep(40 * time.Millisecond)
+				counter.Store(i)
+			}
+		}()
+
+		s := sensor.New(c,
+			sensor.WithPollInterval(20*time.Millisecond),
+			sensor.WithDeadline(2*time.Second),
+		)
+
+		snap, err := s.ReadAfter(context.Background(), 5)
+		if err != nil {
+			t.Fatalf("ReadAfter: %v", err)
+		}
+		if snap.BlockNumber <= 5 {
+			t.Errorf("expected blockNumber > 5, got %d", snap.BlockNumber)
+		}
+	})
+
+	t.Run("stale_returns_timeout_with_last_snapshot", func(t *testing.T) {
+		_, c := newStatecompServer(t, func() uint64 { return 42 })
+
+		s := sensor.New(c,
+			sensor.WithPollInterval(20*time.Millisecond),
+			sensor.WithDeadline(200*time.Millisecond),
+		)
+
+		snap, err := s.ReadAfter(context.Background(), 42)
+		if !errors.Is(err, sensor.ErrSensorTimeout) {
+			t.Fatalf("expected ErrSensorTimeout, got %v", err)
+		}
+		if snap == nil {
+			t.Fatal("expected non-nil last snapshot on timeout, got nil")
+		}
+		if snap.BlockNumber != 42 {
+			t.Errorf("expected last block 42, got %d", snap.BlockNumber)
+		}
+	})
+
+	t.Run("cancelled_context_returns_within_200ms", func(t *testing.T) {
+		// Server responds slowly so we can confirm cancellation short-circuits.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(500 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintln(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		}))
+		t.Cleanup(srv.Close)
+
+		c, err := rpc.NewClient(srv.URL, rpc.WithTimeout(1*time.Second))
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+
+		s := sensor.New(c,
+			sensor.WithPollInterval(10*time.Millisecond),
+			sensor.WithDeadline(5*time.Second),
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		start := time.Now()
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+		}()
+
+		_, err = s.ReadAfter(ctx, 999)
+		elapsed := time.Since(start)
+		if err == nil {
+			t.Fatal("expected error on cancelled context, got nil")
+		}
+		if elapsed > 200*time.Millisecond {
+			t.Errorf("ReadAfter took %v after cancel, expected < 200ms", elapsed)
+		}
+	})
+}
+
 // TestSnapshotFields verifies that trie byte fields are correctly parsed.
 func TestSnapshotFields(t *testing.T) {
 	const bn = uint64(42)

@@ -78,8 +78,17 @@ func TestLifecycleIntegration(t *testing.T) {
 		Verbs:              []string{"eoatx"},
 	}
 
+	runStart := time.Now()
 	if err := Run(ctx, cfg); err != nil && ctx.Err() == nil {
 		t.Fatalf("lifecycle.Run: %v", err)
+	}
+	elapsed := time.Since(runStart)
+	t.Logf("5-batch pipelined run elapsed: %v", elapsed)
+	// Generous upper bound — 5 batches with mocks should comfortably fit in 5s
+	// even on a slow CI runner. A regression that re-serialises dispatch+commit
+	// would blow past this.
+	if elapsed > 5*time.Second {
+		t.Fatalf("expected pipelined 5-batch run to complete in <=5s, got %v", elapsed)
 	}
 
 	// ── assertions ───────────────────────────────────────────────────────────

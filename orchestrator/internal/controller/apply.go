@@ -3,6 +3,8 @@ package controller
 import (
 	"fmt"
 	"math"
+	"os"
+	"strconv"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 )
@@ -95,7 +97,13 @@ func (s *State) pushOvershoot(residualNorm float64, commanded [3]float64) {
 	}
 	denom := math.Max(l2Norm3(commanded), residualNormFloor)
 	ratio := residualNorm / denom
-	tripped := ratio > overshootThreshold
+	threshold := overshootThreshold
+	if env := os.Getenv("ORCH_OVERSHOOT_THRESHOLD"); env != "" {
+		if v, err := strconv.ParseFloat(env, 64); err == nil {
+			threshold = v
+		}
+	}
+	tripped := ratio > threshold
 
 	if s.overshootWindow == nil {
 		return
