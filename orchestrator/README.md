@@ -1,66 +1,89 @@
-# orchestrator
+# orchestrator (Go)
 
-Python package that drives a Nethermind node's state composition toward a mainnet-faithful target
-via closed-loop feedback.
+Bloating feedback-loop orchestrator for Nethermind. Drives `testing_commitBlockV1` in a closed control loop, packing EELS-based spamoor scenarios into blocks until the target state composition is reached.
 
-One process, one loop, two artifacts per run:
+This is a Go rewrite of the Python orchestrator (now at `../orchestrator-py/`). The EELS verb builders stay in Python and are invoked via a subprocess pool over framed protobuf-stdio.
 
-- `state/orchestrator.journal.jsonl` — crash-resilient JSONL journal (chain-hashed `replay_core`).
-- `state/payloads.rlp` — append-only `ExecutionPayloadV3` stream for cross-client reproduction.
+## Architecture
 
-See [`final-design-v3.md`](../.omc/co-design/simplify-20260422/final-design-v3.md) for the
-normative specification.
-
-## Quick start
-
-The canonical invocation is via Docker Compose, which injects all required env vars:
-
-```bash
-docker compose up orchestrator
+```
+┌─ Go orchestrator ──────────────────────────────────────────────┐
+│                                                                 │
+│  controller ─▶ facade.Dispatcher ─▶ signer (in-process)         │
+│      ▲              │                    │                      │
+│      │              ▼                    ▼                      │
+│      │     ┌─ builderpool ──┐    testing_commitBlockV1          │
+│      │     │ N=NumCPU pyws  │           │                       │
+│      │     └────────────────┘           │                       │
+│      │             │                    │                       │
+│      │     ┌─ pyworker ─────┐           │                       │
+│      │     │ orchestrator.  │           │                       │
+│      │     │ facade.verbs   │           ▼                       │
+│      │     │ + EELS         │      Nethermind                   │
+│      │     └────────────────┘           │                       │
+│      │                                  ▼                       │
+│      └────────────── sensor (statecomp_get)                     │
+│                                                                 │
+│  journal.bin (protobuf binlog + BLAKE3 chain hash)              │
+│  payloads.rlp (4-B-LE-prefixed ExecutionPayloadV3 RLP)          │
+│  run-manifest.json                                              │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-For direct invocation (see `uv run orchestrator --help` for the full list of required flags):
+## Build
 
-```bash
-uv sync
-uv run orchestrator \
-  --rpc-url http://localhost:8545 \
-  --state-dir ./state \
-  --target-yaml target.yaml \
-  --genesis-sha256 <hex-sha256-of-genesis.json> \
-  --plugin-git-sha <git-sha> \
-  --nethermind-commit-sha <git-sha> \
-  --dotnet-runtime-major 8
+```
+make build       # local binary at bin/orchestrator
+make linux       # static Linux/amd64 binary at bin/orchestrator.linux-amd64
+make test        # all tests, race detector clean
 ```
 
-Resume mode is auto-detected: if `state/orchestrator.journal.jsonl` exists, the orchestrator
-verifies head + chain identity hash + journal chain hash and continues. Mismatch → refuses with a diagnostic.
+## Run
 
-Replay a completed run:
-
-```bash
-uv run orchestrator --replay ./state/orchestrator.journal.jsonl --rpc-url http://localhost:8545
+```
+ORCH_DEPLOY_PRIVATE_KEY=0x... \
+bin/orchestrator run \
+  --rpc-url http://nethermind:8545 \
+  --state-dir /var/orch/state \
+  --target-yaml /etc/orch/target.yaml \
+  --genesis-sha256 <hex> \
+  --builder-worker-cmd "python -m builder_worker" \
+  --builder-workers 8
 ```
 
-## Cross-client determinism
+## Subcommands
 
-`payloads.rlp` is an append-only stream of canonical `ExecutionPayloadV3` blocks.
-Any EL client speaking the Engine API can replay the stream; the `stateRoot`
-on the final block must match `final_state_root` in `run-manifest.json`. Bit-exact
-match on every payload is the design's normative claim — the journal + payload
-stream is a deterministic byte-level reproduction recipe regardless of which EL
-produced it. A reference cross-client replay harness lives outside the PR scope.
+- `run` — closed-loop controller against Nethermind.
+- `replay --payloads payloads.rlp --manifest run-manifest.json --rpc-url <engine-api>` — cross-client replay via Engine API.
+- `verify-journal --path journal.bin` — re-derive the chain hash and print the final hash + record count.
 
-## Docker
+## Layout
 
-```bash
-docker compose up -d       # starts Nethermind + orchestrator with an ephemeral JWT
-docker compose down        # shreds JWT, stops containers
+```
+cmd/orchestrator/         cobra entry + subcommand wiring
+internal/
+  lifecycle/              main loop, startup decision, batch pipeline
+  controller/             pick_next_batch + apply_observation
+  mathx/                  Michelot simplex + tanh-saturated α
+  facade/                 dispatcher: builder pool → signer
+  builderpool/            Python subprocess pool client
+  signer/                 in-process ECDSA via go-ethereum
+  rpc/                    JSON-RPC client + JWT round-tripper
+  sensor/                 statecomp_get poller
+  journal/                protobuf binlog + BLAKE3 chain hash
+  payloads/               ExecutionPayloadV3 RLP stream
+  manifest/               run-manifest.json
+  target/                 YAML loader + fsnotify watcher
+  referencef/             REFERENCE_F.yaml loader
+  probe/                  F-matrix probe
+  replay/                 Engine API cross-client driver
+  lock/                   POSIX flock(2) state-dir lock
+  orchpb/                 generated protobuf bindings
+proto/                    .proto sources
+pyworker/                 Python subprocess shim hosting EELS verbs
 ```
 
-## Tests
+## See also
 
-```bash
-uv sync --all-extras
-uv run pytest
-```
+- The planning document at `~/.claude/plans/let-s-create-a-structure-serialized-popcorn.md`
+- The legacy Python implementation at `../orchestrator-py/` (will be deleted on cutover)

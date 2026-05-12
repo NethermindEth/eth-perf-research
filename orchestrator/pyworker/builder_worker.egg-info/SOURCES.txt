@@ -1,0 +1,15 @@
+pyproject.toml
+builder_worker/__init__.py
+builder_worker/__main__.py
+builder_worker/bridge.py
+builder_worker.egg-info/PKG-INFO
+builder_worker.egg-info/SOURCES.txt
+builder_worker.egg-info/dependency_links.txt
+builder_worker.egg-info/requires.txt
+builder_worker.egg-info/top_level.txt
+builder_worker/_proto/__init__.py
+builder_worker/_proto/builder_pb2.py
+builder_worker/_proto/builder_pb2.pyi
+builder_worker/_proto/txsigner_pb2.py
+builder_worker/_proto/txsigner_pb2.pyi
+tests/test_bridge.py

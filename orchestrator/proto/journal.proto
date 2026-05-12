@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package journal;
+
+option go_package = "github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb;orchpb";
+
+// ReplayCore — the chain-hashed canonical content of a batch record.
+// Field numbers are stable; proto wire-canonical encoding (field-number order)
+// makes this trivially deterministic. The chain hash is BLAKE3(prev || replay_core_bytes).
+message ReplayCore {
+  uint32 schema = 1;
+  string verb = 2;
+  uint64 deadline_bytes = 3;
+  bytes start_address = 4;
+  bytes end_address = 5;
+  string status = 6;
+  bytes block_hash = 7;
+  uint64 block_number = 8;
+  uint64 block_timestamp = 9;
+  bytes target_sha256 = 10;
+  bytes chain_hash = 11;
+  uint64 salt_cursor_before = 12;
+  uint64 salt_cursor_after = 13;
+}
+
+// Observability — non-hashed diagnostics. Stored on the record but excluded from chain hash.
+message Observability {
+  bytes observed_flat = 1;
+  map<string, double> coeffs_before = 2;
+  map<string, double> coeffs_after = 3;
+  map<string, double> alpha_state = 4;
+  map<string, double> sigma_innov = 5;
+  map<string, double> alpha_current = 6;
+  double innovation_ratio = 7;
+  double residual_norm = 8;
+  bytes statecomp_snapshot = 9;
+  bool statecomp_snapshot_stale = 10;
+  map<string, double> mix_simplex = 11;
+  double epsilon = 12;
+  uint64 gas_used = 13;
+  map<string, double> verb_gas_factors = 14;
+  uint32 tx_count = 15;
+  uint64 dispatched_rlp_bytes = 16;
+}
+
+message Record {
+  string session_id = 1;
+  uint64 resumed_from_batch = 2;
+  string ts_iso = 3;
+  uint64 batch_id = 4;
+  ReplayCore replay_core = 5;
+  Observability observability = 6;
+}
+
+// PendingBatch — sidecar written before commit, cleared after journal append.
+// Drives crash-recovery reconciliation against the chain.
+message PendingBatch {
+  uint64 batch_id = 1;
+  string verb = 2;
+  uint64 start_address = 3;
+  uint64 count = 4;
+  bytes target_sha256 = 5;
+  string session_id = 6;
+  uint64 salt_cursor_before = 7;
+  repeated bytes signed_tx_hashes = 8;
+  string ts_iso = 9;
+}
