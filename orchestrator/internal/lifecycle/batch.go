@@ -3,7 +3,6 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,38 +56,6 @@ type batchResult struct {
 	postObs     *controller.Observation
 }
 
-// updateFeePolicy refreshes the facade context's EIP-1559 fee policy and
-// block gas limit from the latest block. Safe for concurrent callers: stores
-// happen through atomic accessors (SetFeePolicy / BlockGasLimit is updated
-// only on the commit goroutine — see note below).
-//
-// Concurrency note: BlockGasLimit is plain uint64 and could race when several
-// planner goroutines call updateFeePolicy at once. The values written are
-// identical for the same head block, so the race is benign (same-value writes),
-// but to keep the race detector happy and avoid relying on Intel guarantees
-// the lifecycle invokes updateFeePolicy only from the commit goroutine when
-// running with cfg.Planners>1. Currently every planner calls it
-// pre-dispatch; same-block multi-write tolerated.
-func updateFeePolicy(ctx context.Context, rpcCli *rpc.Client, fctx *facade.Context) (*rpc.BlockHeader, error) {
-	head, err := rpcCli.BlockByNumber(ctx, -1)
-	if err != nil {
-		return nil, fmt.Errorf("lifecycle: head for fee policy: %w", err)
-	}
-	baseFee := head.BaseFee
-	if baseFee == nil {
-		baseFee = new(big.Int)
-	}
-	tip := big.NewInt(defaultPriorityTipWei)
-	// max_fee = baseFee*2 + tip (matches Python heuristic).
-	maxFee := new(big.Int).Mul(baseFee, big.NewInt(2))
-	maxFee.Add(maxFee, tip)
-	fctx.SetFeePolicy(maxFee, tip)
-	if head.GasLimit > 0 {
-		fctx.SetBlockGasLimit(head.GasLimit)
-	}
-	return head, nil
-}
-
 // dispatched carries the unsigned state produced by dispatchBatch into
 // commitBatch. It is the unit of work flowing between the pipeline goroutines.
 //
@@ -128,10 +95,6 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 	plan := d.state.Pick(currentObs, d.target, defaultTotalBatchBytes, d.facadeCtx.LoadBlockGasLimit())
 	if plan == nil {
 		return nil, nil
-	}
-
-	if _, err := updateFeePolicy(ctx, d.rpc, d.facadeCtx); err != nil {
-		return nil, err
 	}
 
 	// Atomic reservation: pin disjoint nonce and salt ranges + assign a

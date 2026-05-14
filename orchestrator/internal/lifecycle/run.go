@@ -311,7 +311,27 @@ func Run(ctx context.Context, cfg Config) error {
 		defer watcher.Close()
 	}
 
-	// 13. Hot loop.
+	// 13. Prime fee policy once synchronously so the first batch has a valid
+	// max-fee/tip pair before any planner runs, then start the background
+	// refresher (single RPC per tick, independent of planner count).
+	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx); err != nil {
+		return fmt.Errorf("lifecycle: prime fee policy: %w", err)
+	}
+	feeCtx, feeCancel := context.WithCancel(ctx)
+	var feeWG sync.WaitGroup
+	feeWG.Add(1)
+	go func() {
+		defer feeWG.Done()
+		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, defaultFeePolicyInterval); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("lifecycle: fee policy loop exited", "err", err)
+		}
+	}()
+	defer func() {
+		feeCancel()
+		feeWG.Wait()
+	}()
+
+	// 14. Hot loop.
 	dispatcher := facade.New(pool, signr)
 	deps := &batchDeps{
 		rpc:          rpcCli,
@@ -333,7 +353,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, currentObs, targetCh, rawTarget, mf)
 
-	// 14. Finalise manifest.
+	// 15. Finalise manifest.
 	finishISO := time.Now().UTC().Format(time.RFC3339Nano)
 	mf.FinishedAtISO = finishISO
 	mf.Terminated = termination
