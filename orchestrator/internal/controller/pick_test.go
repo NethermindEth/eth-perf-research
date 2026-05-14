@@ -181,8 +181,16 @@ func TestComputeGasBasedMaxTable(t *testing.T) {
 	const blockGasLimit uint64 = 8_000_000_000
 	ceiling := uint64(float64(blockGasLimit) * gasCapFraction)
 
+	verbs := make([]string, 0, len(baseGasPerVerb))
+	for v := range baseGasPerVerb {
+		verbs = append(verbs, v)
+	}
+	ref := makeRef(verbs, 10.0)
+	var identity [32]byte
+	s := NewState(verbs, ref, identity, 0.0)
+
 	for verb, perTx := range baseGasPerVerb {
-		got := computeGasBasedMax(verb, blockGasLimit)
+		got := s.computeGasBasedMax(verb, blockGasLimit)
 		if got <= 0 {
 			t.Errorf("verb=%s: computeGasBasedMax=%d, want > 0", verb, got)
 			continue

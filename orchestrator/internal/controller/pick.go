@@ -23,46 +23,24 @@ const gasCapFraction = 0.95
 // fit under the dispatcher's hard 0.95 ceiling.
 const gasCapSafetyMargin = 1.50
 
-// baseGasPerVerb is the per-tx gas budget used by Pick when sizing batches.
-// Values are empirical upper-bounds observed in bloatnet journals; the safety
-// margin (gasCapSafetyMargin) is multiplied on top in computeGasBasedMax. Some
-// verbs (storagespam, gasburnertx) genuinely consume 1.5-2M+ gas per tx, so
-// under-estimating crashes the dispatcher's hard 0.95 × block-gas assertion.
-var baseGasPerVerb = map[string]uint64{
-	"eoatx":           21_000,
-	"deploytx":        200_000,
-	"factorydeploytx": 200_000,
-	"storagespam":     2_500_000, // empirical: 2.0M/tx observed
-	"storagerefundtx": 100_000,
-	"erc20tx":         100_000,
-	"erc20_bloater":   1_000_000,
-	"uniswap_swaps":   300_000,
-	"gasburnertx":     1_500_000, // empirical: 1.5M/tx observed
-	"calltx":          100_000,
-	"evm_fuzz":        1_000_000,
-	"noop":            21_000,
-}
-
-// defaultBaseGasPerVerb is used when a verb is missing from baseGasPerVerb.
-// Conservative high value so unknown verbs do not blow the gas cap.
-const defaultBaseGasPerVerb uint64 = 1_000_000
-
 // computeGasBasedMax returns the maximum number of txs of `verb` that fit
 // under `gasCapFraction × blockGasLimit` with a `gasCapSafetyMargin` safety
 // factor. Returns math.MaxInt when blockGasLimit is zero (no cap configured).
-func computeGasBasedMax(verb string, blockGasLimit uint64) int {
+//
+// Sourcing per-tx gas: once VerbStats has accumulated verbStatsColdStartN
+// samples for verb, the EWMA gas-per-tx is used. Below that threshold the
+// static baselineGasPerVerb table is consulted so a one-off first batch
+// can't blow the dispatcher's hard 0.95 × block-gas ceiling.
+func (s *State) computeGasBasedMax(verb string, blockGasLimit uint64) int {
 	if blockGasLimit == 0 {
 		return math.MaxInt32
 	}
-	perTx, ok := baseGasPerVerb[verb]
-	if !ok {
-		perTx = defaultBaseGasPerVerb
-	}
+	perTx := s.gasPerTxEstimate(verb)
 	if perTx == 0 {
 		return math.MaxInt32
 	}
 	ceiling := float64(blockGasLimit) * gasCapFraction
-	allowed := ceiling / (float64(perTx) * gasCapSafetyMargin)
+	allowed := ceiling / (perTx * gasCapSafetyMargin)
 	if allowed < 1 {
 		return 1
 	}
@@ -70,6 +48,18 @@ func computeGasBasedMax(verb string, blockGasLimit uint64) int {
 		return math.MaxInt32
 	}
 	return int(allowed)
+}
+
+// gasPerTxEstimate returns the EWMA gas-per-tx when samples >= cold-start
+// threshold, else the static baseline.
+func (s *State) gasPerTxEstimate(verb string) float64 {
+	vs := s.GetVerbStats(verb)
+	if vs != nil && vs.Samples >= verbStatsColdStartN {
+		if v := vs.GasPerTx.Value(); v > 0 {
+			return v
+		}
+	}
+	return float64(baselineGasPerVerb(verb))
 }
 
 // Pick is goroutine-safe for concurrent readers. State fields are written only
@@ -253,7 +243,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 			byteBasedMax = nMaxHardCeil
 		}
 	}
-	gasBasedMax := computeGasBasedMax(topVerb, blockGasLimit)
+	gasBasedMax := s.computeGasBasedMax(topVerb, blockGasLimit)
 	if gasBasedMax > nMaxHardCeil {
 		gasBasedMax = nMaxHardCeil
 	}
@@ -449,25 +439,7 @@ func applyGasAwareBias(verbs []string, xProj []float64, s *State) []float64 {
 			weights[i] = out[i]
 			continue
 		}
-		// Per-tx bytes estimate: sum of F over axes (F is the per-verb-per-axis
-		// bytes-per-tx coefficient maintained by Apply).
-		bytesPerTx := 0.0
-		if row, ok := s.F[v]; ok {
-			for _, ax := range Axes {
-				bytesPerTx += row[ax]
-			}
-		}
-		if bytesPerTx < 0 {
-			bytesPerTx = 0
-		}
-		gas, ok := baseGasPerVerb[v]
-		if !ok {
-			gas = defaultBaseGasPerVerb
-		}
-		if gas == 0 {
-			gas = defaultBaseGasPerVerb
-		}
-		eff := bytesPerTx / float64(gas)
+		eff := s.bytesPerGasEstimate(v)
 		// Floor to avoid 0^x edge cases (0^0 = 1 in Go's math.Pow); zero-byte
 		// verbs (e.g. gasburnertx) should be squashed near-zero, not promoted.
 		// We use 1e-18 → eff^0.5 ≈ 1e-9, which after re-normalisation drops the

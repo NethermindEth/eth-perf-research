@@ -215,7 +215,7 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *control
 		BlockNumber:      snap.BlockNumber,
 	}
 
-	residual, err := d.state.Apply(pre, post, db.plan, db.res.TxCount, db.res.RLPBytes)
+	residual, err := d.state.Apply(pre, post, db.plan, db.res.TxCount, db.res.RLPBytes, block.GasUsed)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: controller.Apply: %w", err)
 	}

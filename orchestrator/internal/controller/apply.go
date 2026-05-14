@@ -12,11 +12,14 @@ import (
 const avgTxRLPDecayNew = 0.3
 const avgTxRLPDecayOld = 0.7
 
-// Apply updates F, Sigma, Alpha, and AvgTxRLP after a committed batch.
-// pre is the observation taken BEFORE the block, post is taken AFTER.
-// txCount is the number of txs actually included; dispatchedRLPBytes is their total RLP size.
+// Apply updates F, Sigma, Alpha, AvgTxRLP, and VerbStats after a committed
+// batch. pre is the observation taken BEFORE the block, post is taken AFTER.
+// txCount is the number of txs actually included; dispatchedRLPBytes is their
+// total RLP size; gasUsed is the committed block's gas consumption. gasUsed
+// may be zero on legacy call paths or before block info is plumbed through;
+// VerbStats updates are skipped in that case.
 // Returns a ResidualSnapshot and an error if txCount <= 0.
-func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, dispatchedRLPBytes uint64) (*ResidualSnapshot, error) {
+func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, dispatchedRLPBytes uint64, gasUsed uint64) (*ResidualSnapshot, error) {
 	if txCount <= 0 {
 		return nil, fmt.Errorf("controller: txCount must be positive, got %d", txCount)
 	}
@@ -71,6 +74,16 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 
 	// Update overshoot window.
 	s.pushOvershoot(residualNorm, commanded)
+
+	// Per-verb gas/bytes EWMA: skipped when gasUsed is zero (legacy call path)
+	// or when no RLP bytes were dispatched (bytesPerTx would be undefined).
+	if gasUsed > 0 && txCount > 0 {
+		bytesPerTx := 0.0
+		if dispatchedRLPBytes > 0 {
+			bytesPerTx = float64(dispatchedRLPBytes) / float64(txCount)
+		}
+		s.UpdateVerbStats(verb, gasUsed, uint64(txCount), bytesPerTx)
+	}
 
 	perAxis := map[Axis]float64{
 		AxisAccounts: diff[0],

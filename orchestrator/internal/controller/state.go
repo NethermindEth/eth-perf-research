@@ -69,6 +69,14 @@ type State struct {
 	overshootHead   int
 	overshootFilled int
 
+	// verbStatsMu guards the per-verb EWMA stats. UpdateVerbStats (commit
+	// goroutine) takes the write lock; Pick (planner goroutines) takes the
+	// read lock via GetVerbStats. The EWMA structs themselves are mutated
+	// only under the write lock, so a concurrent read sees a consistent
+	// snapshot.
+	verbStatsMu sync.RWMutex
+	VerbStats   map[string]*VerbStats
+
 	lastResidualL2 float64
 }
 
@@ -117,6 +125,7 @@ func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte
 		BatchID:        0,
 		ChainIdentity:  chainIdentity,
 		Epsilon:        epsilon,
+		VerbStats:      make(map[string]*VerbStats),
 		lastResidualL2: 0,
 	}
 }

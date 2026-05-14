@@ -103,7 +103,7 @@ func TestApplyMovesFInExpectedDirection(t *testing.T) {
 	plan := &BatchPlan{Verb: "eoa_transfer", DeadlineBytes: 10000, Mix: map[string]float64{"eoa_transfer": 1.0}}
 	fBefore := s.F["eoa_transfer"][AxisAccounts]
 
-	snap, err := s.Apply(pre, post, plan, 10, 15000)
+	snap, err := s.Apply(pre, post, plan, 10, 15000, 0)
 	if err != nil {
 		t.Fatalf("Apply returned error: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestApplyIncrementsBatchID(t *testing.T) {
 	post := &Observation{AccountTrieBytes: 500}
 
 	for i := 1; i <= 3; i++ {
-		if _, err := s.Apply(pre, post, plan, 1, 1500); err != nil {
+		if _, err := s.Apply(pre, post, plan, 1, 1500, 0); err != nil {
 			t.Fatalf("Apply %d: %v", i, err)
 		}
 		if s.BatchID != uint64(i) {
@@ -149,7 +149,7 @@ func TestApplyErrorOnZeroTxCount(t *testing.T) {
 	var identity [32]byte
 	s := NewState(verbs, ref, identity, 0.0)
 	plan := &BatchPlan{Verb: "eoa_transfer", DeadlineBytes: 1000, Mix: map[string]float64{"eoa_transfer": 1.0}}
-	_, err := s.Apply(zeroObs(), zeroObs(), plan, 0, 0)
+	_, err := s.Apply(zeroObs(), zeroObs(), plan, 0, 0, 0)
 	if err == nil {
 		t.Fatal("expected error for txCount=0, got nil")
 	}
@@ -233,7 +233,7 @@ func TestResidualL2NormHandComputed(t *testing.T) {
 	post := &Observation{AccountTrieBytes: 150, StorageTrieBytes: 150, CodeBytesTotal: 150}
 	plan := &BatchPlan{Verb: "v", DeadlineBytes: 10000, Mix: map[string]float64{"v": 1.0}}
 
-	snap, err := s.Apply(pre, post, plan, 10, 15000)
+	snap, err := s.Apply(pre, post, plan, 10, 15000, 0)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 	post := &Observation{AccountTrieBytes: 100}
 
 	// dispatched = 2000 bytes over 2 txs → observed_avg = 1000 (same as prev → EWMA stable)
-	if _, err := s.Apply(pre, post, plan, 2, 2000); err != nil {
+	if _, err := s.Apply(pre, post, plan, 2, 2000, 0); err != nil {
 		t.Fatal(err)
 	}
 	want := 0.3*1000.0 + 0.7*1000.0
@@ -278,7 +278,7 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 
 	// Now observed_avg = 2000, prev = 1000.
 	s.AvgTxRLP["v"] = 1000.0
-	if _, err := s.Apply(pre, post, plan, 1, 2000); err != nil {
+	if _, err := s.Apply(pre, post, plan, 1, 2000, 0); err != nil {
 		t.Fatal(err)
 	}
 	want2 := 0.3*2000.0 + 0.7*1000.0
