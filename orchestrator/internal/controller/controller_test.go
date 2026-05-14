@@ -51,7 +51,7 @@ func TestPickSingleVerbReturnsThatVerb(t *testing.T) {
 	s := NewState(verbs, ref, identity, 0.0)
 
 	tgt := makeTarget(1_000_000)
-	plan := s.Pick(zeroObs(), tgt, 4_000_000)
+	plan := s.Pick(zeroObs(), tgt, 4_000_000, 0)
 
 	if plan.Verb != "eoa_transfer" {
 		t.Fatalf("expected eoa_transfer, got %s", plan.Verb)
@@ -79,9 +79,9 @@ func TestPickDeterministicWithEpsilonZero(t *testing.T) {
 	tgt := makeTarget(10_000_000)
 	obs := zeroObs()
 
-	first := s.Pick(obs, tgt, 4_000_000).Verb
+	first := s.Pick(obs, tgt, 4_000_000, 0).Verb
 	for i := 0; i < 10; i++ {
-		got := s.Pick(obs, tgt, 4_000_000).Verb
+		got := s.Pick(obs, tgt, 4_000_000, 0).Verb
 		if got != first {
 			t.Fatalf("non-deterministic: got %s on iteration %d, want %s", got, i, first)
 		}

@@ -11,11 +11,13 @@
 package lifecycle
 
 import (
+	"container/heap"
 	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -29,12 +31,30 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/lock"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/metrics"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/sensor"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/signer"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/target"
 )
+
+// batchQueue is a min-heap over *dispatched ordered by seqID. The commit
+// goroutine uses it to replay batches in nonce-correct order regardless of
+// the (out-of-order) completion order of the planner goroutines.
+type batchQueue []*dispatched
+
+func (q batchQueue) Len() int           { return len(q) }
+func (q batchQueue) Less(i, j int) bool { return q[i].seqID < q[j].seqID }
+func (q batchQueue) Swap(i, j int)      { q[i], q[j] = q[j], q[i] }
+func (q *batchQueue) Push(x any)        { *q = append(*q, x.(*dispatched)) }
+func (q *batchQueue) Pop() any {
+	old := *q
+	n := len(old)
+	x := old[n-1]
+	*q = old[:n-1]
+	return x
+}
 
 // Config is the top-level configuration for the lifecycle run.
 type Config struct {
@@ -46,6 +66,10 @@ type Config struct {
 	ReferenceFPath      string
 	ManifestPath        string
 	MaxBatches          int
+	// Planners is the number of parallel planner goroutines sharing one master
+	// signer via atomic nonce reservation. Default 4. Set to 1 for the old
+	// sequential pipeline behaviour.
+	Planners            int
 	EnableProbe         bool
 	DeployPrivateKey    string
 	BuilderWorkerCmd    []string
@@ -58,10 +82,11 @@ type Config struct {
 	PluginGitSHA        string
 	NethermindCommitSHA string
 	DotnetRuntimeMajor  string
+	MetricsAddr         string // TCP address for the Prometheus /metrics endpoint (default ":9101")
 }
 
 const (
-	defaultEpsilon         = 0.05
+	defaultEpsilon         = 0.5
 	defaultTotalBatchBytes = 8 * 1024 * 1024 // Engine API hard cap
 	defaultAddressStride   = uint64(1) << 40
 	terminationOvershoot   = "overshoot"
@@ -156,6 +181,28 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("lifecycle: signer: %w", err)
 	}
 
+	// 7a. Metrics registry + HTTP server.
+	metricsReg := metrics.New()
+	metricsReg.Epsilon.Set(cfg.Epsilon)
+	metricsSrv := &http.Server{
+		Addr:    cfg.MetricsAddr,
+		Handler: metricsReg.Handler(),
+	}
+	go func() {
+		slog.Info("lifecycle: metrics listening", "addr", cfg.MetricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Warn("lifecycle: metrics server error", "err", err)
+		}
+	}()
+	defer func() {
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutCancel()
+		if err := metricsSrv.Shutdown(shutCtx); err != nil {
+			slog.Warn("lifecycle: metrics server shutdown", "err", err)
+		}
+		slog.Info("lifecycle: metrics server stopped")
+	}()
+
 	// 7. Open builder pool, sensor, journal writer, payloads writer.
 	pool, err := builderpool.Open(ctx, builderpool.Config{
 		Cmd:     cfg.BuilderWorkerCmd,
@@ -208,20 +255,21 @@ func Run(ctx context.Context, cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("lifecycle: ORCH_INITIAL_ADDRESS_CURSOR: %w", err)
 		}
-		facadeCtx.AddressCursor = v
+		facadeCtx.AddressCursor.Store(v)
 	} else if decision.Mode == modeFresh {
 		n, err := rpcCli.TransactionCount(ctx, signr.Address())
 		if err != nil {
 			return fmt.Errorf("lifecycle: query master nonce: %w", err)
 		}
-		facadeCtx.AddressCursor = n
+		facadeCtx.AddressCursor.Store(n)
 		slog.Info("lifecycle: master nonce primed from RPC", "address", signr.Address().Hex(), "nonce", n)
 	}
 
-	// 10. Initial observation from sensor. Use expected=0: we don't care which
-	// block we start from — the sensor often lags chain head by 1 block, and
-	// the controller will see post-commit deltas anyway.
-	initialSnap, err := sens.Read(ctx, 0)
+	// 10. Initial observation from sensor. Loop until the plugin returns valid
+	// trie stats — during a bootstrap scan, state-comp returns all zeros. The
+	// cycle is sensor → scenario → bloat → sensor, so a blind start (zero stats)
+	// would feed garbage into the controller. Wait for the plugin instead.
+	initialSnap, err := waitForValidSensor(ctx, sens)
 	if err != nil {
 		return fmt.Errorf("lifecycle: initial sensor read: %w", err)
 	}
@@ -232,8 +280,14 @@ func Run(ctx context.Context, cfg Config) error {
 		BlockNumber:      initialSnap.BlockNumber,
 	}
 
+	// 10a. Seed initial ObservedFlatBytes gauges.
+	metricsReg.ObservedFlatBytes.WithLabelValues("accounts").Set(float64(currentObs.AccountTrieBytes))
+	metricsReg.ObservedFlatBytes.WithLabelValues("storage").Set(float64(currentObs.StorageTrieBytes))
+	metricsReg.ObservedFlatBytes.WithLabelValues("code").Set(float64(currentObs.CodeBytesTotal))
+
 	// 11. Manifest.
 	sessionID := newSessionID()
+	metricsReg.SessionID.WithLabelValues(sessionID).Set(1)
 	manifestPath := cfg.ManifestPath
 	if manifestPath == "" {
 		manifestPath = cfg.StateDir + "/run-manifest.json"
@@ -272,6 +326,9 @@ func Run(ctx context.Context, cfg Config) error {
 		resumedFrom:  decision.ResumedFromBatch,
 		target:       ctrlTarget,
 		targetDigest: targetSha256Bytes(rawTarget.SHA256),
+		metricsReg:   metricsReg,
+		reserveMu:    &sync.Mutex{},
+		seqCounter:   &atomic.Uint64{},
 	}
 
 	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, currentObs, targetCh, rawTarget, mf)
@@ -314,6 +371,18 @@ func withDefaults(cfg Config) Config {
 	if len(cfg.Verbs) == 0 {
 		cfg.Verbs = defaultVerbs()
 	}
+	if cfg.MetricsAddr == "" {
+		cfg.MetricsAddr = ":9101"
+	}
+	// ORCH_PLANNERS env var overrides the flag/struct value when set.
+	if raw := os.Getenv("ORCH_PLANNERS"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			cfg.Planners = v
+		}
+	}
+	if cfg.Planners <= 0 {
+		cfg.Planners = 4
+	}
 	return cfg
 }
 
@@ -344,37 +413,40 @@ func decodeBaseAddress(s string) ([]byte, error) {
 }
 
 // buildFacadeContext creates a fresh facade.Context for this run.
+// AddressCursor / SaltCursor / BlockGasLimit are zero-valued atomics; callers
+// must use the typed Set / Reserve methods to seed/advance them.
 func buildFacadeContext(t *target.Target, chainID, gasLimit uint64) *facade.Context {
-	return &facade.Context{
+	c := &facade.Context{
 		BaseAddress:    make([]byte, 20),
 		Revision:       0,
 		AddressStride:  defaultAddressStride,
 		ChainID:        chainID,
 		GasLimit:       gasLimit,
-		BlockGasLimit:  gasLimit,
-		AddressCursor:  0,
-		SaltCursor:     0,
 		VerbGasFactors: map[string]float64{},
 	}
+	c.SetBlockGasLimit(gasLimit)
+	return c
 }
 
 // runLoop drives the dispatch+commit pipeline until a termination condition
 // fires. Returns the termination reason and the last committed block (or nil).
 //
-// Two goroutines coordinated via a sync.WaitGroup (not errgroup): we want a
-// graceful drain when the planner stops on a normal termination predicate
-// (target reached, batch limit), so the commit goroutine MUST run until
-// close(pipe) regardless of whether the parent ctx is cancelled.
+// Topology:
+//   - N PLANNER goroutines (cfg.Planners, default 4): each grabs a unique
+//     batchID via atomic increment, picks a plan, reserves nonce+salt ranges
+//     atomically from the shared facadeCtx, dispatches, and sends *dispatched
+//     into the pipe. All planners share one master signer.
+//   - 1 COMMIT goroutine: drains the pipe, calls commitBatch, updates the
+//     shared observation pointer + lastBlock. Drains pipe to completion even
+//     on shutdown so no dispatched batch is orphaned.
+//   - 1 PIPE-CLOSER goroutine: waits for all planners to exit then close(pipe)
+//     so the commit goroutine sees EOF.
 //
-//   - PLANNER: reads the latest observation, calls dispatchBatch, sends the
-//     result to the commit goroutine. Owns batch-id increment, target reload,
-//     and termination predicates (so we don't dispatch a batch we'd discard).
-//     Closes pipe before returning.
-//   - COMMIT:  receives *dispatched, calls commitBatch, updates the shared
-//     observation pointer + lastBlock. Drains pipe to completion.
+// Only planner 0 services the targetCh reload — the other planners pick up
+// the new target via the shared *ctrlTarget on their next iteration.
 //
-// The channel cap=1 provides natural backpressure: the planner blocks when the
-// commit goroutine is busy, so we never queue more than one unsent batch.
+// The pipe capacity n+1 keeps backpressure tight while letting planners hand
+// off work without serialising on the commit goroutine.
 func runLoop(
 	ctx context.Context,
 	cfg Config,
@@ -407,42 +479,56 @@ func runLoop(
 		})
 	}
 
-	pipe := make(chan *dispatched, 1)
+	n := cfg.Planners
+	if n <= 0 {
+		n = 4
+	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	pipe := make(chan *dispatched, n+1)
 
-	// PLANNER goroutine.
-	go func() {
-		defer wg.Done()
-		defer close(pipe)
-		batchID := startBatchID
+	// Shared batch-id allocator. Each planner does globalBatchID.Add(1)-1 to
+	// claim a unique id. Note that with N>1 planners, batch ids may commit
+	// out of strict numerical order; the commit goroutine still serialises
+	// the journal append (single writer).
+	var globalBatchID atomic.Uint64
+	globalBatchID.Store(startBatchID)
+
+	plannerLoop := func(idx int) {
 		idleBackoff := 50 * time.Millisecond
-
 		for {
-			// 1. Drain target reloads and respect cancellation.
+			// Early-exit when another planner already tripped a terminator.
+			if termReason.Load() != nil {
+				return
+			}
+
+			// 1. Drain target reloads (planner 0 only) and respect cancellation.
 			select {
 			case <-ctx.Done():
 				setTerm(terminationSignal)
 				return
-			case newT := <-targetCh:
-				_, newCtrl, _ := refreshTarget(newT)
-				*ctrlTarget = newCtrl
-				deps.target = newCtrl
-				deps.targetDigest = targetSha256Bytes(newT.SHA256)
-				mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
-					AppliedAtBatch: int(batchID),
-					AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
-					TargetSHA256:   newT.SHA256,
-					Shares:         cloneShares(newT.Shares),
-					TotalBytes:     newT.TotalBytes,
-				})
-				slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
 			default:
 			}
+			if idx == 0 {
+				select {
+				case newT := <-targetCh:
+					_, newCtrl, _ := refreshTarget(newT)
+					*ctrlTarget = newCtrl
+					deps.target = newCtrl
+					deps.targetDigest = targetSha256Bytes(newT.SHA256)
+					mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
+						AppliedAtBatch: int(globalBatchID.Load()),
+						AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
+						TargetSHA256:   newT.SHA256,
+						Shares:         cloneShares(newT.Shares),
+						TotalBytes:     newT.TotalBytes,
+					})
+					slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
+				default:
+				}
+			}
 
-			// 2. Termination predicates — check BEFORE dispatching so we don't
-			// build a batch we'd discard.
+			// 2. Termination predicates — checked BEFORE claiming a batchID so
+			// we never burn an id on a batch we won't dispatch.
 			threshold := overshootThreshold
 			if env := os.Getenv("ORCH_OVERSHOOT_THRESHOLD"); env != "" {
 				if v, err := strconv.ParseFloat(env, 64); err == nil {
@@ -458,24 +544,46 @@ func runLoop(
 				setTerm(terminationTargetMet)
 				return
 			}
+			if cfg.MaxBatches > 0 && globalBatchID.Load() >= uint64(cfg.MaxBatches) {
+				setTerm(terminationBatchLimit)
+				return
+			}
+
+			// 3. Claim a batchID and dispatch.
+			batchID := globalBatchID.Add(1) - 1
+			// Re-check MaxBatches: a racing planner may have just claimed the
+			// last legal id. Drop the over-budget claim instead of dispatching.
 			if cfg.MaxBatches > 0 && batchID >= uint64(cfg.MaxBatches) {
 				setTerm(terminationBatchLimit)
 				return
 			}
 
-			// 3. Dispatch.
 			db, err := dispatchBatch(ctx, deps, batchID, obsSnapshot)
 			if err != nil {
+				// dispatchBatch may return a non-nil `db` even with an error
+				// (a skip sentinel marking the seqID it already claimed). If
+				// so, send it so the commit-ordering heap can advance past
+				// this seqID before the run shuts down.
+				if db != nil && db.skip {
+					select {
+					case <-ctx.Done():
+					case pipe <- db:
+					}
+				}
 				if ctx.Err() != nil {
 					setTerm(terminationSignal)
 					return
 				}
-				slog.Error("lifecycle: dispatch failed", "batch_id", batchID, "err", err)
+				slog.Error("lifecycle: dispatch failed", "planner", idx, "batch_id", batchID, "err", err)
 				setTerm("error: " + err.Error())
 				return
 			}
 			if db == nil {
-				// No plan or zero txs — back off briefly without advancing batchID.
+				// Pick yielded no plan (no seqID claimed yet) — back off
+				// briefly. The batchID we claimed is wasted; the commit
+				// goroutine never sees it, so journal numbering will have
+				// a small hole (acceptable — the journal carries explicit
+				// BatchId field).
 				select {
 				case <-ctx.Done():
 					setTerm(terminationSignal)
@@ -485,48 +593,116 @@ func runLoop(
 				continue
 			}
 
-			// 4. Send to commit goroutine (backpressure: cap=1).
+			// 4. Send to commit goroutine. This includes skip sentinels (db.skip
+			// == true) so the heap-based commit ordering can drain past
+			// reserved-but-unused seqIDs.
 			select {
 			case <-ctx.Done():
 				setTerm(terminationSignal)
 				return
 			case pipe <- db:
 			}
-			batchID++
 		}
+	}
+
+	var plannerWG sync.WaitGroup
+	plannerWG.Add(n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer plannerWG.Done()
+			plannerLoop(idx)
+		}(i)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	// Pipe-closer: waits for every planner to exit, then closes the pipe so
+	// the commit goroutine can drain to EOF.
+	go func() {
+		plannerWG.Wait()
+		close(pipe)
 	}()
 
 	// COMMIT goroutine. Drains pipe to completion even on shutdown so we never
 	// orphan a dispatched batch (which would leave a stale pending sidecar).
+	//
+	// Out-of-order arrival is the norm with N>1 planners: planner A may finish
+	// its build+sign before planner B even though A holds a later seqID. The
+	// heap (`q`) re-orders by seqID so we commit in strict nonce-monotonic
+	// order. `nextSeq` is the seqID we expect next; the commit loop dequeues
+	// only when the heap top matches it.
+	//
+	// Skip sentinels (db.skip == true) carry a seqID but no payload; they
+	// represent planner failures after reservation. We advance nextSeq past
+	// them without calling commitBatch.
 	go func() {
 		defer wg.Done()
-		for db := range pipe {
-			pre := obsPtr.Load()
-			// Use a fresh background ctx for commit when the parent is already
-			// cancelled but we still have one in-flight batch the planner sent:
-			// otherwise testing_commitBlockV1 would fail with ctx.Err() and we'd
-			// lose the work the planner already did.
-			commitCtx := ctx
-			if ctx.Err() != nil {
-				// Bail: parent cancelled and we don't want to retry network work.
-				// Leave the dispatched batch unconsumed (the pending sidecar from
-				// dispatchBatch was NOT written; commit writes it).
-				continue
-			}
-			res, err := commitBatch(commitCtx, deps, db, pre)
-			if err != nil {
-				if ctx.Err() != nil {
-					// Cancellation during commit. Stop draining.
+		var q batchQueue
+		// First seqID emitted by deps.seqCounter is 0 (atomic.Add returns 1
+		// minus one). The counter is independent of startBatchID.
+		var nextSeq uint64 = 0
+
+		drain := func(useCtx context.Context) {
+			for q.Len() > 0 && q[0].seqID == nextSeq {
+				top := heap.Pop(&q).(*dispatched)
+				nextSeq++
+				if top.skip {
 					continue
 				}
-				slog.Error("lifecycle: commit failed", "batch_id", db.batchID, "err", err)
-				setTerm("error: " + err.Error())
-				continue
+				if useCtx.Err() != nil {
+					// Parent context cancelled — don't issue network work.
+					// The pending sidecar was NOT written; commit writes it,
+					// so dropping is safe.
+					continue
+				}
+				pre := obsPtr.Load()
+				res, err := commitBatch(useCtx, deps, top, pre)
+				if err != nil {
+					if useCtx.Err() != nil {
+						continue
+					}
+					// NM's block builder occasionally drops a small percentage of
+					// txs in a commit (partial-acceptance). Treat that as a soft
+					// skip: log, advance past the seqID, don't update obs/lastBlock,
+					// keep draining. The dropped batch's nonces are permanently
+					// burned — acceptable cost vs. terminating the whole run.
+					if isPartialAcceptanceErr(err) {
+						expected, included := parsePartialAcceptance(err)
+						slog.Warn("lifecycle: commit partial-acceptance, skipping batch",
+							"batch_id", top.batchID,
+							"seq_id", top.seqID,
+							"expected", expected,
+							"included", included,
+							"verb", top.plan.Verb,
+						)
+						continue
+					}
+					slog.Error("lifecycle: commit failed", "batch_id", top.batchID, "seq_id", top.seqID, "err", err)
+					setTerm("error: " + err.Error())
+					continue
+				}
+				if res != nil && res.committed {
+					obsPtr.Store(res.postObs)
+					lastBlockPtr.Store(res.blockHeader)
+				}
 			}
-			if res != nil && res.committed {
-				obsPtr.Store(res.postObs)
-				lastBlockPtr.Store(res.blockHeader)
+		}
+
+		for db := range pipe {
+			heap.Push(&q, db)
+			drain(ctx)
+		}
+
+		// After pipe is closed: drain residual entries. If a planner died
+		// holding a seqID without sending a sentinel (shouldn't happen, but
+		// defensively) the heap top may not match nextSeq — in that case we
+		// force-drain by advancing nextSeq to the heap top, which preserves
+		// the relative order of the remaining batches.
+		for q.Len() > 0 {
+			if q[0].seqID > nextSeq {
+				nextSeq = q[0].seqID
 			}
+			drain(ctx)
 		}
 	}()
 
@@ -552,6 +728,51 @@ func refreshTarget(t *target.Target) (*target.Target, *controller.Target, error)
 		return nil, nil, errors.New("lifecycle: nil target")
 	}
 	return t, shareTargetFromTarget(t.Shares, t.TotalBytes, t.SHA256), nil
+}
+
+// isPartialAcceptanceErr matches NM's testing_commitBlockV1 partial-acceptance
+// error pattern, where the block builder included fewer txs than the
+// orchestrator submitted. Form: "expected N transactions but only M were included".
+func isPartialAcceptanceErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "transactions but only")
+}
+
+// parsePartialAcceptance pulls the expected/included counts out of NM's
+// partial-acceptance error string. Returns zeros if the pattern is unexpected.
+// Format: "expected <expected> transactions but only <included> were included".
+func parsePartialAcceptance(err error) (expected, included uint64) {
+	if err == nil {
+		return 0, 0
+	}
+	msg := err.Error()
+	const sep = "transactions but only"
+	idx := strings.Index(msg, sep)
+	if idx < 0 {
+		return 0, 0
+	}
+	// Walk left to extract the integer before " transactions but only".
+	left := strings.TrimRight(msg[:idx], " ")
+	if li := strings.LastIndex(left, " "); li >= 0 {
+		left = left[li+1:]
+	}
+	if v, perr := strconv.ParseUint(left, 10, 64); perr == nil {
+		expected = v
+	}
+	// Walk right to extract the integer after "transactions but only ".
+	right := strings.TrimLeft(msg[idx+len(sep):], " ")
+	end := 0
+	for end < len(right) && right[end] >= '0' && right[end] <= '9' {
+		end++
+	}
+	if end > 0 {
+		if v, perr := strconv.ParseUint(right[:end], 10, 64); perr == nil {
+			included = v
+		}
+	}
+	return expected, included
 }
 
 func hexBytes(b []byte) string {

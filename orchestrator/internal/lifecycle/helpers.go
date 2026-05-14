@@ -1,17 +1,21 @@
 package lifecycle
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/sensor"
 )
 
 // computeChainIdentity returns sha256(genesis_sha256_bytes || target_sha256_bytes).
@@ -157,4 +161,32 @@ func targetSha256Bytes(hexDigest string) []byte {
 		return nil
 	}
 	return b
+}
+
+// waitForValidSensor polls the state-comp sensor until it returns a snapshot
+// with non-zero trie stats. During a bootstrap or recovery scan the plugin
+// publishes all-zero gauges; committing batches under such an observation
+// would feed garbage into the controller. We block the cycle here until the
+// plugin is healthy. Honours ctx cancellation. Logs once at start and every
+// 30s thereafter while waiting.
+func waitForValidSensor(ctx context.Context, sens *sensor.Sensor) (*sensor.Snapshot, error) {
+	const pollGap = 2 * time.Second
+	logEvery := 30 * time.Second
+	lastLog := time.Now().Add(-logEvery)
+	for {
+		snap, err := sens.PollOnce(ctx)
+		if err == nil && snap != nil &&
+			(snap.AccountTrieBytes != 0 || snap.StorageTrieBytes != 0 || snap.CodeBytesTotal != 0 || snap.BlockNumber != 0) {
+			return snap, nil
+		}
+		if time.Since(lastLog) >= logEvery {
+			slog.Warn("lifecycle: sensor returns zero stats; waiting for state-comp plugin", "err", err)
+			lastLog = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(pollGap):
+		}
+	}
 }

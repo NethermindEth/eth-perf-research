@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"math"
 	"math/rand/v2"
+	"os"
+	"strconv"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 )
@@ -12,9 +14,72 @@ import (
 const projectionEta = 0.1
 const toleranceFloor = 0.005
 
+// gasCapFraction is the fraction of the block gas limit Pick will plan up to.
+// Mirrors the dispatcher's defensive ceiling (0.95 × blockGasLimit).
+const gasCapFraction = 0.95
+
+// gasCapSafetyMargin inflates the per-verb base gas estimate before computing
+// the upper bound on tx count, so transient over-estimates by the worker still
+// fit under the dispatcher's hard 0.95 ceiling.
+const gasCapSafetyMargin = 1.50
+
+// baseGasPerVerb is the per-tx gas budget used by Pick when sizing batches.
+// Values are empirical upper-bounds observed in bloatnet journals; the safety
+// margin (gasCapSafetyMargin) is multiplied on top in computeGasBasedMax. Some
+// verbs (storagespam, gasburnertx) genuinely consume 1.5-2M+ gas per tx, so
+// under-estimating crashes the dispatcher's hard 0.95 × block-gas assertion.
+var baseGasPerVerb = map[string]uint64{
+	"eoatx":           21_000,
+	"deploytx":        200_000,
+	"factorydeploytx": 200_000,
+	"storagespam":     2_500_000, // empirical: 2.0M/tx observed
+	"storagerefundtx": 100_000,
+	"erc20tx":         100_000,
+	"erc20_bloater":   1_000_000,
+	"uniswap_swaps":   300_000,
+	"gasburnertx":     1_500_000, // empirical: 1.5M/tx observed
+	"calltx":          100_000,
+	"evm_fuzz":        1_000_000,
+	"noop":            21_000,
+}
+
+// defaultBaseGasPerVerb is used when a verb is missing from baseGasPerVerb.
+// Conservative high value so unknown verbs do not blow the gas cap.
+const defaultBaseGasPerVerb uint64 = 1_000_000
+
+// computeGasBasedMax returns the maximum number of txs of `verb` that fit
+// under `gasCapFraction × blockGasLimit` with a `gasCapSafetyMargin` safety
+// factor. Returns math.MaxInt when blockGasLimit is zero (no cap configured).
+func computeGasBasedMax(verb string, blockGasLimit uint64) int {
+	if blockGasLimit == 0 {
+		return math.MaxInt32
+	}
+	perTx, ok := baseGasPerVerb[verb]
+	if !ok {
+		perTx = defaultBaseGasPerVerb
+	}
+	if perTx == 0 {
+		return math.MaxInt32
+	}
+	ceiling := float64(blockGasLimit) * gasCapFraction
+	allowed := ceiling / (float64(perTx) * gasCapSafetyMargin)
+	if allowed < 1 {
+		return 1
+	}
+	if allowed > float64(math.MaxInt32) {
+		return math.MaxInt32
+	}
+	return int(allowed)
+}
+
+// Pick is goroutine-safe for concurrent readers. State fields are written only
+// by Apply (commit goroutine); the read-write race on F/Sigma/Alpha is benign
+// — readers see either pre-Apply or post-Apply state, both valid plan inputs.
+//
 // Pick computes the next batch plan from the current observation and target.
-// totalBatchBytes is the hard byte cap for deadline_bytes.
-func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int) *BatchPlan {
+// totalBatchBytes is the hard byte cap for deadline_bytes. blockGasLimit is
+// the current head-block gas limit (0 = no gas cap applied).
+func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGasLimit uint64) *BatchPlan {
 	verbs := s.Verbs
 	n := len(verbs)
 
@@ -82,6 +147,16 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int) *BatchP
 		step[i] = x[i] - projectionEta*grad[i]
 	}
 	xProj := mathx.ProjectSimplex(step)
+
+	// Gas-awareness: bias the simplex weights toward verbs with the highest
+	// bytes-per-gas. Without this, the controller burns master-signer ETH on
+	// expensive low-yield verbs (e.g. gasburnertx: 1.5M gas/tx, 0 useful bytes;
+	// storagespam: 2.5M gas/tx, modest bytes). The bias is multiplicative and
+	// re-normalised onto the simplex, so the gradient direction is preserved
+	// while the gas-inefficient tail is squashed. Controlled by
+	// $ORCH_GAS_AWARE_EXPONENT (default 0.5 = sqrt bias; 0 = disabled;
+	// 2 = aggressive).
+	xProj = applyGasAwareBias(verbs, xProj, s)
 
 	// Per-axis shares and tolerance.
 	p := [3]float64{
@@ -178,12 +253,26 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int) *BatchP
 			byteBasedMax = nMaxHardCeil
 		}
 	}
+	gasBasedMax := computeGasBasedMax(topVerb, blockGasLimit)
+	if gasBasedMax > nMaxHardCeil {
+		gasBasedMax = nMaxHardCeil
+	}
 	if !math.IsInf(capN, 1) {
 		raw := int(math.Min(capN, float64(nMaxHardCeil)))
 		nMax = clampMax(raw, byteBasedMax)
 	} else {
 		// Uncapped axis: bound by bytes only so the worker slice stays sane.
 		nMax = byteBasedMax
+	}
+	// Apply the gas-budget cap last. The dispatcher enforces a hard
+	// 0.95 × blockGasLimit ceiling; sizing Pick's output to satisfy that here
+	// avoids dispatch-time failures and the nonce-gap fallout they trigger
+	// when planners run in parallel.
+	if gasBasedMax < nMax {
+		nMax = gasBasedMax
+	}
+	if nMax < 1 {
+		nMax = 1
 	}
 
 	return &BatchPlan{
@@ -305,6 +394,108 @@ func argmaxFloats(v []float64) int {
 		}
 	}
 	return best
+}
+
+// defaultGasAwareExponent is the bytes-per-gas bias exponent applied to the
+// simplex weights in Pick. 0.5 = square-root bias (moderate); 0 disables;
+// higher values (e.g. 2) aggressively concentrate on the most gas-efficient
+// verbs. Overridden by $ORCH_GAS_AWARE_EXPONENT at runtime.
+const defaultGasAwareExponent = 0.5
+
+// gasAwareExponent reads $ORCH_GAS_AWARE_EXPONENT (float). Returns
+// defaultGasAwareExponent on missing/invalid input. Negative values are clamped
+// to 0 (disable bias) so misconfiguration never flips the bias sign.
+func gasAwareExponent() float64 {
+	raw := os.Getenv("ORCH_GAS_AWARE_EXPONENT")
+	if raw == "" {
+		return defaultGasAwareExponent
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return defaultGasAwareExponent
+	}
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// applyGasAwareBias re-weights `xProj` by efficiency[verb] ^ exp where
+// efficiency = (sum_axes F[verb][ax]) / baseGas[verb]. Verbs with zero
+// efficiency (e.g. gasburnertx with sum_F = 0) get an effective weight of
+// (1 / hugeGas)^exp → near zero, which is what we want: don't pick them
+// unless they're the only feasible choice (the downstream `selectFrom`
+// no-feasible fallback path still handles that edge).
+//
+// noop is special-cased: it is the pure-idle verb with sum_F = 0 by design;
+// we leave its xProj weight untouched so the existing argmax behaviour for
+// "nothing left to do" pipelines does not change.
+//
+// The returned slice is a new allocation; the caller's xProj is not mutated.
+// If exp == 0 (disable), returns a copy of xProj unchanged.
+func applyGasAwareBias(verbs []string, xProj []float64, s *State) []float64 {
+	out := make([]float64, len(xProj))
+	copy(out, xProj)
+
+	exp := gasAwareExponent()
+	if exp == 0 {
+		return out
+	}
+
+	weights := make([]float64, len(verbs))
+	for i, v := range verbs {
+		if v == "noop" {
+			// Preserve original weight: noop is the no-op fallback.
+			weights[i] = out[i]
+			continue
+		}
+		// Per-tx bytes estimate: sum of F over axes (F is the per-verb-per-axis
+		// bytes-per-tx coefficient maintained by Apply).
+		bytesPerTx := 0.0
+		if row, ok := s.F[v]; ok {
+			for _, ax := range Axes {
+				bytesPerTx += row[ax]
+			}
+		}
+		if bytesPerTx < 0 {
+			bytesPerTx = 0
+		}
+		gas, ok := baseGasPerVerb[v]
+		if !ok {
+			gas = defaultBaseGasPerVerb
+		}
+		if gas == 0 {
+			gas = defaultBaseGasPerVerb
+		}
+		eff := bytesPerTx / float64(gas)
+		// Floor to avoid 0^x edge cases (0^0 = 1 in Go's math.Pow); zero-byte
+		// verbs (e.g. gasburnertx) should be squashed near-zero, not promoted.
+		// We use 1e-18 → eff^0.5 ≈ 1e-9, which after re-normalisation drops the
+		// verb's mix share well below 1%.
+		if eff <= 0 {
+			eff = 1e-18
+		}
+		bias := math.Pow(eff, exp)
+		if math.IsNaN(bias) || math.IsInf(bias, 0) {
+			bias = 0
+		}
+		weights[i] = out[i] * bias
+	}
+
+	// Re-normalise to sum to 1. If the bias zeroed everything out (e.g. only
+	// gasburnertx is feasible and exp is huge), fall back to the original
+	// xProj so we still produce a usable mix.
+	total := 0.0
+	for _, w := range weights {
+		total += w
+	}
+	if total <= 0 || math.IsNaN(total) || math.IsInf(total, 0) {
+		return out
+	}
+	for i := range weights {
+		weights[i] /= total
+	}
+	return weights
 }
 
 func clampMin(v, lo int) int {

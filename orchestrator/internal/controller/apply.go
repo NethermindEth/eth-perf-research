@@ -105,6 +105,8 @@ func (s *State) pushOvershoot(residualNorm float64, commanded [3]float64) {
 	}
 	tripped := ratio > threshold
 
+	s.overshootMu.Lock()
+	defer s.overshootMu.Unlock()
 	if s.overshootWindow == nil {
 		return
 	}

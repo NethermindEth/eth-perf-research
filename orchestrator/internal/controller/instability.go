@@ -10,6 +10,8 @@ package controller
 // The rolling window is maintained inside State by pushOvershoot (called from
 // Apply). HasInstability inspects it without modifying state.
 func (s *State) HasInstability(threshold float64, window, maxTrips, grace int) bool {
+	s.overshootMu.Lock()
+	defer s.overshootMu.Unlock()
 	// Ensure the window buffer is sized correctly. If it hasn't been allocated
 	// yet (e.g. no Apply has been called), allocate it now.
 	if len(s.overshootWindow) != window {

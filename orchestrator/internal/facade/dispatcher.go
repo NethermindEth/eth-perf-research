@@ -37,39 +37,62 @@ func New(pool *builderpool.Pool, s *signer.Signer) *Dispatcher {
 	return &Dispatcher{Pool: pool, Signer: s}
 }
 
+// DispatchInput carries the caller-supplied parameters for one Dispatch call.
+// StartNonce and StartSalt are the atomically reserved cursor ranges; Dispatch
+// no longer reads or mutates the Context cursors.
+type DispatchInput struct {
+	Plan       *controller.BatchPlan
+	StartNonce uint64
+	StartSalt  uint64
+	NumNonces  uint64
+}
+
 // Result is returned by Dispatch.
 type Result struct {
 	SignedRLP   [][]byte
 	TxCount     int
 	RLPBytes    uint64            // sum of len(SignedRLP[i])
 	TxRLPHashes [][]byte          // Keccak256(SignedRLP[i]) for pending-sidecar
-	NewCursor   uint64            // ctx.AddressCursor after this batch
-	NewSalt     uint64            // ctx.SaltCursor after this batch
+	NewCursor   uint64            // first nonce after this batch (StartNonce + TxCount)
+	NewSalt     uint64            // first salt after this batch (StartSalt + NumNonces)
 	VerbGasUsed map[string]uint64 // for EWMA feedback; may be empty
 }
 
-// Dispatch builds + signs one batch for plan.
+// Dispatch builds + signs one batch for in.Plan, using the caller-reserved
+// nonce range [in.StartNonce, in.StartNonce+in.NumNonces) and salt range
+// [in.StartSalt, in.StartSalt+in.NumNonces). Dispatch is goroutine-safe with
+// respect to the Context: it only reads immutable fields plus the per-call
+// fee policy (which the lifecycle refreshes pre-reservation).
 //
-// Side-effects: mutates c.AddressCursor and c.SaltCursor to reflect the number
-// of transactions that were actually signed.
-func (d *Dispatcher) Dispatch(ctx context.Context, plan *controller.BatchPlan, c *Context) (*Result, error) {
-	if plan == nil {
+// Dispatch trusts the controller's NMaxTxs to fit the deadline-byte budget;
+// no defensive trim is applied because mid-flight trimming would create nonce
+// gaps under parallel planners (the reservation is atomic and committed
+// before Dispatch returns). The gas cap is enforced as a hard ceiling: if
+// the cumulative tx gas would exceed 0.95 × BlockGasLimit, Dispatch returns
+// an error so the caller can fail the batch loudly rather than silently
+// shipping an invalid block.
+func (d *Dispatcher) Dispatch(ctx context.Context, in DispatchInput, c *Context) (*Result, error) {
+	if in.Plan == nil {
 		return nil, errors.New("facade: plan must not be nil")
 	}
 	if c == nil {
 		return nil, errors.New("facade: context must not be nil")
 	}
 
+	plan := in.Plan
+
 	// 1. Build the raw batch from the worker pool.
 	count := uint32(plan.NMaxTxs)
 	if count == 0 {
 		count = 1 // always request at least one tx for forward-progress
 	}
+	ctxProto := c.ToProto()
+	ctxProto.SaltCursor = in.StartSalt
 	req := &orchpb.BuildBatchRequest{
 		Verb:     plan.Verb,
-		StartIdx: c.AddressCursor,
+		StartIdx: in.StartNonce,
 		Count:    count,
-		Ctx:      c.ToProto(),
+		Ctx:      ctxProto,
 	}
 	resp, err := d.Pool.Build(ctx, req)
 	if err != nil {
@@ -82,8 +105,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, plan *controller.BatchPlan, c
 	signables := resp.Signables
 
 	// 2. Fill per-tx fee/nonce/chainID fields omitted by the Python worker.
-	maxFee := c.MaxFeePerGas
-	maxPri := c.MaxPriorityFeePerGas
+	maxFee, maxPri := c.LoadFeePolicy()
 	if maxFee == nil {
 		maxFee = new(big.Int)
 	}
@@ -92,20 +114,32 @@ func (d *Dispatcher) Dispatch(ctx context.Context, plan *controller.BatchPlan, c
 	}
 	for i, tx := range signables {
 		tx.ChainId = c.ChainID
-		tx.Nonce = c.AddressCursor + uint64(i)
+		tx.Nonce = in.StartNonce + uint64(i)
 		tx.MaxFeePerGas = maxFee.Bytes()
 		tx.MaxPriorityFeePerGas = maxPri.Bytes()
 	}
 
-	// 3. Trim by deadline_bytes and gas cap.
-	signables = trimSignables(signables, plan.DeadlineBytes, c.BlockGasLimit)
+	// 3. Hard gas cap: assert cumulative tx gas <= 0.95 × BlockGasLimit. We
+	// can't silently trim under parallel planners — it would create nonce
+	// gaps. The controller's Pick is responsible for sizing the plan to fit;
+	// if it didn't, fail the batch so the operator can fix the model.
+	if blockGas := c.LoadBlockGasLimit(); blockGas > 0 {
+		ceiling := blockGas * 95 / 100
+		var accGas uint64
+		for _, tx := range signables {
+			accGas += tx.Gas
+		}
+		if accGas > ceiling {
+			return nil, fmt.Errorf("facade: gas cap exceeded: cumulative=%d ceiling=%d txs=%d verb=%s",
+				accGas, ceiling, len(signables), plan.Verb)
+		}
+	}
 
 	if len(signables) == 0 {
-		// Edge case: nothing survived trimming — return an empty result without
-		// advancing cursors so the caller can handle forward-progress logic.
-		return &Result{
-			VerbGasUsed: map[string]uint64{},
-		}, nil
+		// Edge case: worker returned no txs. Caller's reserved nonce range
+		// becomes a hole; surface as error so the planner shuts down rather
+		// than silently leaking nonces.
+		return nil, errors.New("facade: builder returned zero txs for non-zero plan")
 	}
 
 	// 4. Sign the trimmed slice.
@@ -122,69 +156,18 @@ func (d *Dispatcher) Dispatch(ctx context.Context, plan *controller.BatchPlan, c
 		totalBytes += uint64(len(raw))
 	}
 
-	// 6. Advance cursors.
+	// 6. Compute cursor-advance results. Note: NewSalt is StartSalt+NumNonces
+	// even if trimming dropped tail txs — the salt range was already reserved
+	// atomically and unused slots are simply abandoned (salt domain is 2^64).
 	txCount := len(raws)
-	c.AddressCursor += uint64(txCount)
-	c.SaltCursor = resp.NewSaltCursor
-
 	return &Result{
 		SignedRLP:   raws,
 		TxCount:     txCount,
 		RLPBytes:    totalBytes,
 		TxRLPHashes: hashes,
-		NewCursor:   c.AddressCursor,
-		NewSalt:     c.SaltCursor,
+		NewCursor:   in.StartNonce + uint64(txCount),
+		NewSalt:     in.StartSalt + in.NumNonces,
 		VerbGasUsed: map[string]uint64{},
 	}, nil
 }
 
-// estimateTxSize returns a conservative upper-bound on the signed RLP size for
-// a TxIn. Matches the Python heuristic in _builder.py:
-//
-//	200 + len(data) + 50 * len(access_list)
-func estimateTxSize(tx *orchpb.TxIn) int {
-	n := 200 + len(tx.Data)
-	for range tx.AccessList {
-		n += 50
-	}
-	return n
-}
-
-// trimSignables enforces the deadline-bytes cap and the 0.95 × BlockGasLimit
-// gas cap, returning the longest prefix of txs that fits within both limits.
-// At least one tx is always kept for forward-progress (matches Python behaviour).
-func trimSignables(txs []*orchpb.TxIn, deadlineBytes int, blockGasLimit uint64) []*orchpb.TxIn {
-	if len(txs) == 0 {
-		return txs
-	}
-
-	var (
-		gasCeiling      uint64
-		hasGasCap       = blockGasLimit > 0
-		accBytes        int
-		accGas          uint64
-	)
-	if hasGasCap {
-		// integer arithmetic: floor(blockGasLimit * 95 / 100)
-		gasCeiling = blockGasLimit * 95 / 100
-	}
-
-	for i, tx := range txs {
-		est := estimateTxSize(tx)
-		gas := tx.Gas
-
-		if i > 0 {
-			// Check limits before accepting tx[i] (first tx is always kept).
-			if deadlineBytes > 0 && accBytes+est > deadlineBytes {
-				return txs[:i]
-			}
-			if hasGasCap && accGas+gas > gasCeiling {
-				return txs[:i]
-			}
-		}
-
-		accBytes += est
-		accGas += gas
-	}
-	return txs
-}

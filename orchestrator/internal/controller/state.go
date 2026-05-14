@@ -3,6 +3,8 @@
 package controller
 
 import (
+	"sync"
+
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 )
@@ -57,7 +59,12 @@ type State struct {
 	ChainIdentity [32]byte // sha256(genesis || target) seed material
 	Epsilon       float64  // ε-greedy exploration rate in [0, 1]
 
-	// rolling overshoot window (circular buffer of bool).
+	// overshootMu guards the rolling overshoot window. Apply (commit goroutine)
+	// writes via pushOvershoot; planner goroutines read via HasInstability.
+	// F/Sigma/Alpha races are tolerated (benign — readers see either pre-Apply
+	// or post-Apply state, both valid plan inputs); the ring buffer is not, so
+	// it gets explicit synchronisation.
+	overshootMu     sync.Mutex
 	overshootWindow []bool
 	overshootHead   int
 	overshootFilled int
@@ -127,4 +134,32 @@ type ResidualSnapshot struct {
 	PerAxis            map[Axis]float64
 	L2Norm             float64
 	DispatchedRLPBytes uint64
+}
+
+// AlphaSnapshot returns a copy of the current Alpha matrix.
+// The returned map is verb -> axis -> value and is safe to read after the call returns.
+func (s *State) AlphaSnapshot() map[string]map[Axis]float64 {
+	out := make(map[string]map[Axis]float64, len(s.Alpha))
+	for verb, row := range s.Alpha {
+		rowCopy := make(map[Axis]float64, len(row))
+		for ax, v := range row {
+			rowCopy[ax] = v
+		}
+		out[verb] = rowCopy
+	}
+	return out
+}
+
+// SigmaSnapshot returns a copy of the current Sigma (innovation scale) matrix.
+// The returned map is verb -> axis -> value and is safe to read after the call returns.
+func (s *State) SigmaSnapshot() map[string]map[Axis]float64 {
+	out := make(map[string]map[Axis]float64, len(s.Sigma))
+	for verb, row := range s.Sigma {
+		rowCopy := make(map[Axis]float64, len(row))
+		for ax, v := range row {
+			rowCopy[ax] = v
+		}
+		out[verb] = rowCopy
+	}
+	return out
 }
