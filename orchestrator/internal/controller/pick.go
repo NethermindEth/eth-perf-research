@@ -161,6 +161,13 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		tolerance[axIdx] = headroom + tol
 	}
 
+	flow := RatioFlowCap(obs, tgt, totalBatchBytes)
+	for axIdx := 0; axIdx < 3; axIdx++ {
+		if flow[axIdx] < tolerance[axIdx] {
+			tolerance[axIdx] = flow[axIdx]
+		}
+	}
+
 	// Per-verb cap: max_n_txs[i] = min over over-serving axes of headroom/excess.
 	maxNTxs := make([]float64, n)
 	for i := range maxNTxs {
