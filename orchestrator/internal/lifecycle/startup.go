@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
@@ -24,7 +26,26 @@ const (
 	journalFilename  = "journal.bin"
 	payloadsFilename = "payloads.rlp"
 	pendingFilename  = "pending-batch.bin"
+
+	// defaultResumeReorgTolerance bounds the head/journal-tail gap that a resume
+	// will tolerate. After an EL-client crash + restart the chain rolls back to
+	// its FlatDb reorg boundary; the journal then sits a few blocks ahead of (or,
+	// if its last write didn't flush, behind) the chain head. Anything inside
+	// this window is a recoverable resume — the master-nonce cursor is re-derived
+	// from the chain so a bounded mismatch self-heals. NM's FlatDb.MaxReorgDepth
+	// is 192; 256 leaves headroom.
+	defaultResumeReorgTolerance = 256
 )
+
+// resumeReorgTolerance reads ORCH_RESUME_REORG_TOLERANCE or returns the default.
+func resumeReorgTolerance() int64 {
+	if raw := os.Getenv("ORCH_RESUME_REORG_TOLERANCE"); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v >= 0 {
+			return v
+		}
+	}
+	return defaultResumeReorgTolerance
+}
 
 // startupMode enumerates the run's startup decision.
 type startupMode int
@@ -135,10 +156,23 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 	case pendingExists && head.Number == tailBlock+1:
 		// pending sidecar to reconcile — we accept either tail or tail+1.
 	default:
-		return nil, fmt.Errorf(
-			"lifecycle: chain head=%d does not match journal tail=%d (pending=%v); cannot resume",
-			head.Number, tailBlock, pendingExists,
-		)
+		// Crash-resilient resume. After an EL-client crash + restart the chain
+		// rolls back to its FlatDb reorg boundary, so head lands below (or, if
+		// the journal's last write didn't flush, above) the journal tail. A gap
+		// inside the reorg window is recoverable: the master-nonce cursor is
+		// re-derived from the chain at startup, so the orchestrator picks up
+		// from wherever the chain actually is. Only a gap larger than the
+		// window indicates a genuinely different chain.
+		tol := resumeReorgTolerance()
+		delta := int64(head.Number) - int64(tailBlock)
+		if delta < -tol || delta > tol {
+			return nil, fmt.Errorf(
+				"lifecycle: chain head=%d diverges from journal tail=%d by %d blocks (> tolerance %d); cannot resume",
+				head.Number, tailBlock, delta, tol,
+			)
+		}
+		slog.Warn("lifecycle: resuming across a reorg-window gap",
+			"chain_head", head.Number, "journal_tail", tailBlock, "delta", delta, "tolerance", tol)
 	}
 
 	return &startupDecision{

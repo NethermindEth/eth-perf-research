@@ -139,6 +139,13 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.JWTPath != "" {
 		rpcOpts = append(rpcOpts, rpc.WithJWTFile(cfg.JWTPath))
 	}
+	if raw := os.Getenv("ORCH_RPC_TIMEOUT_S"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			rpcOpts = append(rpcOpts, rpc.WithTimeout(time.Duration(v)*time.Second))
+		}
+	} else {
+		rpcOpts = append(rpcOpts, rpc.WithTimeout(120*time.Second))
+	}
 	rpcCli, err := rpc.NewClient(cfg.RPCURL, rpcOpts...)
 	if err != nil {
 		return fmt.Errorf("lifecycle: rpc client: %w", err)
@@ -258,13 +265,18 @@ func Run(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("lifecycle: ORCH_INITIAL_ADDRESS_CURSOR: %w", err)
 		}
 		facadeCtx.AddressCursor.Store(v)
-	} else if decision.Mode == modeFresh {
+	} else {
+		// The chain's master-signer nonce is authoritative for the address
+		// cursor and survives EL-client crashes / reorgs. Derive it from the
+		// chain for both fresh and resume — a resumed run after an EL restart
+		// must pick up the rolled-back nonce, not the (stale) journal cursor.
 		n, err := rpcCli.TransactionCount(ctx, signr.Address())
 		if err != nil {
 			return fmt.Errorf("lifecycle: query master nonce: %w", err)
 		}
 		facadeCtx.AddressCursor.Store(n)
-		slog.Info("lifecycle: master nonce primed from RPC", "address", signr.Address().Hex(), "nonce", n)
+		slog.Info("lifecycle: master nonce primed from RPC",
+			"address", signr.Address().Hex(), "nonce", n, "mode", decision.Mode.String())
 	}
 
 	// 10. Initial observation from sensor. Loop until the plugin returns valid
