@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"math"
 	"testing"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
@@ -22,7 +23,7 @@ func TestPickGasburnertxRespectsBlockGasLimit(t *testing.T) {
 		AvgTxRLP: map[string]float64{"gasburnertx": 1500.0},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000)
 
 	tgt := makeTarget(10 * 1024 * 1024 * 1024) // 10 GiB target — far from done
 	obs := zeroObs()
@@ -60,7 +61,7 @@ func TestPickZeroBlockGasLimitDoesNotCap(t *testing.T) {
 		AvgTxRLP: map[string]float64{"eoatx": 1500.0},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000)
 
 	plan := s.Pick(zeroObs(), makeTarget(10_000_000), 4_000_000, 0)
 	if plan == nil {
@@ -71,107 +72,116 @@ func TestPickZeroBlockGasLimitDoesNotCap(t *testing.T) {
 	}
 }
 
-// TestPickGasAwareBiasSquashesGasburnertx: with mock F values where eoatx has
-// high bytes-per-gas and gasburnertx has zero useful bytes, the resulting mix
-// must put gasburnertx well below 1% and eoatx must dominate storagespam (which
-// has high gas cost per byte). This is the user-facing invariant of Fix 2:
-// don't burn the master signer's ETH on zero-yield expensive verbs.
-func TestPickGasAwareBiasSquashesGasburnertx(t *testing.T) {
-	t.Setenv("ORCH_GAS_AWARE_EXPONENT", "0.5")
+// TestApplyCheapBloatBiasFavoursCheapByteVerb: two learned verbs with equal
+// byte yield but different ETH cost — the cheaper one (eoatx, 21k gas baseline)
+// must out-weigh the expensive one (storagespam, 2.5M gas baseline) because it
+// delivers more state-bytes per ETH spent.
+func TestApplyCheapBloatBiasFavoursCheapByteVerb(t *testing.T) {
+	verbs := []string{"eoatx", "storagespam"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			// Equal byte yield (1500 bytes/tx total) so only ETH cost differs.
+			"eoatx":       {"accounts": 1500, "storage": 0, "code": 0},
+			"storagespam": {"accounts": 0, "storage": 1500, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"eoatx": 1500, "storagespam": 1500},
+	}
+	var identity [32]byte
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000)
 
+	xProj := []float64{0.5, 0.5}
+	out := applyCheapBloatBias(verbs, xProj, s)
+
+	// eoatx baseline 21k gas vs storagespam 2.5M gas → eoatx has ~119x the
+	// bytes-per-ETH, so its post-bias weight must dominate.
+	if !(out[0] > out[1]) {
+		t.Errorf("eoatx weight=%.6f must exceed storagespam weight=%.6f (cheaper per byte)", out[0], out[1])
+	}
+	if sum := out[0] + out[1]; math.Abs(sum-1.0) > 1e-9 {
+		t.Errorf("bias output not on simplex: sum=%.9f", sum)
+	}
+}
+
+// TestApplyCheapBloatBiasNeutralForUnlearnedVerb: a verb with zero F (never
+// observed) must keep its xProj weight — the neutral-1.0 anti-deadlock rule.
+// It must NOT be squashed to ~0 the way the old applyGasAwareBias did, since
+// that is exactly what let noop win the mix permanently at cold start.
+func TestApplyCheapBloatBiasNeutralForUnlearnedVerb(t *testing.T) {
+	verbs := []string{"eoatx", "newverb"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			// eoatx is learned; newverb has zero F (unlearned).
+			"eoatx":   {"accounts": 1500, "storage": 0, "code": 0},
+			"newverb": {"accounts": 0, "storage": 0, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"eoatx": 1500, "newverb": 1500},
+	}
+	var identity [32]byte
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000)
+
+	xProj := []float64{0.5, 0.5}
+	out := applyCheapBloatBias(verbs, xProj, s)
+
+	// newverb is unlearned → neutral multiplier. With only one learned verb the
+	// mean equals eoatx's bytesPerEth so eoatx's multiplier is also 1.0, leaving
+	// the mix unchanged. The key invariant: newverb keeps a non-trivial weight.
+	if out[1] < 0.1 {
+		t.Errorf("unlearned newverb weight=%.6f, want >= 0.1 (neutral-1.0 anti-deadlock rule)", out[1])
+	}
+	if sum := out[0] + out[1]; math.Abs(sum-1.0) > 1e-9 {
+		t.Errorf("bias output not on simplex: sum=%.9f", sum)
+	}
+}
+
+// TestApplyCheapBloatBiasColdStartIsNoOp: when every verb is unlearned (all F
+// zero, the live cold-start condition) the bias passes xProj through unchanged
+// so ε-greedy explores uniformly and the verbs run — no deadlock.
+func TestApplyCheapBloatBiasColdStartIsNoOp(t *testing.T) {
 	verbs := []string{"eoatx", "storagespam", "gasburnertx"}
 	rf := &referencef.ReferenceF{
 		Verbs: map[string]map[string]float64{
-			// eoatx: 1500 bytes/tx total at 21k gas → ~0.071 B/gas (high)
-			"eoatx": {"accounts": 1500, "storage": 0, "code": 0},
-			// storagespam: 1500 bytes/tx total at 2.5M gas → 0.0006 B/gas (mid)
-			"storagespam": {"accounts": 0, "storage": 1500, "code": 0},
-			// gasburnertx: 0 useful bytes at 1.5M gas → 0 B/gas (zero)
+			"eoatx":       {"accounts": 0, "storage": 0, "code": 0},
+			"storagespam": {"accounts": 0, "storage": 0, "code": 0},
 			"gasburnertx": {"accounts": 0, "storage": 0, "code": 0},
 		},
-		AvgTxRLP: map[string]float64{
-			"eoatx":       1500,
-			"storagespam": 1500,
-			"gasburnertx": 1500,
-		},
+		AvgTxRLP: map[string]float64{"eoatx": 1500, "storagespam": 1500, "gasburnertx": 1500},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000)
 
-	plan := s.Pick(zeroObs(), makeTarget(10*1024*1024), 8*1024*1024, 8_000_000_000)
-	if plan == nil {
-		t.Fatal("Pick returned nil plan")
-	}
-	if plan.Mix == nil {
-		t.Fatal("plan.Mix is nil")
-	}
-
-	mEoatx := plan.Mix["eoatx"]
-	mStorage := plan.Mix["storagespam"]
-	mGasburn := plan.Mix["gasburnertx"]
-
-	if mGasburn >= 0.01 {
-		t.Errorf("gasburnertx mix=%.6f, want < 0.01 (gas-aware bias should squash zero-byte verbs)", mGasburn)
-	}
-	if !(mEoatx > mStorage) {
-		t.Errorf("eoatx mix=%.4f must exceed storagespam mix=%.4f (bytes-per-gas: eoatx >> storagespam)", mEoatx, mStorage)
+	xProj := []float64{0.2, 0.3, 0.5}
+	out := applyCheapBloatBias(verbs, xProj, s)
+	for i := range xProj {
+		if math.Abs(out[i]-xProj[i]) > 1e-9 {
+			t.Errorf("cold-start bias altered weight[%d]: got %.9f, want %.9f", i, out[i], xProj[i])
+		}
 	}
 }
 
-// TestPickGasAwareBiasDisabledByZeroExponent: with the exponent at 0 the mix
-// must be (close to) the un-biased projection. Acts as a regression guard for
-// the disable path and keeps backwards-compatible behaviour available.
-func TestPickGasAwareBiasDisabledByZeroExponent(t *testing.T) {
-	t.Setenv("ORCH_GAS_AWARE_EXPONENT", "0")
-
-	verbs := []string{"eoatx", "gasburnertx"}
-	rf := &referencef.ReferenceF{
-		Verbs: map[string]map[string]float64{
-			"eoatx":       {"accounts": 100, "storage": 100, "code": 100},
-			"gasburnertx": {"accounts": 0, "storage": 0, "code": 0},
-		},
-		AvgTxRLP: map[string]float64{"eoatx": 1500, "gasburnertx": 1500},
-	}
-	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
-
-	plan := s.Pick(zeroObs(), makeTarget(10*1024*1024), 8*1024*1024, 8_000_000_000)
-	if plan == nil {
-		t.Fatal("Pick returned nil plan")
-	}
-	// At exp=0 the bias is disabled → gasburnertx keeps its un-biased weight.
-	// The simplex projection for two equally-weighted verbs is ~(0.5, 0.5),
-	// so gasburnertx should be non-trivial (> 0.1) here.
-	if plan.Mix["gasburnertx"] < 0.1 {
-		t.Errorf("exp=0 should disable bias; gasburnertx mix=%.4f want >= 0.1", plan.Mix["gasburnertx"])
-	}
-}
-
-// TestPickGasAwareBiasAggressiveExponent: at exp=2 the bias is aggressive;
-// gasburnertx must be near-zero and eoatx must dominate.
-func TestPickGasAwareBiasAggressiveExponent(t *testing.T) {
-	t.Setenv("ORCH_GAS_AWARE_EXPONENT", "2")
-
-	verbs := []string{"eoatx", "gasburnertx"}
+// TestApplyCheapBloatBiasPreservesNoop: noop is the idle fallback; its xProj
+// weight must pass through untouched even when other verbs are re-weighted.
+func TestApplyCheapBloatBiasPreservesNoop(t *testing.T) {
+	verbs := []string{"eoatx", "storagespam", "noop"}
 	rf := &referencef.ReferenceF{
 		Verbs: map[string]map[string]float64{
 			"eoatx":       {"accounts": 1500, "storage": 0, "code": 0},
-			"gasburnertx": {"accounts": 0, "storage": 0, "code": 0},
+			"storagespam": {"accounts": 0, "storage": 1500, "code": 0},
+			"noop":        {"accounts": 0, "storage": 0, "code": 0},
 		},
-		AvgTxRLP: map[string]float64{"eoatx": 1500, "gasburnertx": 1500},
+		AvgTxRLP: map[string]float64{"eoatx": 1500, "storagespam": 1500, "noop": 1500},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000)
 
-	plan := s.Pick(zeroObs(), makeTarget(10*1024*1024), 8*1024*1024, 8_000_000_000)
-	if plan == nil {
-		t.Fatal("Pick returned nil plan")
+	xProj := []float64{0.4, 0.4, 0.2}
+	out := applyCheapBloatBias(verbs, xProj, s)
+	if sum := out[0] + out[1] + out[2]; math.Abs(sum-1.0) > 1e-9 {
+		t.Errorf("bias output not on simplex: sum=%.9f", sum)
 	}
-	if plan.Mix["gasburnertx"] > 1e-6 {
-		t.Errorf("exp=2: gasburnertx mix=%.9f, want ~0", plan.Mix["gasburnertx"])
-	}
-	if plan.Mix["eoatx"] < 0.99 {
-		t.Errorf("exp=2: eoatx mix=%.4f, want > 0.99 (should dominate)", plan.Mix["eoatx"])
+	// noop is re-weighted from 0.2 only by the simplex re-normalisation; eoatx
+	// must still dominate storagespam on the cheap-bloat criterion.
+	if !(out[0] > out[1]) {
+		t.Errorf("eoatx weight=%.6f must exceed storagespam weight=%.6f", out[0], out[1])
 	}
 }
 
@@ -187,7 +197,7 @@ func TestComputeGasBasedMaxTable(t *testing.T) {
 	}
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 
 	for verb, perTx := range baseGasPerVerb {
 		got := s.computeGasBasedMax(verb, blockGasLimit)

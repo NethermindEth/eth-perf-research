@@ -48,7 +48,7 @@ func TestPickSingleVerbReturnsThatVerb(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 100.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 
 	tgt := makeTarget(1_000_000)
 	plan := s.Pick(zeroObs(), tgt, 4_000_000, 0)
@@ -74,7 +74,7 @@ func TestPickDeterministicWithEpsilonZero(t *testing.T) {
 		AvgTxRLP: map[string]float64{"verb_a": 1500, "verb_b": 1500, "verb_c": 1500},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0) // ε = 0
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000) // ε = 0
 
 	tgt := makeTarget(10_000_000)
 	obs := zeroObs()
@@ -94,7 +94,7 @@ func TestApplyMovesFInExpectedDirection(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 50.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 
 	pre := &Observation{AccountTrieBytes: 1_000_000}
 	// post has +1000 bytes per axis in accounts, much more than F=50 predicts for 10 txs.
@@ -122,7 +122,7 @@ func TestApplyIncrementsBatchID(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 50.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 
 	if s.BatchID != 0 {
 		t.Fatalf("initial BatchID want 0, got %d", s.BatchID)
@@ -147,7 +147,7 @@ func TestApplyErrorOnZeroTxCount(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 50.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 	plan := &BatchPlan{Verb: "eoa_transfer", DeadlineBytes: 1000, Mix: map[string]float64{"eoa_transfer": 1.0}}
 	_, err := s.Apply(zeroObs(), zeroObs(), plan, 0, 0, 0)
 	if err == nil {
@@ -165,7 +165,7 @@ func TestInstabilityTripsAfterMaxTrips(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 1.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 
 	// Pre-size the window.
 	s.initOvershootWindow(window)
@@ -198,7 +198,7 @@ func TestInstabilityNotTripBeforeWindowFull(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 1.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 	s.initOvershootWindow(window)
 	// filled < window — should never trip.
 	s.overshootFilled = window - 1
@@ -227,7 +227,7 @@ func TestResidualL2NormHandComputed(t *testing.T) {
 	verbs := []string{"v"}
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 
 	pre := &Observation{}
 	post := &Observation{AccountTrieBytes: 150, StorageTrieBytes: 150, CodeBytesTotal: 150}
@@ -259,7 +259,7 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 	verbs := []string{"v"}
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
 	// Seed with known value.
 	s.AvgTxRLP["v"] = 1000.0
 

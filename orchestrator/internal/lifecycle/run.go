@@ -85,6 +85,10 @@ type Config struct {
 	NethermindCommitSHA string
 	DotnetRuntimeMajor  string
 	MetricsAddr         string // TCP address for the Prometheus /metrics endpoint (default ":9101")
+	// TargetEthPerGasWei is the fixed gas price (wei per gas) the orchestrator
+	// pins the EIP-1559 fee policy to and uses to seed the controller's
+	// per-verb EthPerTx cost model. Default 1 gwei (defaultTargetEthPerGasWei).
+	TargetEthPerGasWei uint64
 }
 
 const (
@@ -244,7 +248,7 @@ func Run(ctx context.Context, cfg Config) error {
 	defer pw.Close()
 
 	// 8. Build controller state, hydrating from tail on resume.
-	state := controller.NewState(cfg.Verbs, refF, chainIdentity, cfg.Epsilon)
+	state := controller.NewState(cfg.Verbs, refF, chainIdentity, cfg.Epsilon, cfg.TargetEthPerGasWei)
 	if decision.Mode == modeResume && decision.TailRecord != nil {
 		hydrateStateFromTail(state, decision.TailRecord)
 	}
@@ -328,7 +332,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// 13. Prime fee policy once synchronously so the first batch has a valid
 	// max-fee/tip pair before any planner runs, then start the background
 	// refresher (single RPC per tick, independent of planner count).
-	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx); err != nil {
+	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx, cfg.TargetEthPerGasWei); err != nil {
 		return fmt.Errorf("lifecycle: prime fee policy: %w", err)
 	}
 	feeCtx, feeCancel := context.WithCancel(ctx)
@@ -336,7 +340,7 @@ func Run(ctx context.Context, cfg Config) error {
 	feeWG.Add(1)
 	go func() {
 		defer feeWG.Done()
-		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, defaultFeePolicyInterval); err != nil && !errors.Is(err, context.Canceled) {
+		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, defaultFeePolicyInterval, cfg.TargetEthPerGasWei); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("lifecycle: fee policy loop exited", "err", err)
 		}
 	}()
@@ -427,6 +431,9 @@ func withDefaults(cfg Config) Config {
 	}
 	if cfg.MetricsAddr == "" {
 		cfg.MetricsAddr = ":9101"
+	}
+	if cfg.TargetEthPerGasWei == 0 {
+		cfg.TargetEthPerGasWei = defaultTargetEthPerGasWei
 	}
 	// ORCH_PLANNERS env var overrides the flag/struct value when set.
 	if raw := os.Getenv("ORCH_PLANNERS"); raw != "" {

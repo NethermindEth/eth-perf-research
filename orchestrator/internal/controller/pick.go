@@ -5,8 +5,6 @@ import (
 	"encoding/binary"
 	"math"
 	"math/rand/v2"
-	"os"
-	"strconv"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 )
@@ -138,15 +136,14 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	xProj := mathx.ProjectSimplex(step)
 
-	// Gas-awareness: bias the simplex weights toward verbs with the highest
-	// bytes-per-gas. Without this, the controller burns master-signer ETH on
-	// expensive low-yield verbs (e.g. gasburnertx: 1.5M gas/tx, 0 useful bytes;
-	// storagespam: 2.5M gas/tx, modest bytes). The bias is multiplicative and
-	// re-normalised onto the simplex, so the gradient direction is preserved
-	// while the gas-inefficient tail is squashed. Controlled by
-	// $ORCH_GAS_AWARE_EXPONENT (default 0.5 = sqrt bias; 0 = disabled;
-	// 2 = aggressive).
-	xProj = applyGasAwareBias(verbs, xProj, s)
+	// Cheap-bloat re-weight: bias the simplex weights toward verbs delivering
+	// the most state-bytes per ETH spent. bytesPerEth = (sum_axes F[verb]) /
+	// EthPerTx[verb]; EthPerTx is seeded non-zero from the baseline gas table so
+	// the divisor is always positive. Unlearned verbs (F still zero) get a
+	// neutral 1.0 multiplier so they keep being explored — this is the explicit
+	// anti-deadlock rule that replaces the broken applyGasAwareBias, which gave
+	// cold-start verbs an efficiency of 0 and let noop win the mix permanently.
+	xProj = applyCheapBloatBias(verbs, xProj, s)
 
 	// Per-axis shares and tolerance.
 	p := [3]float64{
@@ -393,77 +390,95 @@ func argmaxFloats(v []float64) int {
 	return best
 }
 
-// defaultGasAwareExponent is the bytes-per-gas bias exponent applied to the
-// simplex weights in Pick. 0.5 = square-root bias (moderate); 0 disables;
-// higher values (e.g. 2) aggressively concentrate on the most gas-efficient
-// verbs. Overridden by $ORCH_GAS_AWARE_EXPONENT at runtime.
-const defaultGasAwareExponent = 0.5
-
-// gasAwareExponent reads $ORCH_GAS_AWARE_EXPONENT (float). Returns
-// defaultGasAwareExponent on missing/invalid input. Negative values are clamped
-// to 0 (disable bias) so misconfiguration never flips the bias sign.
-func gasAwareExponent() float64 {
-	raw := os.Getenv("ORCH_GAS_AWARE_EXPONENT")
-	if raw == "" {
-		return defaultGasAwareExponent
-	}
-	v, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
-		return defaultGasAwareExponent
-	}
-	if v < 0 {
-		return 0
-	}
-	return v
-}
-
-// applyGasAwareBias re-weights `xProj` by efficiency[verb] ^ exp where
-// efficiency = (sum_axes F[verb][ax]) / baseGas[verb]. Verbs with zero
-// efficiency (e.g. gasburnertx with sum_F = 0) get an effective weight of
-// (1 / hugeGas)^exp → near zero, which is what we want: don't pick them
-// unless they're the only feasible choice (the downstream `selectFrom`
-// no-feasible fallback path still handles that edge).
+// applyCheapBloatBias re-weights `xProj` toward verbs that deliver the most
+// state-bytes per ETH spent ("keep bloating cheap"). For each verb:
 //
-// noop is special-cased: it is the pure-idle verb with sum_F = 0 by design;
-// we leave its xProj weight untouched so the existing argmax behaviour for
-// "nothing left to do" pipelines does not change.
+//	bytesPerTx  = sum_axes F[verb][ax]   — the learned byte yield
+//	ethPerTx    = s.EthPerTx[verb]       — the learned ETH cost (always > 0,
+//	                                       seeded from the baseline gas table)
+//	bytesPerEth = bytesPerTx / ethPerTx
+//
+// The per-verb bytesPerEth values are normalised by their mean so the
+// multiplier is O(1): above-average verbs are boosted, below-average damped.
+// The result is re-projected onto the simplex.
+//
+// Anti-deadlock rule: a verb whose F is still zero (never observed) gets a
+// NEUTRAL multiplier of 1.0 — never zero. This is what keeps unlearned verbs in
+// the mix so ε-greedy explores them, F learns, and the bias becomes meaningful.
+// It is the explicit fix for the broken applyGasAwareBias, which assigned
+// cold-start verbs an efficiency of 0 → ~0 weight → noop won the mix forever.
+// If every verb is unlearned (cold start), all multipliers are 1.0 and xProj
+// passes through unchanged.
+//
+// noop is special-cased: it is the pure-idle fallback, so its xProj weight is
+// preserved untouched.
 //
 // The returned slice is a new allocation; the caller's xProj is not mutated.
-// If exp == 0 (disable), returns a copy of xProj unchanged.
-func applyGasAwareBias(verbs []string, xProj []float64, s *State) []float64 {
+func applyCheapBloatBias(verbs []string, xProj []float64, s *State) []float64 {
 	out := make([]float64, len(xProj))
 	copy(out, xProj)
 
-	exp := gasAwareExponent()
-	if exp == 0 {
-		return out
-	}
-
-	weights := make([]float64, len(verbs))
+	// bytesPerEth per verb; -1 marks noop (preserve weight, skip normalisation).
+	bytesPerEth := make([]float64, len(verbs))
+	sum := 0.0
+	count := 0
 	for i, v := range verbs {
 		if v == "noop" {
-			// Preserve original weight: noop is the no-op fallback.
+			bytesPerEth[i] = -1
+			continue
+		}
+		bytesPerTx := 0.0
+		if row, ok := s.F[v]; ok {
+			for _, ax := range Axes {
+				bytesPerTx += row[ax]
+			}
+		}
+		if bytesPerTx <= 0 {
+			// Unlearned verb: neutral 1.0 multiplier (anti-deadlock rule).
+			bytesPerEth[i] = -1
+			continue
+		}
+		ethPerTx := s.EthPerTx[v]
+		if ethPerTx <= 0 || math.IsNaN(ethPerTx) || math.IsInf(ethPerTx, 0) {
+			// EthPerTx is seeded > 0; a non-positive value would only arise
+			// from a corrupted update — treat as unlearned and stay neutral.
+			bytesPerEth[i] = -1
+			continue
+		}
+		bpe := bytesPerTx / ethPerTx
+		if math.IsNaN(bpe) || math.IsInf(bpe, 0) {
+			bytesPerEth[i] = -1
+			continue
+		}
+		bytesPerEth[i] = bpe
+		sum += bpe
+		count++
+	}
+
+	// No learned verb to normalise against → bias is a no-op (cold start).
+	if count == 0 || sum <= 0 {
+		return out
+	}
+	mean := sum / float64(count)
+
+	weights := make([]float64, len(verbs))
+	for i := range verbs {
+		bpe := bytesPerEth[i]
+		if bpe < 0 {
+			// noop or unlearned verb: neutral 1.0 multiplier.
 			weights[i] = out[i]
 			continue
 		}
-		eff := s.bytesPerGasEstimate(v)
-		// Floor to avoid 0^x edge cases (0^0 = 1 in Go's math.Pow); zero-byte
-		// verbs (e.g. gasburnertx) should be squashed near-zero, not promoted.
-		// We use 1e-18 → eff^0.5 ≈ 1e-9, which after re-normalisation drops the
-		// verb's mix share well below 1%.
-		if eff <= 0 {
-			eff = 1e-18
+		mult := bpe / mean
+		if math.IsNaN(mult) || math.IsInf(mult, 0) || mult < 0 {
+			mult = 1.0
 		}
-		bias := math.Pow(eff, exp)
-		if math.IsNaN(bias) || math.IsInf(bias, 0) {
-			bias = 0
-		}
-		weights[i] = out[i] * bias
+		weights[i] = out[i] * mult
 	}
 
-	// Re-normalise to sum to 1. If the bias zeroed everything out (e.g. only
-	// gasburnertx is feasible and exp is huge), fall back to the original
-	// xProj so we still produce a usable mix.
+	// Re-normalise onto the simplex. If the bias zeroed everything (shouldn't
+	// happen — multipliers are >= 0 and at least noop/unlearned verbs keep
+	// their weight), fall back to the original xProj.
 	total := 0.0
 	for _, w := range weights {
 		total += w

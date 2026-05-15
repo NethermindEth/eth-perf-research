@@ -131,25 +131,3 @@ func (s *State) GetVerbStats(verb string) *VerbStats {
 	}
 	return s.VerbStats[verb]
 }
-
-// bytesPerGasEstimate returns the EWMA bytes-per-gas estimate after cold-start
-// or the baseline-derived value (sum_F / baseGas) before. Used by Pick's
-// gas-aware bias.
-func (s *State) bytesPerGasEstimate(verb string) float64 {
-	vs := s.GetVerbStats(verb)
-	if vs != nil && vs.Samples >= verbStatsColdStartN {
-		if v := vs.BytesPerGas.Value(); v > 0 {
-			return v
-		}
-	}
-	bytesPerTx := 0.0
-	if row, ok := s.F[verb]; ok {
-		for _, ax := range Axes {
-			bytesPerTx += row[ax]
-		}
-	}
-	if bytesPerTx < 0 {
-		bytesPerTx = 0
-	}
-	return bytesPerTx / float64(baselineGasPerVerb(verb))
-}
