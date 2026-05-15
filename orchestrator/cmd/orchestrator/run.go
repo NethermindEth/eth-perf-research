@@ -114,7 +114,12 @@ func runOrchestrator(ctx context.Context, f runFlags) error {
 	return lifecycle.Run(ctx, cfg)
 }
 
-const defaultRunTotalBatchBytes = 5 * 1024 * 1024
+// defaultRunTotalBatchBytes sizes the per-block tx payload. Kept at 2 MiB so a
+// single block's FlatDb persist stays light enough for the EL client to keep
+// up: at 5 MiB the EL produced ~47k-tx / ~983-MGas blocks and its persist path
+// fell progressively behind ("Slow task Persisting" climbing 6→8→10s) until it
+// died. Raise via ORCH_TOTAL_BATCH_BYTES once the EL persist path is faster.
+const defaultRunTotalBatchBytes = 2 * 1024 * 1024
 
 func resolveTotalBatchBytes() int {
 	raw := os.Getenv("ORCH_TOTAL_BATCH_BYTES")
