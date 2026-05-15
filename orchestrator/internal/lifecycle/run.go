@@ -89,7 +89,7 @@ type Config struct {
 
 const (
 	defaultEpsilon         = 0.5
-	defaultTotalBatchBytes = 8 * 1024 * 1024 // Engine API hard cap
+	defaultTotalBatchBytes = 5 * 1024 * 1024 // stay below NM's BlockProductionMaxTxKilobytes=7.75 MiB once per-tx RLP overhead is counted
 	defaultAddressStride   = uint64(1) << 40
 	terminationOvershoot   = "overshoot"
 	terminationTargetMet   = "target_reached"
@@ -677,12 +677,12 @@ func runLoop(
 	// Skip sentinels (db.skip == true) carry a seqID but no payload; they
 	// represent planner failures after reservation. We advance nextSeq past
 	// them without calling commitBatch.
+	const rejectionStreakHalt = 5
 	go func() {
 		defer wg.Done()
 		var q batchQueue
-		// First seqID emitted by deps.seqCounter is 0 (atomic.Add returns 1
-		// minus one). The counter is independent of startBatchID.
 		var nextSeq uint64 = 0
+		var consecutiveFullRejections int
 
 		drain := func(useCtx context.Context) {
 			for q.Len() > 0 && q[0].seqID == nextSeq {
@@ -692,9 +692,6 @@ func runLoop(
 					continue
 				}
 				if useCtx.Err() != nil {
-					// Parent context cancelled — don't issue network work.
-					// The pending sidecar was NOT written; commit writes it,
-					// so dropping is safe.
 					continue
 				}
 				pre := obsPtr.Load()
@@ -703,11 +700,6 @@ func runLoop(
 					if useCtx.Err() != nil {
 						continue
 					}
-					// NM's block builder occasionally drops a small percentage of
-					// txs in a commit (partial-acceptance). Treat that as a soft
-					// skip: log, advance past the seqID, don't update obs/lastBlock,
-					// keep draining. The dropped batch's nonces are permanently
-					// burned — acceptable cost vs. terminating the whole run.
 					if isPartialAcceptanceErr(err) {
 						expected, included := parsePartialAcceptance(err)
 						slog.Warn("lifecycle: commit partial-acceptance, skipping batch",
@@ -717,6 +709,16 @@ func runLoop(
 							"included", included,
 							"verb", top.plan.Verb,
 						)
+						if included == 0 {
+							consecutiveFullRejections++
+							if consecutiveFullRejections >= rejectionStreakHalt {
+								setTerm(fmt.Sprintf("error: %d consecutive batches fully rejected (verb=%s); chain state likely missing dependencies",
+									consecutiveFullRejections, top.plan.Verb))
+								continue
+							}
+						} else {
+							consecutiveFullRejections = 0
+						}
 						continue
 					}
 					slog.Error("lifecycle: commit failed", "batch_id", top.batchID, "seq_id", top.seqID, "err", err)
@@ -726,6 +728,7 @@ func runLoop(
 				if res != nil && res.committed {
 					obsPtr.Store(res.postObs)
 					lastBlockPtr.Store(res.blockHeader)
+					consecutiveFullRejections = 0
 				}
 			}
 		}

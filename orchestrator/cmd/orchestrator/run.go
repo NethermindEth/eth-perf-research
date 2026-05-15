@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -103,16 +104,48 @@ func runOrchestrator(ctx context.Context, f runFlags) error {
 		BuilderWorkerCmd: strings.Fields(f.builderWorkerCmd),
 		BuilderWorkers:   f.builderWorkers,
 		Epsilon:          f.epsilon,
-		TotalBatchBytes:  8 * 1024 * 1024,
-		Verbs: []string{
-			"eoatx", "calltx", "deploytx", "factorydeploytx",
-			"storagespam", "erc20_bloater", "erc20tx", "uniswap_swaps",
-			"storagerefundtx", "gasburnertx", "evm_fuzz", "noop",
-		},
+		TotalBatchBytes:  resolveTotalBatchBytes(),
+		Verbs:            resolveVerbs(),
 		PluginGitSHA:        f.pluginGitSHA,
 		NethermindCommitSHA: f.nethermindCommitSHA,
 		DotnetRuntimeMajor:  f.dotnetRuntimeMajor,
 		MetricsAddr:         f.metricsAddr,
 	}
 	return lifecycle.Run(ctx, cfg)
+}
+
+const defaultRunTotalBatchBytes = 5 * 1024 * 1024
+
+func resolveTotalBatchBytes() int {
+	raw := os.Getenv("ORCH_TOTAL_BATCH_BYTES")
+	if raw == "" {
+		return defaultRunTotalBatchBytes
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 1024 {
+		return defaultRunTotalBatchBytes
+	}
+	return v
+}
+
+func resolveVerbs() []string {
+	raw := os.Getenv("ORCH_VERBS")
+	if raw == "" {
+		return []string{
+			"eoatx", "calltx", "deploytx", "factorydeploytx",
+			"storagespam", "erc20_bloater", "erc20tx", "uniswap_swaps",
+			"storagerefundtx", "gasburnertx", "evm_fuzz", "noop",
+		}
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"eoatx"}
+	}
+	return out
 }
