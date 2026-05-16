@@ -6,44 +6,46 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// uniswapSwapCalldata is the swapExactTokensForETH calldata the facade emits.
-// The facade drives the EELS builder with count=1: with buy_ratio defaulting
-// such that buy_count_target=0 for a single tx, every tx takes the sell
-// branch (variant 2 = swapExactTokensForETH, path=[token, weth]). The swap
-// amount is the fixed midpoint of [min, max] and the deadline is the pinned
-// constant 2_000_000_000, so the calldata is fully idx-independent.
-//
-// Ported verbatim (byte-for-byte) from the Python oracle rather than
-// re-deriving the dynamic-array ABI encoding, since the value is constant.
-//
-// Layout: selector 0x18cbafe5
-//   amountIn  | minOut | path offset (0xa0) | recipient | deadline
-//   path length (2) | token (0x6666..) | weth (0x5555..)
-var uniswapSwapCalldata = mustHex(
-	"18cbafe5" +
-		"00000000000000000000000000000000000000000000001b1b96799f1e150000" +
-		"00000000000000000000000000000000000000000000001af8e3cd7e52696000" +
-		"00000000000000000000000000000000000000000000000000000000000000a0" +
-		"0000000000000000000000007777777777777777777777777777777777777777" +
-		"0000000000000000000000000000000000000000000000000000000077359400" +
-		"0000000000000000000000000000000000000000000000000000000000000002" +
-		"0000000000000000000000006666666666666666666666666666666666666666" +
-		"0000000000000000000000005555555555555555555555555555555555555555",
-)
+// uniswapSwapsGasToBurn is the gasLimit argument for the stand-in
+// setRandomForGas call. See verbUniswapSwaps for why uniswap_swaps is mapped
+// onto StorageSpam.
+const uniswapSwapsGasToBurn = 1_950_000
 
-// verbUniswapSwaps builds a Uniswap-V2 router swap call. See uniswapSwapCalldata
-// for why the calldata is constant.
+// verbUniswapSwaps is a storage-heavy STAND-IN for the real Uniswap-V2 swap
+// scenario, not a faithful port.
+//
+// Spamoor's uniswap-swaps scenario deploys five interdependent contracts
+// (WETH9, UniswapV2Factory, UniswapV2Router02, Dai, PairLiquidityProvider),
+// wires their constructors, seeds liquidity, sets per-wallet allowances, and —
+// per swap — issues live eth_call queries (getAmountsIn/getAmountsOut) and
+// branches on the caller's current token balance. The orchestrator's verb
+// contract is a pure idx→tx function with NO RPC access during BuildTx and no
+// per-wallet state, so a real swap tx (whose minOut/amountIn depend on the
+// live pool reserves) cannot be constructed deterministically. Porting it
+// would require an RPC-aware verb model, which is out of scope here.
+//
+// Rather than ship a verb that silently no-ops, uniswap_swaps is mapped onto
+// the deployed StorageSpam contract's bulk storage-writing path. It produces
+// real storage-trie bloat; it does NOT exercise Uniswap pair/router code. This
+// is an explicit, documented stub — see the task report.
 type verbUniswapSwaps struct{}
 
 func (verbUniswapSwaps) Name() string { return "uniswap_swaps" }
 
-func (verbUniswapSwaps) BuildTx(_ uint64, _ BuildCtx) (*types.DynamicFeeTx, error) {
-	to := addrUniswapSwaps
-	data := append([]byte(nil), uniswapSwapCalldata...)
+func (v verbUniswapSwaps) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx, error) {
+	to, err := verbTarget(ctx, v.Name())
+	if err != nil {
+		return nil, err
+	}
+	data := concat(
+		selector("setRandomForGas(uint256,uint256)"),
+		word32(uniswapSwapsGasToBurn),
+		word32(idx),
+	)
 	return &types.DynamicFeeTx{
 		To:    &to,
 		Value: new(big.Int),
 		Data:  data,
-		Gas:   250_000,
+		Gas:   2_000_000,
 	}, nil
 }

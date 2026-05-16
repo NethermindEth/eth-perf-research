@@ -6,25 +6,32 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// storageSpamGasToBurn is the gas-units argument the facade pins for
-// storagespam (verbs.py _storagespam_build: gas_units_to_burn=1_950_000).
+// storageSpamGasToBurn is the gasLimit argument passed to setRandomForGas.
+// Spamoor's storagespam scenario defaults GasUnitsToBurn to 2_000_000; the
+// orchestrator pins 1_950_000 so the contract's internal SLOAD/SSTORE loop
+// stays under the verb's 2_000_000 tx gas cap.
 const storageSpamGasToBurn = 1_950_000
 
-// verbStorageSpam builds a setRandomForGas(uint256 gasToBurn, uint256 seed)
-// call. The facade drives the EELS builder with count=1, so the builder's
-// internal loop index is always 0 and the seed word is a constant zero —
-// idx-independent. (The per-tx distinctness comes from the nonce, not the
-// calldata seed.)
+// verbStorageSpam builds a setRandomForGas(uint256 gasLimit, uint256 txid)
+// call against the deployed StorageSpam contract. Spamoor's sendTx passes
+// txid = txIdx (storagespam.go: SetRandomForGas(..., big.NewInt(int64(txIdx))));
+// the contract mixes txid into the storage-slot keccak, so a distinct txid per
+// tx writes a distinct slot window — this is what actually bloats the storage
+// trie. The orchestrator therefore threads the per-tx index into the txid
+// word rather than the stub-era constant zero.
 type verbStorageSpam struct{}
 
 func (verbStorageSpam) Name() string { return "storagespam" }
 
-func (verbStorageSpam) BuildTx(_ uint64, _ BuildCtx) (*types.DynamicFeeTx, error) {
-	to := addrStorageSpam
+func (v verbStorageSpam) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx, error) {
+	to, err := verbTarget(ctx, v.Name())
+	if err != nil {
+		return nil, err
+	}
 	data := concat(
 		selector("setRandomForGas(uint256,uint256)"),
 		word32(storageSpamGasToBurn),
-		word32(0),
+		word32(idx),
 	)
 	return &types.DynamicFeeTx{
 		To:    &to,

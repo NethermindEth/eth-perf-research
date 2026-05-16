@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/verbs"
 )
 
 // Context is the per-run mutable state owned by the orchestrator.
@@ -42,6 +44,12 @@ type Context struct {
 
 	// Per-verb gas-aware sizing.
 	VerbGasFactors map[string]float64
+
+	// Contracts holds the Spamoor scenario contract addresses the bootstrap
+	// phase deployed. Set once after bootstrap, before the hot loop starts;
+	// read-only thereafter. Threaded into every verb's BuildCtx so contract-
+	// calling verbs target the deployed contracts, not dead placeholders.
+	Contracts *verbs.ContractRegistry
 }
 
 // ReserveAddresses reserves n consecutive address-cursor slots and returns the

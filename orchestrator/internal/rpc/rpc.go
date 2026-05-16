@@ -273,6 +273,30 @@ func (c *Client) TestingCommitBlockV1(ctx context.Context, signedTxs [][]byte, t
 	return common.HexToHash(result), nil
 }
 
+// CodeAt returns the deployed bytecode at addr for the given block tag
+// ("latest" when blockTag is ""). An empty slice means the account has no
+// code. Used by the bootstrap phase's fail-loud guard to assert every
+// contract-verb target actually has code.
+func (c *Client) CodeAt(ctx context.Context, addr common.Address, blockTag string) ([]byte, error) {
+	if blockTag == "" {
+		blockTag = "latest"
+	}
+	var raw string
+	if err := c.Call(ctx, "eth_getCode", []any{addr.Hex(), blockTag}, &raw); err != nil {
+		return nil, fmt.Errorf("rpc: CodeAt(%s): %w", addr.Hex(), err)
+	}
+	raw = strings.TrimPrefix(raw, "0x")
+	raw = strings.TrimPrefix(raw, "0X")
+	if raw == "" {
+		return nil, nil
+	}
+	b, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("rpc: CodeAt(%s): decode %q: %w", addr.Hex(), raw, err)
+	}
+	return b, nil
+}
+
 // StatecompGet retrieves Nethermind's statecomp plugin report for the latest block.
 // The raw JSON is returned as-is for the sensor to parse.
 func (c *Client) StatecompGet(ctx context.Context) (json.RawMessage, error) {

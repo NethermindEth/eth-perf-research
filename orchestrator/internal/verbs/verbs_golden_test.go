@@ -3,17 +3,25 @@ package verbs
 import (
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// goldenEntry is one captured Python-oracle tx template. The golden vectors in
-// testdata/golden.json are produced by capture_golden.py, which invokes the
-// real EELS spamoor builders + the orchestrator-py facade wrappers.
+// updateGolden, when set via `go test -update`, rewrites testdata/golden.json
+// from the current verb output instead of asserting against it. Used to
+// regenerate the vectors after a deliberate verb change.
+var updateGolden = flag.Bool("update", false, "regenerate testdata/golden.json from current verb output")
+
+// goldenEntry is one tx template vector. Since the verbs are now native Go (no
+// Python oracle), golden.json is the corrected, verb-derived expectation set;
+// the differential test pins To/Value/Data/Gas so any later verb regression is
+// caught byte-for-byte.
 type goldenEntry struct {
 	Verb  string `json:"verb"`
 	Idx   uint64 `json:"idx"`
@@ -23,9 +31,23 @@ type goldenEntry struct {
 	Gas   uint64 `json:"gas"`
 }
 
-// goldenBuildCtx mirrors the fixed build params capture_golden.py used:
-// base address = 0, revision = 1, stride = 1<<40, salt base = 0, and the
-// well-known lab signer address.
+// goldenContractRegistry returns the fixed contract registry the golden
+// vectors are pinned against. The addresses are deterministic test constants —
+// the bootstrap phase computes the real CreateAddress values at runtime, but
+// the golden test only needs a stable, known mapping so contract-calling verbs
+// resolve a target.
+func goldenContractRegistry() *ContractRegistry {
+	reg := NewContractRegistry()
+	reg.Set(ContractStorageSpam, common.HexToAddress("0x00000000000000000000000000000000c0117ac1"))
+	reg.Set(ContractTestToken, common.HexToAddress("0x00000000000000000000000000000000c0117ac2"))
+	reg.Set(ContractStorageRefund, common.HexToAddress("0x00000000000000000000000000000000c0117ac3"))
+	reg.Set(ContractGasBurner, common.HexToAddress("0x00000000000000000000000000000000c0117ac4"))
+	return reg
+}
+
+// goldenBuildCtx is the fixed build context the golden vectors use: base
+// address = 0, revision = 1, stride = 1<<40, salt base = 0, the well-known lab
+// signer address, and the fixed contract registry.
 func goldenBuildCtx() BuildCtx {
 	return BuildCtx{
 		ChainID:       big.NewInt(1337),
@@ -34,6 +56,7 @@ func goldenBuildCtx() BuildCtx {
 		Revision:      1,
 		AddressStride: 1 << 40,
 		SaltBase:      0,
+		Contracts:     goldenContractRegistry(),
 	}
 }
 
@@ -57,11 +80,67 @@ func trim0x(s string) string {
 	return s
 }
 
+// goldenIdxs is the fixed set of tx indices each verb is sampled at.
+var goldenIdxs = []uint64{0, 1, 2, 1000, 999999}
+
+// regenerateGolden rebuilds golden.json from the current verb output. Invoked
+// by `go test -update` after a deliberate verb change.
+func regenerateGolden(t *testing.T) {
+	t.Helper()
+	ctx := goldenBuildCtx()
+	names := make([]string, 0, len(Registry))
+	for n := range Registry {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	entries := make([]goldenEntry, 0, len(names)*len(goldenIdxs))
+	for _, name := range names {
+		verb := Registry[name]
+		for _, idx := range goldenIdxs {
+			tx, err := verb.BuildTx(idx, ctx)
+			if err != nil {
+				t.Fatalf("regen: BuildTx(%s, %d): %v", name, idx, err)
+			}
+			to := ""
+			if tx.To != nil {
+				to = tx.To.Hex()
+			}
+			value := uint64(0)
+			if tx.Value != nil {
+				value = tx.Value.Uint64()
+			}
+			entries = append(entries, goldenEntry{
+				Verb:  name,
+				Idx:   idx,
+				To:    to,
+				Value: value,
+				Data:  "0x" + hex.EncodeToString(tx.Data),
+				Gas:   tx.Gas,
+			})
+		}
+	}
+	out, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		t.Fatalf("regen: marshal: %v", err)
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(filepath.Join("testdata", "golden.json"), out, 0o644); err != nil {
+		t.Fatalf("regen: write golden.json: %v", err)
+	}
+	t.Logf("regenerated golden.json with %d entries", len(entries))
+}
+
 // TestVerbsGolden asserts byte-equality between every native Go verb and the
-// captured Python oracle. A verb whose template diverges in To, Value, Data or
-// Gas silently corrupts on-chain bloat state, so this test is the migration's
-// load-bearing safety net.
+// golden vectors. A verb whose template diverges in To, Value, Data or Gas
+// silently corrupts on-chain bloat state, so this test is the load-bearing
+// regression net. Run with `-update` to regenerate the vectors.
 func TestVerbsGolden(t *testing.T) {
+	if *updateGolden {
+		regenerateGolden(t)
+		return
+	}
+
 	raw, err := os.ReadFile(filepath.Join("testdata", "golden.json"))
 	if err != nil {
 		t.Fatalf("read golden.json: %v", err)

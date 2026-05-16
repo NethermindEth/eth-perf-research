@@ -36,6 +36,11 @@ type BuildCtx struct {
 	AddressStride uint64
 	// SaltBase is the reserved CREATE2 salt range start for this batch.
 	SaltBase uint64
+	// Contracts holds the addresses of the Spamoor scenario contracts the
+	// bootstrap phase deployed. Contract-calling verbs read their target
+	// address from here; it is nil only before bootstrap completes (verbs
+	// are never built in that window).
+	Contracts *ContractRegistry
 }
 
 // Verb builds unsigned transaction templates for one scenario.

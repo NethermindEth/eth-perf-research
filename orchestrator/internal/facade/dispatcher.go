@@ -106,6 +106,7 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		Revision:      c.Revision,
 		AddressStride: c.AddressStride,
 		SaltBase:      in.StartSalt,
+		Contracts:     c.Contracts,
 	}
 
 	maxFee, maxPri := c.LoadFeePolicy()

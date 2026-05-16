@@ -321,6 +321,27 @@ func Run(ctx context.Context, cfg Config) error {
 		feeWG.Wait()
 	}()
 
+	// 13a. Bootstrap deploy phase. Deploy (or, on resume, re-verify) the
+	// Spamoor scenario contracts the run's verbs require, then thread the
+	// registry into the facade context so contract-calling verbs target the
+	// deployed contracts instead of dead placeholder addresses. The fail-loud
+	// guard inside bootstrapContracts halts the run if any required contract
+	// has no code — the orchestrator must never silently no-op again.
+	contractRegistry, err := bootstrapContracts(ctx, &bootstrapDeps{
+		rpc:       rpcCli,
+		signer:    signr,
+		facadeCtx: facadeCtx,
+		stateDir:  cfg.StateDir,
+		chainID:   chainID,
+	}, cfg.Verbs)
+	if err != nil {
+		return fmt.Errorf("lifecycle: bootstrap: %w", err)
+	}
+	facadeCtx.Contracts = contractRegistry
+	if err := assertVerbContractsHaveCode(ctx, rpcCli, contractRegistry, cfg.Verbs); err != nil {
+		return fmt.Errorf("lifecycle: pre-loop contract guard: %w", err)
+	}
+
 	// 14. Hot loop.
 	dispatcher := facade.New(signr)
 	deps := &batchDeps{
