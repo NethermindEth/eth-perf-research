@@ -3,6 +3,8 @@
 package controller
 
 import (
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
@@ -83,6 +85,23 @@ type State struct {
 	pickApplyMu sync.Mutex
 
 	lastResidualL2 float64
+
+	// debugPick gates the per-batch, per-verb structured debug log emitted by
+	// Pick. Read once from $ORCH_DEBUG_PICK at construction so it can be
+	// enabled on a live system without a rebuild. Off by default; when off,
+	// Pick performs no extra formatting and its behaviour is unaffected.
+	debugPick bool
+}
+
+// envTruthy reports whether an environment variable is set to a truthy value.
+// Accepted truthy values: "1", "true", "yes", "on" (case-insensitive).
+func envTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // LockState acquires the mutex guarding the controller matrices for the
@@ -137,6 +156,7 @@ func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte
 		Epsilon:        epsilon,
 		VerbStats:      make(map[string]*VerbStats),
 		lastResidualL2: 0,
+		debugPick:      envTruthy("ORCH_DEBUG_PICK"),
 	}
 }
 

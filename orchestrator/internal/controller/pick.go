@@ -3,8 +3,11 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
+	"log/slog"
 	"math"
 	"math/rand/v2"
+	"strings"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 )
@@ -263,6 +266,11 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	topIndex := s.selectVerbIndex(selectFrom)
 	topVerb := verbs[topIndex]
 
+	if s.debugPick {
+		s.logPickDebug(verbs, fMat, grad, xProj, maxNTxs, selectFrom,
+			residual, endgame, cum, progress, topVerb)
+	}
+
 	avg := s.AvgTxRLP[topVerb]
 	if avg <= 0 {
 		avg = defaultAvgTxRLP
@@ -328,6 +336,77 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		Mix:           mix,
 		NMaxTxs:       nMax,
 	}
+}
+
+// logPickDebug emits one structured slog line per batch capturing, for every
+// verb, the inputs and intermediate weights that drive verb selection. It is
+// called only when ORCH_DEBUG_PICK is truthy ($ORCH_DEBUG_PICK gate, read once
+// at construction). It is purely observational — it reads already-computed
+// values and changes no control state.
+//
+// fMat is the [3][n] F-matrix; grad/xProj/maxNTxs/selectFrom are the
+// per-verb intermediate slices (selectFrom is the final, normalised selection
+// weight). The per-verb data is packed into one compact string field so the
+// whole batch stays on a single grep-able line: msg="pick debug".
+func (s *State) logPickDebug(
+	verbs []string,
+	fMat [3][]float64,
+	grad, xProj, maxNTxs, selectFrom []float64,
+	residual [3]float64,
+	endgame bool,
+	cum, progress float64,
+	selectedVerb string,
+) {
+	var sb strings.Builder
+	for j, v := range verbs {
+		fRow := s.axisVec(v)
+		fSum := fRow[0] + fRow[1] + fRow[2]
+
+		// Classify why (if at all) this verb's final selection weight is zero.
+		// Stages, checked in pipeline order:
+		//   projection-clamped  — ProjectSimplex zeroed xProj[j].
+		//   cap-zeroed          — per-verb cap < 1 tx (over-served axis).
+		//   feasibility-filtered— selectFrom[j] still 0 after the feasibility
+		//                         filter and exploration floor.
+		zeroed := selectFrom[j] <= 0
+		stage := "none"
+		if zeroed {
+			switch {
+			case xProj[j] <= 0:
+				stage = "projection-clamped"
+			case maxNTxs[j] < 1.0:
+				stage = "cap-zeroed"
+			default:
+				stage = "feasibility-filtered"
+			}
+		}
+
+		capStr := "inf"
+		if !math.IsInf(maxNTxs[j], 1) {
+			capStr = fmt.Sprintf("%.3f", maxNTxs[j])
+		}
+
+		if j > 0 {
+			sb.WriteByte(' ')
+		}
+		// verb|F=[acc,sto,code]|fSum|grad|xProj|cap|selectFrom|zeroed|stage
+		fmt.Fprintf(&sb,
+			"{verb=%s F=[%.6g,%.6g,%.6g] fSum=%.6g grad=%.6g xProj=%.6g cap=%s selectFrom=%.6g zeroed=%t stage=%s}",
+			v, fMat[0][j], fMat[1][j], fMat[2][j], fSum,
+			grad[j], xProj[j], capStr, selectFrom[j], zeroed, stage)
+	}
+
+	slog.Info("pick debug",
+		"batch_id", s.BatchID,
+		"residual_accounts", residual[0],
+		"residual_storage", residual[1],
+		"residual_code", residual[2],
+		"endgame", endgame,
+		"cum", cum,
+		"progress", progress,
+		"selected_verb", selectedVerb,
+		"verbs", sb.String(),
+	)
 }
 
 // selectVerbIndex implements ε-greedy with deterministic RNG.
