@@ -27,11 +27,12 @@ const gasFillFraction = 0.90
 // the byte budget is only a secondary clamp. Returns math.MaxInt32 when
 // blockGasLimit is zero (no cap configured — fresh client, first batch).
 //
-// Sourcing per-tx gas: gasPerTxEstimate uses the EWMA estimate once VerbStats
-// has accumulated verbStatsColdStartN samples, else the static baselineGasPerVerb
-// table. Both are always non-zero, so for a non-zero blockGasLimit this bound is
-// always finite and binding — it can never return an unbounded value, which is
-// what previously let an over-sized cold-start batch crash the dispatcher.
+// Sourcing per-tx gas: gasPerTxEstimate returns max(learned EWMA, static
+// baselineGasPerVerb). Both inputs are always non-zero, so for a non-zero
+// blockGasLimit this bound is always finite and binding — it can never return
+// an unbounded value, which is what previously let an over-sized batch crash
+// the dispatcher. The max also makes the estimate bias UP: a mis-learned low
+// EWMA can never push the cap above what the baseline permits.
 func (s *State) computeGasBasedMax(verb string, blockGasLimit uint64) int {
 	if blockGasLimit == 0 {
 		return math.MaxInt32
@@ -51,19 +52,40 @@ func (s *State) computeGasBasedMax(verb string, blockGasLimit uint64) int {
 	if allowed > float64(math.MaxInt32) {
 		return math.MaxInt32
 	}
-	return int(allowed)
+	cap := int(allowed)
+	// Safety assert: the cap sized against `perTx` (>= baseline) must never let
+	// the batch's baseline-priced gas exceed the dispatcher's hard 0.95 ceiling.
+	// floor() already guarantees this, but shrink defensively if rounding or a
+	// future change ever breaks the invariant.
+	hardCeiling := float64(blockGasLimit) * gasCapFraction
+	for cap > 1 && float64(cap)*perTx > hardCeiling {
+		cap--
+	}
+	return cap
 }
 
-// gasPerTxEstimate returns the EWMA gas-per-tx when samples >= cold-start
-// threshold, else the static baseline.
+// gasPerTxEstimate returns the per-tx gas estimate used to SIZE batches against
+// the dispatcher's hard gas ceiling. It returns max(learned EWMA, static
+// baseline).
+//
+// Why max, not "EWMA when warm, else baseline": this estimate divides the gas
+// ceiling to compute the batch tx count, so the risk is asymmetric.
+// UNDER-estimating gas is catastrophic — it oversizes the batch, the dispatcher
+// rejects the whole oversized batch, and 20 consecutive rejections terminate the
+// run. OVER-estimating is harmless — it just makes batches slightly smaller. The
+// EWMA can mis-learn a value far below a verb's true cost (polluted by
+// partially-included or rejected batches); clamping up to the known-correct
+// static baseline guarantees computeGasBasedMax can never oversize a batch past
+// what the baseline permits, regardless of EWMA pollution.
 func (s *State) gasPerTxEstimate(verb string) float64 {
+	estimate := float64(baselineGasPerVerb(verb))
 	vs := s.GetVerbStats(verb)
 	if vs != nil && vs.Samples >= verbStatsColdStartN {
-		if v := vs.GasPerTx.Value(); v > 0 {
-			return v
+		if v := vs.GasPerTx.Value(); v > estimate {
+			estimate = v
 		}
 	}
-	return float64(baselineGasPerVerb(verb))
+	return estimate
 }
 
 // Pick is goroutine-safe for concurrent readers. State fields are written only

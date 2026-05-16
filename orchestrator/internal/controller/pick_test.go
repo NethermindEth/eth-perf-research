@@ -254,3 +254,52 @@ func TestComputeGasBasedMaxTable(t *testing.T) {
 		}
 	}
 }
+
+// TestComputeGasBasedMaxIgnoresMislearnedLowEWMA: a verb whose learned EWMA has
+// mis-learned a gas value far BELOW its true cost (polluted by partially-
+// included or rejected batches) must still be sized by the static baseline.
+// gasPerTxEstimate returns max(EWMA, baseline), so the under-estimate can never
+// oversize the batch — the production termination bug (20 consecutive "gas cap
+// exceeded" skips) was caused by the EWMA overriding a correct baseline.
+func TestComputeGasBasedMaxIgnoresMislearnedLowEWMA(t *testing.T) {
+	const blockGasLimit uint64 = 8_000_000_000
+	const verb = "storagespam" // baseline ~2.5M gas/tx
+
+	verbs := []string{verb}
+	ref := makeRef(verbs, 10.0)
+	var identity [32]byte
+	s := NewState(verbs, ref, identity, 0.0, 1_000_000_000)
+
+	// Pollute the EWMA with a mis-learned LOW value (50k gas/tx, 50x too low)
+	// across enough samples to pass the cold-start threshold.
+	for i := 0; i < int(verbStatsColdStartN)+5; i++ {
+		s.UpdateVerbStats(verb, 50_000, 1, 1500.0)
+	}
+	vs := s.GetVerbStats(verb)
+	if vs == nil || vs.Samples < verbStatsColdStartN {
+		t.Fatalf("EWMA not warm: samples=%v", vs)
+	}
+	if learned := vs.GasPerTx.Value(); learned >= float64(baselineGasPerVerb(verb)) {
+		t.Fatalf("test setup: learned EWMA=%.0f not below baseline=%d",
+			learned, baselineGasPerVerb(verb))
+	}
+
+	// The estimate must be clamped UP to the baseline, not the low EWMA.
+	if est := s.gasPerTxEstimate(verb); est < float64(baselineGasPerVerb(verb)) {
+		t.Errorf("gasPerTxEstimate=%.0f below baseline=%d — under-estimate not clamped",
+			est, baselineGasPerVerb(verb))
+	}
+
+	// The resulting cap, priced at the BASELINE gas, must fit under the hard
+	// 0.95 ceiling — i.e. the batch can never be oversized past dispatch limit.
+	got := s.computeGasBasedMax(verb, blockGasLimit)
+	if got <= 0 {
+		t.Fatalf("computeGasBasedMax=%d, want > 0", got)
+	}
+	hardCeiling := uint64(float64(blockGasLimit) * gasCapFraction)
+	totalGas := uint64(got) * baselineGasPerVerb(verb)
+	if totalGas > hardCeiling {
+		t.Errorf("cap=%d * baselineGas=%d = %d > hard ceiling=%d — batch would be rejected",
+			got, baselineGasPerVerb(verb), totalGas, hardCeiling)
+	}
+}
