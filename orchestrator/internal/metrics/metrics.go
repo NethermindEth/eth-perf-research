@@ -40,6 +40,9 @@ type Registry struct {
 	AlphaCurrent     *prometheus.GaugeVec // orch_alpha_current{verb,axis}
 	AlphaState       *prometheus.GaugeVec // orch_alpha_state{verb,axis}  (sigma in Python)
 	MixSimplex       *prometheus.GaugeVec // orch_mix_simplex{verb}
+
+	// Histograms — latency distributions.
+	PhaseDuration *prometheus.HistogramVec // orch_phase_duration_seconds{phase}
 }
 
 // New registers all collectors on a fresh private registry and returns the
@@ -119,6 +122,13 @@ func New() *Registry {
 		Name: "orch_mix_simplex",
 		Help: "Post-projection simplex weight per verb.",
 	}, []string{"verb"})
+	phaseDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "orch_phase_duration_seconds",
+		Help: "Per-phase batch processing latency (pick, build, sign, commit, sensor, apply, journal).",
+		// Buckets span sub-millisecond bookkeeping (journal fsync) through
+		// multi-second CPU work (signing tens of thousands of secp256k1 txs).
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10},
+	}, []string{"phase"})
 
 	r.MustRegister(
 		journalRecordsTotal,
@@ -137,6 +147,7 @@ func New() *Registry {
 		alphaCurrent,
 		alphaState,
 		mixSimplex,
+		phaseDuration,
 	)
 
 	return &Registry{
@@ -157,6 +168,7 @@ func New() *Registry {
 		AlphaCurrent:        alphaCurrent,
 		AlphaState:          alphaState,
 		MixSimplex:          mixSimplex,
+		PhaseDuration:       phaseDuration,
 	}
 }
 

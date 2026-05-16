@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -54,6 +55,12 @@ type Result struct {
 	NewCursor   uint64            // first nonce after this batch (StartNonce + TxCount)
 	NewSalt     uint64            // first salt after this batch (StartSalt + NumNonces)
 	VerbGasUsed map[string]uint64 // for EWMA feedback; may be empty
+
+	// BuildDuration / SignDuration are the wall-clock cost of the in-process
+	// verb-template construction and the parallel secp256k1 signing phases,
+	// surfaced for per-phase timing instrumentation.
+	BuildDuration time.Duration
+	SignDuration  time.Duration
 }
 
 // Dispatch builds + signs one batch for in.Plan, using the caller-reserved
@@ -109,6 +116,7 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		maxPri = new(big.Int)
 	}
 
+	buildStart := time.Now()
 	signables := make([]*orchpb.TxIn, 0, count)
 	for i := 0; i < count; i++ {
 		idx := in.StartNonce + uint64(i)
@@ -118,6 +126,7 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		}
 		signables = append(signables, templateToTxIn(tmpl, c.ChainID, idx, maxFee, maxPri))
 	}
+	buildDur := time.Since(buildStart)
 
 	// 3. Hard gas cap: assert cumulative tx gas <= 0.95 × BlockGasLimit. We
 	// can't silently trim under parallel planners — it would create nonce
@@ -140,10 +149,12 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 	}
 
 	// 4. Sign the slice.
+	signStart := time.Now()
 	raws, err := d.Signer.SignBatch(context.Background(), signables)
 	if err != nil {
 		return nil, fmt.Errorf("facade: sign batch: %w", err)
 	}
+	signDur := time.Since(signStart)
 
 	// 5. Compute per-tx Keccak256 hashes and accumulate byte count.
 	hashes := make([][]byte, len(raws))
@@ -158,13 +169,15 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 	// (salt domain is 2^64).
 	txCount := len(raws)
 	return &Result{
-		SignedRLP:   raws,
-		TxCount:     txCount,
-		RLPBytes:    totalBytes,
-		TxRLPHashes: hashes,
-		NewCursor:   in.StartNonce + uint64(txCount),
-		NewSalt:     in.StartSalt + in.NumNonces,
-		VerbGasUsed: map[string]uint64{},
+		SignedRLP:     raws,
+		TxCount:       txCount,
+		RLPBytes:      totalBytes,
+		TxRLPHashes:   hashes,
+		NewCursor:     in.StartNonce + uint64(txCount),
+		NewSalt:       in.StartSalt + in.NumNonces,
+		VerbGasUsed:   map[string]uint64{},
+		BuildDuration: buildDur,
+		SignDuration:  signDur,
 	}, nil
 }
 
