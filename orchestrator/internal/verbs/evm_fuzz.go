@@ -17,6 +17,10 @@ const (
 	evmFuzzModeAll     = 0      // mode "all"
 	evmFuzzValueBase   = 0xA000 // low bound of the non-zero value range
 	evmFuzzValueSpan   = 0x6000 // width of the non-zero value range
+	// evmFuzzGas is the creation-tx gas limit, matching EELS
+	// build_evm_fuzz_transactions (helpers.py:872): effective_gas defaults to
+	// 1_000_000 when no gas_limit is configured.
+	evmFuzzGas = 1_000_000
 )
 
 // evmFuzzSeedHex is the default payload_seed parsed as hex (4 bytes) — used by
@@ -39,7 +43,7 @@ func (verbEvmFuzz) BuildTx(idx uint64, _ BuildCtx) (*types.DynamicFeeTx, error) 
 		To:    nil, // contract creation
 		Value: evmFuzzValue(idx),
 		Data:  evmFuzzBytecode(idx),
-		Gas:   300_000,
+		Gas:   evmFuzzGas,
 	}, nil
 }
 

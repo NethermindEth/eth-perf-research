@@ -6,18 +6,30 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// erc20BloaterGasToBurn is the gasLimit argument for setRandomForGas. erc20_-
-// bloater has no Spamoor scenario; the orchestrator maps it onto the deployed
-// StorageSpam contract's bulk storage-writing path (setRandomForGas loops
-// SLOAD/SSTORE until a gas budget is spent), so it is a real storage bloater
-// rather than the stub-era no-op call to a dead 0xdd… address.
-const erc20BloaterGasToBurn = 1_950_000
+// erc20_bloater tuning constants — ported from EELS
+// build_erc20_bloater_transactions (helpers.py:1168). Each exec tx calls
+// bloatStorage(uint256 startSlot, uint256 numAddresses) on the deployed
+// ERC20Bloater contract, sweeping the address space sequentially:
+// startSlot = startAddressIndex + idx*addressesPerTx.
+const (
+	// erc20BloaterAddressesPerTx is the numAddresses argument (step), matching
+	// helpers.py addresses_per_tx default of 370.
+	erc20BloaterAddressesPerTx = 370
+	// erc20BloaterStartIndex is the first startSlot, matching helpers.py
+	// start_address_index default of 1.
+	erc20BloaterStartIndex = 1
+	// erc20BloaterGas is the exec-tx gas limit, matching helpers.py
+	// _BLOAT_DEFAULT_GAS (16_700_000, the EIP-7825 per-tx cap).
+	erc20BloaterGas = 16_700_000
+)
 
-// verbErc20Bloater builds a bulk storage-write call against the deployed
-// StorageSpam contract. It calls setRandomForGas(uint256 gasLimit, uint256
-// txid) with txid set to the per-tx index, so each tx writes a distinct window
-// of storage slots — the same primary-storage-bloat mechanism as storagespam,
-// kept as a separate verb so the controller can weight it independently.
+// verbErc20Bloater builds a bloatStorage(uint256 startSlot, uint256
+// numAddresses) call against the deployed ERC20Bloater contract. ERC20Bloater
+// is the real Spamoor statebloat/erc20_bloater scenario contract; bloatStorage
+// transfers tokens and approves a sequential window of addresses, creating two
+// fresh storage slots per address. The orchestrator slides startSlot per tx so
+// each call writes a distinct window — the same sequential sweep as the EELS
+// build_erc20_bloater_transactions adaptation.
 type verbErc20Bloater struct{}
 
 func (verbErc20Bloater) Name() string { return "erc20_bloater" }
@@ -27,15 +39,16 @@ func (v verbErc20Bloater) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx
 	if err != nil {
 		return nil, err
 	}
+	start := erc20BloaterStartIndex + idx*erc20BloaterAddressesPerTx
 	data := concat(
-		selector("setRandomForGas(uint256,uint256)"),
-		word32(erc20BloaterGasToBurn),
-		word32(idx),
+		selector("bloatStorage(uint256,uint256)"),
+		word32(start),
+		word32(erc20BloaterAddressesPerTx),
 	)
 	return &types.DynamicFeeTx{
 		To:    &to,
 		Value: new(big.Int),
 		Data:  data,
-		Gas:   2_000_000,
+		Gas:   erc20BloaterGas,
 	}, nil
 }

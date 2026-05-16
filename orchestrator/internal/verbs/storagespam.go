@@ -7,10 +7,14 @@ import (
 )
 
 // storageSpamGasToBurn is the gasLimit argument passed to setRandomForGas.
-// Spamoor's storagespam scenario defaults GasUnitsToBurn to 2_000_000; the
-// orchestrator pins 1_950_000 so the contract's internal SLOAD/SSTORE loop
-// stays under the verb's 2_000_000 tx gas cap.
-const storageSpamGasToBurn = 1_950_000
+// EELS build_storagespam_transactions (helpers.py:1060) defaults
+// gas_units_to_burn to 2_000_000 and sizes each exec tx at
+// gas_units_to_burn + 50_000.
+const storageSpamGasToBurn = 2_000_000
+
+// storageSpamExecGas is the exec-tx gas limit: gas_units_to_burn + 50_000,
+// matching helpers.py:1130 (exec_gas = gas_units_to_burn + 50_000).
+const storageSpamExecGas = storageSpamGasToBurn + 50_000
 
 // verbStorageSpam builds a setRandomForGas(uint256 gasLimit, uint256 txid)
 // call against the deployed StorageSpam contract. Spamoor's sendTx passes
@@ -37,6 +41,6 @@ func (v verbStorageSpam) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx,
 		To:    &to,
 		Value: new(big.Int),
 		Data:  data,
-		Gas:   2_000_000,
+		Gas:   storageSpamExecGas,
 	}, nil
 }

@@ -7,16 +7,14 @@ import (
 )
 
 // storageRefundSlotsPerCall is the slotsPerCall argument passed to execute.
-// Spamoor's storagerefundtx scenario defaults SlotsPerCall to 500, sizing the
-// tx gas via gasLimitForSlots (~100k overhead + ~27.7k/slot). The orchestrator
-// pins 40 slots so the contract's write+clear loop fits the verb's tx gas cap
-// while still touching real storage every call — the stub-era port passed 0,
-// which made the contract write nothing.
-const storageRefundSlotsPerCall = 40
+// EELS build_storagerefundtx_transactions (helpers.py:1278) defaults
+// slots_per_call to 500.
+const storageRefundSlotsPerCall = 500
 
-// storageRefundGas covers gasLimitForSlots(40) from the Spamoor scenario:
-// 40*(22300+5200+200) + 100000 ≈ 1_208_000, rounded up for headroom.
-const storageRefundGas = 1_300_000
+// storageRefundGas is the exec-tx gas limit, matching EELS
+// _STORAGE_REFUND_DEFAULT_GAS (helpers.py:1275 — 3_000_000, sized to fit
+// SlotsPerCall<=500 SSTORE+clear cycles under the lab 30M block cap).
+const storageRefundGas = 3_000_000
 
 // verbStorageRefundtx builds an execute(uint256 slotsPerCall) call against the
 // deployed StorageRefund contract. StorageRefund.execute writes a window of

@@ -1,51 +1,31 @@
 package verbs
 
 import (
-	"errors"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-const addrSpaceBits = 160
+// eoatxRecipient is the fixed recipient for every eoatx transfer. EELS
+// build_eoatx_transactions (helpers.py:212) sends every tx to the zero
+// address with value = amount (default 0); the orchestrator matches that
+// exactly rather than deriving a fresh recipient per tx.
+var eoatxRecipient = common.HexToAddress("0x0000000000000000000000000000000000000000")
 
-// verbEoatx builds a value-1 EOA transfer to a freshly derived address, so
-// every tx writes a new account-trie leaf.
+// verbEoatx builds an EOA-to-EOA type-2 transfer. Faithful to EELS
+// build_eoatx_transactions: to = 0x0, value = amount (0), data empty,
+// gas 21000.
 type verbEoatx struct{}
 
 func (verbEoatx) Name() string { return "eoatx" }
 
-func (verbEoatx) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx, error) {
-	to, err := deriveAddress(ctx, idx)
-	if err != nil {
-		return nil, err
-	}
+func (verbEoatx) BuildTx(_ uint64, _ BuildCtx) (*types.DynamicFeeTx, error) {
+	to := eoatxRecipient
 	return &types.DynamicFeeTx{
 		To:    &to,
-		Value: big.NewInt(1),
+		Value: new(big.Int),
 		Data:  []byte{},
 		Gas:   21_000,
 	}, nil
-}
-
-// deriveAddress returns the 20-byte address for logical index idx:
-// baseAddress + revision*stride + idx, big-endian-packed. Mirrors
-// orchestrator-py FacadeContext.derive_address.
-func deriveAddress(ctx BuildCtx, idx uint64) (common.Address, error) {
-	base := new(big.Int)
-	if len(ctx.BaseAddress) > 0 {
-		base.SetBytes(ctx.BaseAddress)
-	}
-	stride := new(big.Int).SetUint64(ctx.AddressStride)
-	rev := new(big.Int).SetUint64(ctx.Revision)
-	addr := new(big.Int).Mul(rev, stride)
-	addr.Add(addr, base)
-	addr.Add(addr, new(big.Int).SetUint64(idx))
-	if addr.BitLen() > addrSpaceBits {
-		return common.Address{}, errors.New("verbs: address derivation overflows 20 bytes")
-	}
-	var out common.Address
-	addr.FillBytes(out[:])
-	return out, nil
 }

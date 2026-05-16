@@ -15,20 +15,28 @@ var factoryInitCode = mustHex("6001600055")
 // pins the literal selector 0x4c8c9ea1.
 var factoryDeploySelector = []byte{0x4c, 0x8c, 0x9e, 0xa1}
 
+// factoryDeployGas is the exec-tx gas limit, matching EELS
+// build_factorydeploytx_transactions (helpers.py:441): gas_limit defaults to
+// 500_000.
+const factoryDeployGas = 500_000
+
 // verbFactoryDeploytx builds a CREATE2 factory call: deploy(bytes32 salt,
-// bytes initCode). The salt is the batch-reserved SaltBase.
+// bytes initCode). EELS build_factorydeploytx_transactions (helpers.py:483)
+// uses salt = start_salt + i, so the salt increments per tx. The orchestrator
+// threads the per-tx index onto the batch-reserved SaltBase to reproduce that
+// per-tx-unique salt (each salt yields a distinct CREATE2 deployment address).
 type verbFactoryDeploytx struct{}
 
 func (verbFactoryDeploytx) Name() string { return "factorydeploytx" }
 
-func (verbFactoryDeploytx) BuildTx(_ uint64, ctx BuildCtx) (*types.DynamicFeeTx, error) {
+func (verbFactoryDeploytx) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx, error) {
 	to := addrFactoryDeploytx
-	data := encodeFactoryDeployCall(ctx.SaltBase, factoryInitCode)
+	data := encodeFactoryDeployCall(ctx.SaltBase+idx, factoryInitCode)
 	return &types.DynamicFeeTx{
 		To:    &to,
 		Value: new(big.Int),
 		Data:  data,
-		Gas:   400_000,
+		Gas:   factoryDeployGas,
 	}, nil
 }
 
