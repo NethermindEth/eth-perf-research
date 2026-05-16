@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
@@ -214,6 +216,17 @@ type hydrationResult struct {
 // Observability block, or the coefficient maps are empty/unparsable, the State
 // keeps its cold-start seed values and the returned result reports
 // Reconstructed=false so the caller can log a cold start.
+//
+// Reconstruction is also VALIDATING: a journal can persist coefficients that
+// the runtime divergence bug (since fixed in controller.Apply / mathx) wrote
+// before the fix — e.g. F[eoatx][storage] = 6.48e13 or σ = 4.15e14. Folding
+// those back in would re-poison the matrix on every restart and override the
+// sane built-in reference-F seed. So every F/σ value read from the tail is
+// checked against the same physical bound (mathx.CoeffBound). If ANY F or σ
+// cell is non-finite or out of range the ENTIRE reconstruction is discarded:
+// the State keeps its cold-start reference-F seed and Reconstructed stays
+// false. Whole-discard (rather than per-cell salvage) is the simplest correct
+// option — a corrupt journal must never override the sane reference seed.
 func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydrationResult {
 	var res hydrationResult
 	if state == nil || tail == nil || tail.Observability == nil {
@@ -221,36 +234,73 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 	}
 	obs := tail.Observability
 
-	// Coeffs ("verb.axis" -> F).
+	// Pass 1: parse and validate every F/σ cell WITHOUT mutating state. α is a
+	// learning rate in a small fixed band and is not byte-scaled, so it is not
+	// range-checked here — but a non-finite α is still rejected below.
+	type cell struct {
+		verb string
+		ax   controller.Axis
+		val  float64
+	}
+	var fCells, sigmaCells, alphaCells []cell
 	for k, v := range obs.CoeffsAfter {
 		verb, ax, ok := splitFlatKey(k)
 		if !ok {
 			continue
 		}
-		if _, has := state.F[verb]; has {
-			state.F[verb][ax] = v
-			res.CoeffCells++
-		}
-	}
-	for k, v := range obs.AlphaCurrent {
-		verb, ax, ok := splitFlatKey(k)
-		if !ok {
+		if _, has := state.F[verb]; !has {
 			continue
 		}
-		if _, has := state.Alpha[verb]; has {
-			state.Alpha[verb][ax] = v
-			res.AlphaCells++
+		if !mathx.IsFiniteInRange(v) {
+			slog.Error("journal F reconstruction rejected — corrupt coefficients, cold-starting from reference-F",
+				"cell", k, "value", v, "bound", mathx.CoeffBound)
+			return res
 		}
+		fCells = append(fCells, cell{verb, ax, v})
 	}
 	for k, v := range obs.SigmaInnov {
 		verb, ax, ok := splitFlatKey(k)
 		if !ok {
 			continue
 		}
-		if _, has := state.Sigma[verb]; has {
-			state.Sigma[verb][ax] = v
-			res.SigmaCells++
+		if _, has := state.Sigma[verb]; !has {
+			continue
 		}
+		if !mathx.IsFiniteInRange(v) {
+			slog.Error("journal F reconstruction rejected — corrupt coefficients, cold-starting from reference-F",
+				"cell", k, "sigma", v, "bound", mathx.CoeffBound)
+			return res
+		}
+		sigmaCells = append(sigmaCells, cell{verb, ax, v})
+	}
+	for k, v := range obs.AlphaCurrent {
+		verb, ax, ok := splitFlatKey(k)
+		if !ok {
+			continue
+		}
+		if _, has := state.Alpha[verb]; !has {
+			continue
+		}
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			slog.Error("journal F reconstruction rejected — corrupt coefficients, cold-starting from reference-F",
+				"cell", k, "alpha", v)
+			return res
+		}
+		alphaCells = append(alphaCells, cell{verb, ax, v})
+	}
+
+	// Pass 2: every cell validated — commit them to state.
+	for _, fc := range fCells {
+		state.F[fc.verb][fc.ax] = fc.val
+		res.CoeffCells++
+	}
+	for _, sc := range sigmaCells {
+		state.Sigma[sc.verb][sc.ax] = sc.val
+		res.SigmaCells++
+	}
+	for _, ac := range alphaCells {
+		state.Alpha[ac.verb][ac.ax] = ac.val
+		res.AlphaCells++
 	}
 	state.BatchID = tail.BatchId + 1
 	res.Reconstructed = res.CoeffCells > 0 || res.AlphaCells > 0 || res.SigmaCells > 0

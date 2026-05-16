@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"bytes"
+	"math"
 	"math/big"
 	"testing"
 
@@ -250,6 +251,87 @@ func TestHydrateStateFromTailColdStartFallback(t *testing.T) {
 			}
 			if got := st.F["eoatx"][controller.AxisAccounts]; got != seedF {
 				t.Errorf("F mutated on cold-start fallback: got %v, want seed %v", got, seedF)
+			}
+		})
+	}
+}
+
+// TestHydrateStateFromTailRejectsCorruptCoefficients guards FIX 2: a journal
+// tail carrying a divergent F coefficient (the production bug persisted
+// F[eoatx][storage] ≈ 6.48e13) must be rejected wholesale. The reconstruction
+// is discarded and the State keeps its sane cold-start reference-F seed —
+// a corrupt journal must never override it.
+func TestHydrateStateFromTailRejectsCorruptCoefficients(t *testing.T) {
+	verbs := []string{"eoatx", "storagespam"}
+
+	cases := []struct {
+		name string
+		obs  *orchpb.Observability
+	}{
+		{
+			name: "divergent F coefficient",
+			obs: &orchpb.Observability{
+				CoeffsAfter: map[string]float64{
+					"eoatx.accounts": 160.0,
+					"eoatx.storage":  6.48e13, // garbage from the divergence bug
+				},
+			},
+		},
+		{
+			name: "non-finite F coefficient",
+			obs: &orchpb.Observability{
+				CoeffsAfter: map[string]float64{"eoatx.accounts": math.Inf(1)},
+			},
+		},
+		{
+			name: "divergent sigma",
+			obs: &orchpb.Observability{
+				CoeffsAfter: map[string]float64{"eoatx.accounts": 160.0},
+				SigmaInnov:  map[string]float64{"eoatx.storage": 4.15e14},
+			},
+		},
+		{
+			name: "non-finite alpha",
+			obs: &orchpb.Observability{
+				CoeffsAfter:  map[string]float64{"eoatx.accounts": 160.0},
+				AlphaCurrent: map[string]float64{"eoatx.accounts": math.NaN()},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newColdState(verbs)
+			// Capture the cold-start seed for every cell so we can assert the
+			// reconstruction left the State entirely untouched.
+			seedF := make(map[string]map[controller.Axis]float64)
+			for _, v := range verbs {
+				seedF[v] = map[controller.Axis]float64{}
+				for _, ax := range controller.Axes {
+					seedF[v][ax] = state.F[v][ax]
+				}
+			}
+
+			tail := &orchpb.Record{BatchId: 99, Observability: tc.obs}
+			res := hydrateStateFromTail(state, tail)
+
+			if res.Reconstructed {
+				t.Fatalf("Reconstructed=true, want false (corrupt tail must be rejected)")
+			}
+			if res.CoeffCells != 0 || res.SigmaCells != 0 || res.AlphaCells != 0 {
+				t.Errorf("cells committed on rejection: coeff:%d sigma:%d alpha:%d, want 0/0/0",
+					res.CoeffCells, res.SigmaCells, res.AlphaCells)
+			}
+			for _, v := range verbs {
+				for _, ax := range controller.Axes {
+					if got := state.F[v][ax]; got != seedF[v][ax] {
+						t.Errorf("F[%s][%s] mutated by rejected reconstruction: got %v, want seed %v",
+							v, ax, got, seedF[v][ax])
+					}
+				}
+			}
+			if state.BatchID != 0 {
+				t.Errorf("BatchID advanced on rejection: got %d, want 0 (cold start)", state.BatchID)
 			}
 		})
 	}
