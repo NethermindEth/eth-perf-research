@@ -101,7 +101,6 @@ func runOrchestrator(ctx context.Context, f runFlags) error {
 		NethermindCommitSHA: f.nethermindCommitSHA,
 		DotnetRuntimeMajor:  f.dotnetRuntimeMajor,
 		MetricsAddr:         f.metricsAddr,
-		TargetEthPerGasWei:  resolveTargetEthPerGas(),
 	}
 	return lifecycle.Run(ctx, cfg)
 }
@@ -121,25 +120,6 @@ func resolveTotalBatchBytes() int {
 	v, err := strconv.Atoi(raw)
 	if err != nil || v < 1024 {
 		return defaultRunTotalBatchBytes
-	}
-	return v
-}
-
-// defaultTargetEthPerGasWei is the fixed gas price (1 gwei, in wei per gas) the
-// orchestrator pins the EIP-1559 fee policy to and uses to seed the per-verb
-// EthPerTx cost model. Overridable via ORCH_TARGET_ETH_PER_GAS.
-const defaultTargetEthPerGasWei uint64 = 1_000_000_000
-
-// resolveTargetEthPerGas reads ORCH_TARGET_ETH_PER_GAS (wei per gas, unsigned
-// integer). Returns the 1 gwei default on missing/invalid/zero input.
-func resolveTargetEthPerGas() uint64 {
-	raw := os.Getenv("ORCH_TARGET_ETH_PER_GAS")
-	if raw == "" {
-		return defaultTargetEthPerGasWei
-	}
-	v, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil || v == 0 {
-		return defaultTargetEthPerGasWei
 	}
 	return v
 }

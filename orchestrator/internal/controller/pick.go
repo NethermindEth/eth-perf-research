@@ -164,15 +164,6 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	xProj := mathx.ProjectSimplex(step)
 
-	// Cheap-bloat re-weight: bias the simplex weights toward verbs delivering
-	// the most state-bytes per ETH spent. bytesPerEth = (sum_axes F[verb]) /
-	// EthPerTx[verb]; EthPerTx is seeded non-zero from the baseline gas table so
-	// the divisor is always positive. Unlearned verbs (F still zero) get a
-	// neutral 1.0 multiplier so they keep being explored — this is the explicit
-	// anti-deadlock rule that replaces the broken applyGasAwareBias, which gave
-	// cold-start verbs an efficiency of 0 and let noop win the mix permanently.
-	xProj = applyCheapBloatBias(verbs, xProj, s)
-
 	// Per-axis shares and tolerance.
 	p := [3]float64{
 		tgt.Shares[AxisAccounts],
@@ -421,108 +412,6 @@ func argmaxFloats(v []float64) int {
 		}
 	}
 	return best
-}
-
-// applyCheapBloatBias re-weights `xProj` toward verbs that deliver the most
-// state-bytes per ETH spent ("keep bloating cheap"). For each verb:
-//
-//	bytesPerTx  = sum_axes F[verb][ax]   — the learned byte yield
-//	ethPerTx    = s.EthPerTx[verb]       — the learned ETH cost (always > 0,
-//	                                       seeded from the baseline gas table)
-//	bytesPerEth = bytesPerTx / ethPerTx
-//
-// The per-verb bytesPerEth values are normalised by their mean so the
-// multiplier is O(1): above-average verbs are boosted, below-average damped.
-// The result is re-projected onto the simplex.
-//
-// Anti-deadlock rule: a verb whose F is still zero (never observed) gets a
-// NEUTRAL multiplier of 1.0 — never zero. This is what keeps unlearned verbs in
-// the mix so ε-greedy explores them, F learns, and the bias becomes meaningful.
-// It is the explicit fix for the broken applyGasAwareBias, which assigned
-// cold-start verbs an efficiency of 0 → ~0 weight → noop won the mix forever.
-// If every verb is unlearned (cold start), all multipliers are 1.0 and xProj
-// passes through unchanged.
-//
-// noop is special-cased: it is the pure-idle fallback, so its xProj weight is
-// preserved untouched.
-//
-// The returned slice is a new allocation; the caller's xProj is not mutated.
-func applyCheapBloatBias(verbs []string, xProj []float64, s *State) []float64 {
-	out := make([]float64, len(xProj))
-	copy(out, xProj)
-
-	// bytesPerEth per verb; -1 marks noop (preserve weight, skip normalisation).
-	bytesPerEth := make([]float64, len(verbs))
-	sum := 0.0
-	count := 0
-	for i, v := range verbs {
-		if v == "noop" {
-			bytesPerEth[i] = -1
-			continue
-		}
-		bytesPerTx := 0.0
-		if row, ok := s.F[v]; ok {
-			for _, ax := range Axes {
-				bytesPerTx += row[ax]
-			}
-		}
-		if bytesPerTx <= 0 {
-			// Unlearned verb: neutral 1.0 multiplier (anti-deadlock rule).
-			bytesPerEth[i] = -1
-			continue
-		}
-		ethPerTx := s.EthPerTx[v]
-		if ethPerTx <= 0 || math.IsNaN(ethPerTx) || math.IsInf(ethPerTx, 0) {
-			// EthPerTx is seeded > 0; a non-positive value would only arise
-			// from a corrupted update — treat as unlearned and stay neutral.
-			bytesPerEth[i] = -1
-			continue
-		}
-		bpe := bytesPerTx / ethPerTx
-		if math.IsNaN(bpe) || math.IsInf(bpe, 0) {
-			bytesPerEth[i] = -1
-			continue
-		}
-		bytesPerEth[i] = bpe
-		sum += bpe
-		count++
-	}
-
-	// No learned verb to normalise against → bias is a no-op (cold start).
-	if count == 0 || sum <= 0 {
-		return out
-	}
-	mean := sum / float64(count)
-
-	weights := make([]float64, len(verbs))
-	for i := range verbs {
-		bpe := bytesPerEth[i]
-		if bpe < 0 {
-			// noop or unlearned verb: neutral 1.0 multiplier.
-			weights[i] = out[i]
-			continue
-		}
-		mult := bpe / mean
-		if math.IsNaN(mult) || math.IsInf(mult, 0) || mult < 0 {
-			mult = 1.0
-		}
-		weights[i] = out[i] * mult
-	}
-
-	// Re-normalise onto the simplex. If the bias zeroed everything (shouldn't
-	// happen — multipliers are >= 0 and at least noop/unlearned verbs keep
-	// their weight), fall back to the original xProj.
-	total := 0.0
-	for _, w := range weights {
-		total += w
-	}
-	if total <= 0 || math.IsNaN(total) || math.IsInf(total, 0) {
-		return out
-	}
-	for i := range weights {
-		weights[i] /= total
-	}
-	return weights
 }
 
 func clampMin(v, lo int) int {

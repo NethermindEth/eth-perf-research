@@ -5,7 +5,6 @@ package controller
 import (
 	"sync"
 
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 )
 
@@ -59,21 +58,6 @@ type State struct {
 	ChainIdentity [32]byte // sha256(genesis || target) seed material
 	Epsilon       float64  // ε-greedy exploration rate in [0, 1]
 
-	// EthPerTx is the per-verb learned ETH-cost per tx in wei, updated by Apply
-	// through mathx.UpdateCoeff (the same tanh-saturated adaptive-α updater as
-	// F). EthSigma/EthAlpha are the matching 1-D innovation-scale / learning-rate
-	// rows for that updater. EthPerTx is seeded non-zero from baselineGasPerVerb ×
-	// TargetEthPerGasWei in NewState, so the cheap-bloat bias always has a
-	// positive divisor — the cold-start noop deadlock cannot recur.
-	EthPerTx map[string]float64 // verb -> learned ETH cost per tx (wei)
-	EthSigma map[string]float64 // verb -> innovation scale for the EthPerTx update
-	EthAlpha map[string]float64 // verb -> learning rate for the EthPerTx update
-
-	// TargetEthPerGasWei is the fixed gas price (wei per gas) the orchestrator
-	// pins the EIP-1559 fee policy to. observedEthPerTx = gasPerTx × this, so the
-	// learned EthPerTx is proportional to observed gas-per-tx.
-	TargetEthPerGasWei uint64
-
 	// overshootMu guards the rolling overshoot window. Apply (commit goroutine)
 	// writes via pushOvershoot; planner goroutines read via HasInstability.
 	// F/Sigma/Alpha races are tolerated (benign — readers see either pre-Apply
@@ -93,7 +77,7 @@ type State struct {
 	VerbStats   map[string]*VerbStats
 
 	// pickApplyMu serialises the depth-1 pipeline's cross-goroutine access to
-	// F/Sigma/Alpha/EthPerTx/AvgTxRLP/BatchID. The committer goroutine writes
+	// F/Sigma/Alpha/AvgTxRLP/BatchID. The committer goroutine writes
 	// these in Apply; the planner goroutine reads them in Pick. Held only for
 	// the brief Pick-read and Apply-write — never during build/sign/commit.
 	pickApplyMu sync.Mutex
@@ -109,9 +93,8 @@ func (s *State) LockState() { s.pickApplyMu.Lock() }
 func (s *State) UnlockState() { s.pickApplyMu.Unlock() }
 
 // NewState initialises a State from the reference-F seed values.
-// verbs must be the complete ordered list. targetEthPerGasWei is the fixed gas
-// price used to seed EthPerTx from the static baselineGasPerVerb table.
-func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte, epsilon float64, targetEthPerGasWei uint64) *State {
+// verbs must be the complete ordered list.
+func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte, epsilon float64) *State {
 	verbsCopy := make([]string, len(verbs))
 	copy(verbsCopy, verbs)
 
@@ -119,11 +102,6 @@ func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte
 	sigma := make(map[string]map[Axis]float64, len(verbs))
 	alpha := make(map[string]map[Axis]float64, len(verbs))
 	avgTxRLP := make(map[string]float64, len(verbs))
-	ethPerTx := make(map[string]float64, len(verbs))
-	ethSigma := make(map[string]float64, len(verbs))
-	ethAlpha := make(map[string]float64, len(verbs))
-
-	_ = mathx.UpdateCoeff // ensure import is used
 
 	for _, verb := range verbsCopy {
 		refPerVerb := ref.Verbs[verb] // map[string]float64 from YAML
@@ -146,31 +124,19 @@ func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte
 		} else {
 			avgTxRLP[verb] = defaultAvgTxRLP
 		}
-
-		// Seed the per-verb ETH cost from the static baseline gas table times
-		// the fixed gas price. This is always > 0, which is the critical fix
-		// for the cold-start deadlock: the cheap-bloat bias divides by EthPerTx
-		// and must never see a zero divisor before any verb has been observed.
-		ethPerTx[verb] = float64(baselineGasPerVerb(verb)) * float64(targetEthPerGasWei)
-		ethSigma[verb] = defaultSigma
-		ethAlpha[verb] = aMinSeed
 	}
 
 	return &State{
-		Verbs:              verbsCopy,
-		F:                  f,
-		Sigma:              sigma,
-		Alpha:              alpha,
-		AvgTxRLP:           avgTxRLP,
-		EthPerTx:           ethPerTx,
-		EthSigma:           ethSigma,
-		EthAlpha:           ethAlpha,
-		TargetEthPerGasWei: targetEthPerGasWei,
-		BatchID:            0,
-		ChainIdentity:      chainIdentity,
-		Epsilon:            epsilon,
-		VerbStats:          make(map[string]*VerbStats),
-		lastResidualL2:     0,
+		Verbs:          verbsCopy,
+		F:              f,
+		Sigma:          sigma,
+		Alpha:          alpha,
+		AvgTxRLP:       avgTxRLP,
+		BatchID:        0,
+		ChainIdentity:  chainIdentity,
+		Epsilon:        epsilon,
+		VerbStats:      make(map[string]*VerbStats),
+		lastResidualL2: 0,
 	}
 }
 

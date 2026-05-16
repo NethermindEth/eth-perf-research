@@ -56,23 +56,6 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 		s.Alpha[verb][ax] = result.Alpha
 	}
 
-	// Update the per-verb learned ETH cost. The fixed gas price makes
-	// observedEthPerTx proportional to observed gas-per-tx, so EthPerTx tracks
-	// the verb's true gas cost. Skipped when gasUsed is zero (legacy call path)
-	// — the seeded baseline value stays in place. Same tanh-α updater as F.
-	if gasUsed > 0 {
-		observedEthPerTx := (float64(gasUsed) / float64(txCount)) * float64(s.TargetEthPerGasWei)
-		ethResult := mathx.UpdateCoeff(
-			s.EthPerTx[verb],
-			observedEthPerTx,
-			s.EthSigma[verb],
-			s.EthAlpha[verb],
-		)
-		s.EthPerTx[verb] = ethResult.F
-		s.EthSigma[verb] = ethResult.Sigma
-		s.EthAlpha[verb] = ethResult.Alpha
-	}
-
 	// Residual: obs_vec - commanded_vec (commanded = F[verb][ax] * txCount after update).
 	// Python computes residual BEFORE updating F (uses new F[verb] post-update for commanded).
 	// Actually re-reading: Python computes commanded_vec from state.F[verb] which has already
