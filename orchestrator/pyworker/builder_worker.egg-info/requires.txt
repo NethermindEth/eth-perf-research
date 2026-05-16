@@ -1,4 +1,0 @@
-protobuf>=4.25
-
-[test]
-pytest>=7

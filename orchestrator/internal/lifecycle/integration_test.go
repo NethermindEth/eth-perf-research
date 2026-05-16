@@ -13,9 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,8 +44,6 @@ func TestLifecycleIntegration(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	workerBin := buildLifecycleWorker(t)
-
 	// ── mock Nethermind ──────────────────────────────────────────────────────
 	nm := newMockNM(t)
 	defer nm.srv.Close()
@@ -75,8 +71,6 @@ func TestLifecycleIntegration(t *testing.T) {
 		MaxBatches:         5,
 		EnableProbe:        false,
 		DeployPrivateKey:   deployKey,
-		BuilderWorkerCmd:   []string{workerBin},
-		BuilderWorkers:     1,
 		SensorPollInterval: 10 * time.Millisecond,
 		SensorDeadline:     3 * time.Second,
 		Verbs:              []string{"eoatx"},
@@ -264,29 +258,6 @@ func blockHashForNumber(n uint64) string {
 	return "0x" + hex.EncodeToString(h[:])
 }
 
-// ── lifecycle_worker build helper ────────────────────────────────────────────
-
-func buildLifecycleWorker(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	// thisFile = .../orchestrator/internal/lifecycle/integration_test.go
-	moduleRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
-	srcPkg := filepath.Join(moduleRoot, "testdata", "lifecycle_worker")
-
-	bin := filepath.Join(t.TempDir(), "lifecycle_worker")
-	cmd := exec.Command("go", "build", "-o", bin, srcPkg)
-	cmd.Dir = moduleRoot
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("build lifecycle_worker: %v", err)
-	}
-	return bin
-}
-
 // ── port helper ──────────────────────────────────────────────────────────────
 
 // freePort returns a free TCP port on localhost as a string.
@@ -354,8 +325,6 @@ func TestRunLoop_NoNonceGaps(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	workerBin := buildLifecycleWorker(t)
-
 	nm := newMockNM(t)
 	defer nm.srv.Close()
 
@@ -380,8 +349,6 @@ func TestRunLoop_NoNonceGaps(t *testing.T) {
 		MaxBatches:         wantBatches,
 		EnableProbe:        false,
 		DeployPrivateKey:   deployKey,
-		BuilderWorkerCmd:   []string{workerBin},
-		BuilderWorkers:     1,
 		SensorPollInterval: 10 * time.Millisecond,
 		SensorDeadline:     3 * time.Second,
 		Verbs:              []string{"eoatx"},

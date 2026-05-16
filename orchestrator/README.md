@@ -2,7 +2,7 @@
 
 Bloating feedback-loop orchestrator for Nethermind. Drives `testing_commitBlockV1` in a closed control loop, packing EELS-based spamoor scenarios into blocks until the target state composition is reached.
 
-This is a Go rewrite of the Python orchestrator (now at `../orchestrator-py/`). The EELS verb builders stay in Python and are invoked via a subprocess pool over framed protobuf-stdio.
+This is a Go rewrite of the Python orchestrator (now at `../orchestrator-py/`). The EELS verb builders have been ported to native in-process Go (`internal/verbs/`); transaction building is a plain loop with no subprocesses.
 
 ## Architecture
 
@@ -12,16 +12,11 @@ This is a Go rewrite of the Python orchestrator (now at `../orchestrator-py/`). 
 │  controller ─▶ facade.Dispatcher ─▶ signer (in-process)         │
 │      ▲              │                    │                      │
 │      │              ▼                    ▼                      │
-│      │     ┌─ builderpool ──┐    testing_commitBlockV1          │
-│      │     │ N=NumCPU pyws  │           │                       │
-│      │     └────────────────┘           │                       │
-│      │             │                    │                       │
-│      │     ┌─ pyworker ─────┐           │                       │
-│      │     │ orchestrator.  │           │                       │
-│      │     │ facade.verbs   │           ▼                       │
-│      │     │ + EELS         │      Nethermind                   │
-│      │     └────────────────┘           │                       │
-│      │                                  ▼                       │
+│      │     ┌─ verbs ────────┐    testing_commitBlockV1          │
+│      │     │ native Go tx   │           │                       │
+│      │     │ builders       │           ▼                       │
+│      │     └────────────────┘      Nethermind                   │
+│      │                                  │                       │
 │      └────────────── sensor (statecomp_get)                     │
 │                                                                 │
 │  journal.bin (protobuf binlog + BLAKE3 chain hash)              │
@@ -46,9 +41,7 @@ bin/orchestrator run \
   --rpc-url http://nethermind:8545 \
   --state-dir /var/orch/state \
   --target-yaml /etc/orch/target.yaml \
-  --genesis-sha256 <hex> \
-  --builder-worker-cmd "python -m builder_worker" \
-  --builder-workers 8
+  --genesis-sha256 <hex>
 ```
 
 ## Subcommands
@@ -65,8 +58,8 @@ internal/
   lifecycle/              main loop, startup decision, batch pipeline
   controller/             pick_next_batch + apply_observation
   mathx/                  Michelot simplex + tanh-saturated α
-  facade/                 dispatcher: builder pool → signer
-  builderpool/            Python subprocess pool client
+  facade/                 dispatcher: native verb builder → signer
+  verbs/                  native Go transaction builders (13 verbs)
   signer/                 in-process ECDSA via go-ethereum
   rpc/                    JSON-RPC client + JWT round-tripper
   sensor/                 statecomp_get poller
@@ -80,7 +73,6 @@ internal/
   lock/                   POSIX flock(2) state-dir lock
   orchpb/                 generated protobuf bindings
 proto/                    .proto sources
-pyworker/                 Python subprocess shim hosting EELS verbs
 ```
 
 ## See also

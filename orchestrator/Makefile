@@ -11,7 +11,7 @@ all: proto build
 proto:
 	mkdir -p internal/orchpb
 	$(PROTOC) --go_out=internal/orchpb --go_opt=paths=source_relative \
-		-I=proto proto/builder.proto proto/journal.proto proto/txsigner.proto
+		-I=proto proto/journal.proto proto/txsigner.proto
 
 build: proto
 	go build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o bin/orchestrator ./cmd/orchestrator

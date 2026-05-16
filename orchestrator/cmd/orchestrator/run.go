@@ -28,8 +28,6 @@ type runFlags struct {
 	maxBatches           int
 	targetTotalBytesOver int64
 	deployPrivateKey     string
-	builderWorkerCmd     string
-	builderWorkers       int
 	enableProbe          bool
 	metricsAddr          string
 	epsilon              float64
@@ -58,8 +56,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().IntVar(&f.maxBatches, "max-batches", 0, "Stop after N batches (0=unbounded)")
 	cmd.Flags().Int64Var(&f.targetTotalBytesOver, "target-total-bytes-override", 0, "Override target.total_bytes")
 	cmd.Flags().StringVar(&f.deployPrivateKey, "deploy-private-key", "", "Hex private key (0x-prefix optional); also reads ORCH_DEPLOY_PRIVATE_KEY")
-	cmd.Flags().StringVar(&f.builderWorkerCmd, "builder-worker-cmd", "python -m builder_worker", "Command to spawn each Python builder worker")
-	cmd.Flags().IntVar(&f.builderWorkers, "builder-workers", 0, "Number of Python builder workers (0=NumCPU)")
 	cmd.Flags().BoolVar(&f.enableProbe, "probe", true, "Run probe phase on fresh start")
 	cmd.Flags().StringVar(&f.metricsAddr, "metrics-addr", ":9101", "TCP address for the Prometheus /metrics endpoint")
 	cmd.Flags().Float64Var(&f.epsilon, "epsilon", 0.5, "ε-greedy exploration rate for verb selection")
@@ -98,8 +94,6 @@ func runOrchestrator(ctx context.Context, f runFlags) error {
 		MaxBatches:       f.maxBatches,
 		EnableProbe:      f.enableProbe,
 		DeployPrivateKey: cmp.Or(f.deployPrivateKey, os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")),
-		BuilderWorkerCmd: strings.Fields(f.builderWorkerCmd),
-		BuilderWorkers:   f.builderWorkers,
 		Epsilon:          f.epsilon,
 		TotalBatchBytes:  resolveTotalBatchBytes(),
 		Verbs:            resolveVerbs(),

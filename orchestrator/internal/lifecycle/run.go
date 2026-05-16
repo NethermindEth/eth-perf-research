@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/builderpool"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/facade"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
@@ -50,8 +49,6 @@ type Config struct {
 	MaxBatches          int
 	EnableProbe         bool
 	DeployPrivateKey    string
-	BuilderWorkerCmd    []string
-	BuilderWorkers      int
 	Epsilon             float64
 	TotalBatchBytes     int
 	SensorPollInterval  time.Duration
@@ -197,16 +194,8 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.Info("lifecycle: metrics server stopped")
 	}()
 
-	// 7. Open builder pool, sensor, journal writer, payloads writer.
-	pool, err := builderpool.Open(ctx, builderpool.Config{
-		Cmd:     cfg.BuilderWorkerCmd,
-		Workers: cfg.BuilderWorkers,
-	})
-	if err != nil {
-		return fmt.Errorf("lifecycle: builder pool: %w", err)
-	}
-	defer pool.Close()
-
+	// 7. Open sensor, journal writer, payloads writer. Transaction building
+	// is in-process (internal/verbs) — no builder subprocess pool.
 	sensorOpts := []sensor.SensorOption{}
 	if cfg.SensorPollInterval > 0 {
 		sensorOpts = append(sensorOpts, sensor.WithPollInterval(cfg.SensorPollInterval))
@@ -237,6 +226,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// 9. Facade context. Base address from $ORCH_BASE_ADDRESS (hex), else zeros.
 	// Initial nonce from $ORCH_INITIAL_ADDRESS_CURSOR override, else queried from RPC.
 	facadeCtx := buildFacadeContext(rawTarget, chainID, head.GasLimit)
+	facadeCtx.SignerAddr = signr.Address()
 	if hex := strings.TrimPrefix(os.Getenv("ORCH_BASE_ADDRESS"), "0x"); hex != "" {
 		b, err := decodeBaseAddress(hex)
 		if err != nil {
@@ -331,7 +321,7 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 
 	// 14. Hot loop.
-	dispatcher := facade.New(pool, signr)
+	dispatcher := facade.New(signr)
 	deps := &batchDeps{
 		rpc:          rpcCli,
 		sensor:       sens,
@@ -381,9 +371,6 @@ func withDefaults(cfg Config) Config {
 	}
 	if cfg.TotalBatchBytes <= 0 {
 		cfg.TotalBatchBytes = defaultTotalBatchBytes
-	}
-	if len(cfg.BuilderWorkerCmd) == 0 {
-		cfg.BuilderWorkerCmd = []string{"python", "-m", "builder_worker"}
 	}
 	if len(cfg.Verbs) == 0 {
 		cfg.Verbs = defaultVerbs()
