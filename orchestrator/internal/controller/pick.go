@@ -251,8 +251,11 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	//      this stays a real cap; for ultra-cheap verbs (eoatx) it is still the
 	//      binding constraint — that is physics, not a bug.
 	//   3. axis-headroom cap (capN) — when an over-served axis limits the verb.
-	//   4. nMaxHardCeil — a 64 k-tx safety net on the worker slice size.
-	const nMaxHardCeil = 65536
+	//   4. nMaxHardCeil — caps batch size for Nethermind commit efficiency.
+	//      Measured: ~65 k-tx blocks commit at ~47 µs/tx, ~7-12 k-tx blocks at
+	//      ~25-30 µs/tx — large blocks are ~1.7x worse per tx, so a smaller cap
+	//      raises sustained throughput. 12 k matches the Python reference orch.
+	const nMaxHardCeil = 12000
 	byteBasedMax := nMaxHardCeil
 	if avg > 0 && deadlineBytes > 0 {
 		byteBasedMax = clampMin(deadlineBytes/int(avg), 1)
