@@ -26,10 +26,6 @@ const (
 	// ContractGasBurner backs the gasburnertx verb. Its runtime loops,
 	// burning gas until a remainder threshold, then emits one LOG1.
 	ContractGasBurner ContractName = "GasBurner"
-	// ContractErc20Bloater backs the erc20_bloater verb. bloatStorage sweeps
-	// a sequential window of addresses, writing two storage slots per address
-	// (balanceOf + allowance) — the real Spamoor statebloat ERC20 bloater.
-	ContractErc20Bloater ContractName = "ERC20Bloater"
 )
 
 // ContractSpec describes one contract the bootstrap phase deploys.
@@ -51,23 +47,7 @@ func contractCatalog() []ContractSpec {
 		{Name: ContractTestToken, InitCode: mustHex(testTokenInitHex), Gas: 2_000_000},
 		{Name: ContractStorageRefund, InitCode: mustHex(storageRefundInitHex), Gas: 2_000_000},
 		{Name: ContractGasBurner, InitCode: gasBurnerCreationCode(), Gas: 2_000_000},
-		{Name: ContractErc20Bloater, InitCode: erc20BloaterInitCode(), Gas: 2_000_000},
 	}
-}
-
-// erc20BloaterInitCode returns the CREATE-tx calldata for ERC20Bloater. The
-// real Spamoor contract's constructor takes a uint256 initialSupply argument,
-// so the creation bytecode (erc20BloaterBinHex) is followed by an ABI-encoded
-// supply word. The supply must be large enough to cover every bloatStorage
-// sweep (which decrements balanceOf[msg.sender] by the running index), so the
-// maximum uint256 is used — bloatStorage runs unchecked and never underflows.
-func erc20BloaterInitCode() []byte {
-	bin := mustHex(erc20BloaterBinHex)
-	supply := make([]byte, 32)
-	for i := range supply {
-		supply[i] = 0xff
-	}
-	return concat(bin, supply)
 }
 
 // ContractRegistry maps a deployed contract name to its on-chain address. It
@@ -127,8 +107,9 @@ func (r *ContractRegistry) Names() []ContractName {
 //   - storagerefundtx  → StorageRefund   (execute — real refund method)
 //   - gasburnertx      → GasBurner       (geas gas-burner)
 //   - calltx           → StorageSpam     (getStorage — non-reverting touch)
-//   - erc20_bloater    → ERC20Bloater    (bloatStorage — real Spamoor statebloat
-//                                         erc20_bloater scenario contract)
+//   - erc20_bloater    → StorageSpam     (setRandomForGas — bulk storage write;
+//                                         shares StorageSpam with storagespam,
+//                                         it has no dedicated Spamoor contract)
 //
 // uniswap_swaps is absent: the EELS build_uniswap_swaps_transactions
 // adaptation targets a fixed router placeholder address, not a contract the
@@ -139,7 +120,7 @@ var contractVerbTargets = map[string]ContractName{
 	"storagerefundtx": ContractStorageRefund,
 	"gasburnertx":     ContractGasBurner,
 	"calltx":          ContractStorageSpam,
-	"erc20_bloater":   ContractErc20Bloater,
+	"erc20_bloater":   ContractStorageSpam,
 }
 
 // ContractVerbTarget returns the contract a verb must target, or false when

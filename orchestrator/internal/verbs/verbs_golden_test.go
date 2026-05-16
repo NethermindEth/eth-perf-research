@@ -42,7 +42,6 @@ func goldenContractRegistry() *ContractRegistry {
 	reg.Set(ContractTestToken, common.HexToAddress("0x00000000000000000000000000000000c0117ac2"))
 	reg.Set(ContractStorageRefund, common.HexToAddress("0x00000000000000000000000000000000c0117ac3"))
 	reg.Set(ContractGasBurner, common.HexToAddress("0x00000000000000000000000000000000c0117ac4"))
-	reg.Set(ContractErc20Bloater, common.HexToAddress("0x00000000000000000000000000000000c0117ac5"))
 	return reg
 }
 
