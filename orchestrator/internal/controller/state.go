@@ -92,8 +92,21 @@ type State struct {
 	verbStatsMu sync.RWMutex
 	VerbStats   map[string]*VerbStats
 
+	// pickApplyMu serialises the depth-1 pipeline's cross-goroutine access to
+	// F/Sigma/Alpha/EthPerTx/AvgTxRLP/BatchID. The committer goroutine writes
+	// these in Apply; the planner goroutine reads them in Pick. Held only for
+	// the brief Pick-read and Apply-write — never during build/sign/commit.
+	pickApplyMu sync.Mutex
+
 	lastResidualL2 float64
 }
+
+// LockState acquires the mutex guarding the controller matrices for the
+// pipeline's Pick/Apply hand-off. Callers must pair it with UnlockState.
+func (s *State) LockState() { s.pickApplyMu.Lock() }
+
+// UnlockState releases the LockState mutex.
+func (s *State) UnlockState() { s.pickApplyMu.Unlock() }
 
 // NewState initialises a State from the reference-F seed values.
 // verbs must be the complete ordered list. targetEthPerGasWei is the fixed gas

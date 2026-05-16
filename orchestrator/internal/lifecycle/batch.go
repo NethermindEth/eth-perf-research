@@ -50,6 +50,11 @@ type batchResult struct {
 //
 // All cursor values that buildRecord needs are snapshotted here so commit
 // reads a stable view independent of any later facadeCtx mutation.
+//
+// pre is the observation Pick consumed for this batch; the committer threads
+// it into Apply as the batch's pre-commit baseline. timing carries the
+// pick/build/sign phase durations measured in the planner goroutine; the
+// committer fills the remaining phases before emitting it.
 type dispatched struct {
 	batchID    uint64
 	plan       *controller.BatchPlan
@@ -58,6 +63,8 @@ type dispatched struct {
 	saltBefore uint64
 	saltAfter  uint64
 	res        *facade.Result // signed RLPs, hashes, cursors-after
+	pre        *controller.Observation
+	timing     phaseTimings
 }
 
 // dispatchBatch performs Pick + Dispatch and reserves the nonce/salt ranges.
@@ -65,8 +72,17 @@ type dispatched struct {
 // Returns nil if Pick yields no plan or Dispatch yields zero txs. The single
 // planner produces batches strictly in order, so no commit-ordering key is
 // needed; a dispatch error is simply propagated for the caller to skip.
+//
+// Runs in the planner goroutine. The pick phase reads controller State under
+// the State mutex (Apply, in the committer goroutine, holds the same mutex);
+// build+sign are pure CPU and run lock-free. pick/build/sign durations are
+// recorded into the returned dispatched.timing.
 func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *controller.Observation) (*dispatched, error) {
+	pickStart := time.Now()
+	d.state.LockState()
 	plan := d.state.Pick(currentObs, d.target, defaultTotalBatchBytes, d.facadeCtx.LoadBlockGasLimit())
+	d.state.UnlockState()
+	pickDur := time.Since(pickStart)
 	if plan == nil {
 		return nil, nil
 	}
@@ -115,6 +131,12 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 		saltBefore: saltBefore,
 		saltAfter:  res.NewSalt,
 		res:        res,
+		pre:        currentObs,
+		timing: phaseTimings{
+			pick:  pickDur,
+			build: res.BuildDuration,
+			sign:  res.SignDuration,
+		},
 	}, nil
 }
 
@@ -123,7 +145,14 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 // polls the sensor for forward progress, runs controller.Apply, journals the
 // record, then clears the pending sidecar. Returns the post-commit observation
 // and residual snapshot baked into a batchResult.
-func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *controller.Observation) (*batchResult, error) {
+//
+// Runs in the committer goroutine. The commit/sensor/apply/journal phase
+// durations are recorded into db.timing (the planner already filled
+// pick/build/sign). The Apply call holds the State mutex so it does not race
+// with the planner's concurrent Pick. pre is db.pre — the observation Pick
+// consumed — threaded in as the batch's pre-commit baseline.
+func commitBatch(ctx context.Context, d *batchDeps, db *dispatched) (*batchResult, error) {
+	pre := db.pre
 	pending := &orchpb.PendingBatch{
 		BatchId:          db.batchID,
 		Verb:             db.plan.Verb,
@@ -139,6 +168,7 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *control
 		return nil, fmt.Errorf("lifecycle: write pending: %w", err)
 	}
 
+	commitStart := time.Now()
 	blockTS := uint64(time.Now().Unix())
 	blockHash, err := d.rpc.TestingCommitBlockV1(ctx, db.res.SignedRLP, blockTS)
 	if err != nil {
@@ -149,28 +179,18 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *control
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: BlockByHash %s: %w", blockHash.Hex(), err)
 	}
+	db.timing.commit = time.Since(commitStart)
 
-	payload := buildExecutionPayloadV3(block, db.res.SignedRLP)
-	if err := d.pw.Append(payload); err != nil {
-		return nil, fmt.Errorf("lifecycle: append payload: %w", err)
-	}
-
-	// Wait for the sensor to advance past the previous observation. The new
-	// snapshot is what the controller consumes; we no longer need a stale-tolerate
-	// workaround because ReadAfter returns on first forward-progress poll.
-	preBN := uint64(0)
-	if pre != nil {
-		preBN = pre.BlockNumber
-	}
 	// Statecomp plugin batches diffs (~30k blocks per baseline rotation), so the
 	// per-batch sensor blockNumber won't advance. Do a single poll — accept
 	// whatever's there, never block. The controller's F-update tolerates stale
 	// observations; new data lands when the plugin rotates.
+	sensorStart := time.Now()
 	snap, err := waitForValidSensor(ctx, d.sensor)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: sensor poll: %w", err)
 	}
-	_ = preBN
+	db.timing.sensor = time.Since(sensorStart)
 	post := &controller.Observation{
 		AccountTrieBytes: snap.AccountTrieBytes,
 		StorageTrieBytes: snap.StorageTrieBytes,
@@ -178,11 +198,20 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *control
 		BlockNumber:      snap.BlockNumber,
 	}
 
+	applyStart := time.Now()
+	d.state.LockState()
 	residual, err := d.state.Apply(pre, post, db.plan, db.res.TxCount, db.res.RLPBytes, block.GasUsed)
+	d.state.UnlockState()
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: controller.Apply: %w", err)
 	}
+	db.timing.apply = time.Since(applyStart)
 
+	journalStart := time.Now()
+	payload := buildExecutionPayloadV3(block, db.res.SignedRLP)
+	if err := d.pw.Append(payload); err != nil {
+		return nil, fmt.Errorf("lifecycle: append payload: %w", err)
+	}
 	rec := buildRecord(d, db.batchID, db.plan, db.res, block, blockTS, db.saltBefore, db.saltAfter, snap, residual, db.addrBefore)
 	if _, err := d.jw.Append(rec); err != nil {
 		return nil, fmt.Errorf("lifecycle: journal append: %w", err)
@@ -190,6 +219,9 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *control
 	if err := journal.ClearPending(d.pendingPath); err != nil {
 		return nil, fmt.Errorf("lifecycle: clear pending: %w", err)
 	}
+	db.timing.journal = time.Since(journalStart)
+
+	db.timing.observe(d.metricsReg, db.batchID, db.res.TxCount)
 
 	// Update Prometheus metrics after a successful commit.
 	if d.metricsReg != nil {
