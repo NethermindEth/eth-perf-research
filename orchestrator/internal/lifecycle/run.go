@@ -214,10 +214,25 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer pw.Close()
 
-	// 8. Build controller state, hydrating from tail on resume.
+	// 8. Build controller state, hydrating from tail on resume. On resume the
+	// controller's F / σ / α are reconstructed from the journal tail so the
+	// controller does not re-explore the verb mix from scratch every restart;
+	// if the tail carries no coefficients the State keeps its cold-start seed.
 	state := controller.NewState(cfg.Verbs, refF, chainIdentity, cfg.Epsilon)
 	if decision.Mode == modeResume && decision.TailRecord != nil {
-		hydrateStateFromTail(state, decision.TailRecord)
+		hr := hydrateStateFromTail(state, decision.TailRecord)
+		if hr.Reconstructed {
+			slog.Info("lifecycle: controller reconstructed from journal tail",
+				"f_cells", hr.CoeffCells,
+				"alpha_cells", hr.AlphaCells,
+				"sigma_cells", hr.SigmaCells,
+				"resumed_from_batch", decision.ResumedFromBatch)
+		} else {
+			slog.Warn("lifecycle: resume with no controller coefficients in journal tail — controller cold-started",
+				"resumed_from_batch", decision.ResumedFromBatch)
+		}
+	} else {
+		slog.Info("lifecycle: controller cold-started from reference-F seed")
 	}
 
 	// 9. Facade context. Base address from $ORCH_BASE_ADDRESS (hex), else zeros.

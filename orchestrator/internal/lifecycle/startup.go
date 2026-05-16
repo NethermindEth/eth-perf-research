@@ -185,14 +185,33 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 	}, nil
 }
 
+// hydrationResult summarises what hydrateStateFromTail reconstructed from the
+// journal tail. A zero-valued result (all counts 0, Reconstructed false) means
+// the controller cold-started — the caller logs the distinction.
+type hydrationResult struct {
+	Reconstructed bool // true if any F/σ/α cell was seeded from the tail
+	CoeffCells    int  // F-matrix cells reconstructed
+	AlphaCells    int  // α cells reconstructed
+	SigmaCells    int  // σ cells reconstructed
+}
+
 // hydrateStateFromTail rebuilds the controller State by re-seeding from the
-// reference-F and then folding any observability information stored in the
-// tail record. This is a pragmatic resume — exact F is not reconstructible
-// from the tail alone, but the tail's Coeffs/Alpha/Sigma maps let us bring
-// the controller close to where it was.
-func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) {
+// reference-F and then folding the controller coefficients (F / α / σ) stored
+// in the tail record's Observability block. The orchestrator persists the
+// post-Apply F/α/σ on every batch (buildRecord -> Observability.CoeffsAfter /
+// AlphaCurrent / SigmaInnov), so the tail carries the controller's full
+// learned state as of the last committed batch.
+//
+// This is the resume-time reconstruction: without it every restart cold-starts
+// the controller from reference-F / zero and re-explores the verb mix from
+// scratch. Reconstruction is best-effort and never fails — if the tail has no
+// Observability block, or the coefficient maps are empty/unparsable, the State
+// keeps its cold-start seed values and the returned result reports
+// Reconstructed=false so the caller can log a cold start.
+func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydrationResult {
+	var res hydrationResult
 	if state == nil || tail == nil || tail.Observability == nil {
-		return
+		return res
 	}
 	obs := tail.Observability
 
@@ -204,6 +223,7 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) {
 		}
 		if _, has := state.F[verb]; has {
 			state.F[verb][ax] = v
+			res.CoeffCells++
 		}
 	}
 	for k, v := range obs.AlphaCurrent {
@@ -213,6 +233,7 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) {
 		}
 		if _, has := state.Alpha[verb]; has {
 			state.Alpha[verb][ax] = v
+			res.AlphaCells++
 		}
 	}
 	for k, v := range obs.SigmaInnov {
@@ -222,9 +243,12 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) {
 		}
 		if _, has := state.Sigma[verb]; has {
 			state.Sigma[verb][ax] = v
+			res.SigmaCells++
 		}
 	}
 	state.BatchID = tail.BatchId + 1
+	res.Reconstructed = res.CoeffCells > 0 || res.AlphaCells > 0 || res.SigmaCells > 0
+	return res
 }
 
 func splitFlatKey(k string) (string, controller.Axis, bool) {

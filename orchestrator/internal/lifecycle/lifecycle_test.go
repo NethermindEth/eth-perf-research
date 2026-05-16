@@ -8,6 +8,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
@@ -165,6 +167,91 @@ func TestSplitFlatKey(t *testing.T) {
 		if v != tc.verb || a != tc.ax || ok != tc.ok {
 			t.Errorf("splitFlatKey(%q)=(%q,%q,%v), want (%q,%q,%v)", tc.k, v, a, ok, tc.verb, tc.ax, tc.ok)
 		}
+	}
+}
+
+// newColdState builds a cold-started controller State seeded from reference-F
+// for the hydrate tests.
+func newColdState(verbs []string) *controller.State {
+	ref := &referencef.ReferenceF{
+		Verbs:    map[string]map[string]float64{},
+		AvgTxRLP: map[string]float64{},
+	}
+	var identity [32]byte
+	return controller.NewState(verbs, ref, identity, 0.5)
+}
+
+// TestHydrateStateFromTailReconstructsCoefficients verifies the resume path
+// seeds the controller's F / σ / α from the journal tail's Observability block.
+func TestHydrateStateFromTailReconstructsCoefficients(t *testing.T) {
+	state := newColdState([]string{"eoatx", "storagespam"})
+
+	tail := &orchpb.Record{
+		BatchId: 41,
+		Observability: &orchpb.Observability{
+			CoeffsAfter: map[string]float64{
+				"eoatx.accounts":       123.0,
+				"storagespam.storage":  456.0,
+			},
+			AlphaCurrent: map[string]float64{"eoatx.accounts": 0.07},
+			SigmaInnov:   map[string]float64{"storagespam.storage": 2.5},
+		},
+	}
+
+	res := hydrateStateFromTail(state, tail)
+	if !res.Reconstructed {
+		t.Fatalf("Reconstructed=false, want true")
+	}
+	if res.CoeffCells != 2 || res.AlphaCells != 1 || res.SigmaCells != 1 {
+		t.Errorf("counts = coeff:%d alpha:%d sigma:%d, want 2/1/1",
+			res.CoeffCells, res.AlphaCells, res.SigmaCells)
+	}
+	if got := state.F["eoatx"][controller.AxisAccounts]; got != 123.0 {
+		t.Errorf("F[eoatx][accounts]=%v, want 123", got)
+	}
+	if got := state.F["storagespam"][controller.AxisStorage]; got != 456.0 {
+		t.Errorf("F[storagespam][storage]=%v, want 456", got)
+	}
+	if got := state.Alpha["eoatx"][controller.AxisAccounts]; got != 0.07 {
+		t.Errorf("Alpha[eoatx][accounts]=%v, want 0.07", got)
+	}
+	if got := state.Sigma["storagespam"][controller.AxisStorage]; got != 2.5 {
+		t.Errorf("Sigma[storagespam][storage]=%v, want 2.5", got)
+	}
+	if state.BatchID != 42 {
+		t.Errorf("BatchID=%d, want 42 (tail.BatchId+1)", state.BatchID)
+	}
+}
+
+// TestHydrateStateFromTailColdStartFallback verifies that a tail with no
+// Observability block leaves the State at its cold-start seed and reports
+// Reconstructed=false — the safe fall-through the resume path relies on.
+func TestHydrateStateFromTailColdStartFallback(t *testing.T) {
+	state := newColdState([]string{"eoatx"})
+	seedF := state.F["eoatx"][controller.AxisAccounts]
+
+	cases := []struct {
+		name string
+		tail *orchpb.Record
+	}{
+		{"nil tail", nil},
+		{"nil observability", &orchpb.Record{BatchId: 7}},
+		{"empty coefficient maps", &orchpb.Record{
+			BatchId:       7,
+			Observability: &orchpb.Observability{},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newColdState([]string{"eoatx"})
+			res := hydrateStateFromTail(st, tc.tail)
+			if res.Reconstructed {
+				t.Errorf("Reconstructed=true, want false for %s", tc.name)
+			}
+			if got := st.F["eoatx"][controller.AxisAccounts]; got != seedF {
+				t.Errorf("F mutated on cold-start fallback: got %v, want seed %v", got, seedF)
+			}
+		})
 	}
 }
 
