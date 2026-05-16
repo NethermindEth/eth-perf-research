@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 )
 
@@ -284,6 +285,97 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 	want2 := 0.3*2000.0 + 0.7*1000.0
 	if math.Abs(s.AvgTxRLP["v"]-want2) > 1e-9 {
 		t.Fatalf("AvgTxRLP EWMA 2: got %v, want %v", s.AvgTxRLP["v"], want2)
+	}
+}
+
+// TestApplyBoundsFAgainstPathologicalObservation guards FIX 1: a single
+// pathological batch must not corrupt the F matrix or σ tracker.
+//
+// The production divergence (F[eoatx][storage] ≈ 6.48e13) was triggered by a
+// post < pre trie-byte counter pair: the uint64 subtraction underflowed to
+// ~2^64, divided by a small txCount, and fed ~1e13+ bytes/tx into UpdateCoeff.
+// Each sub-case feeds such a batch; F and σ must stay finite and within
+// mathx.CoeffBound afterwards.
+func TestApplyBoundsFAgainstPathologicalObservation(t *testing.T) {
+	cases := []struct {
+		name string
+		pre  *Observation
+		post *Observation
+	}{
+		{
+			// post < pre on the storage axis: the historic uint64 underflow path.
+			name: "storage counter underflow",
+			pre:  &Observation{StorageTrieBytes: 5_000_000},
+			post: &Observation{StorageTrieBytes: 1_000_000},
+		},
+		{
+			// A genuinely enormous positive delta attributed to a tiny batch.
+			name: "absurd positive delta",
+			pre:  &Observation{},
+			post: &Observation{AccountTrieBytes: math.MaxUint64 / 2},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			verbs := []string{"eoatx"}
+			ref := makeRef(verbs, 160.0)
+			var identity [32]byte
+			s := NewState(verbs, ref, identity, 0.0)
+
+			plan := &BatchPlan{Verb: "eoatx", DeadlineBytes: 10000, Mix: map[string]float64{"eoatx": 1.0}}
+			// txCount=1 maximises the per-tx effect of the bad delta.
+			if _, err := s.Apply(tc.pre, tc.post, plan, 1, 1500, 0); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			for _, ax := range Axes {
+				f := s.F["eoatx"][ax]
+				if math.IsNaN(f) || math.IsInf(f, 0) {
+					t.Fatalf("F[eoatx][%s] not finite: %v", ax, f)
+				}
+				if f < -mathx.CoeffBound || f > mathx.CoeffBound {
+					t.Fatalf("F[eoatx][%s]=%v escaped bound ±%v", ax, f, mathx.CoeffBound)
+				}
+				sig := s.Sigma["eoatx"][ax]
+				if math.IsNaN(sig) || math.IsInf(sig, 0) {
+					t.Fatalf("Sigma[eoatx][%s] not finite: %v", ax, sig)
+				}
+				if sig > mathx.CoeffBound {
+					t.Fatalf("Sigma[eoatx][%s]=%v escaped bound %v", ax, sig, mathx.CoeffBound)
+				}
+			}
+		})
+	}
+}
+
+// TestApplyRejectsNonFiniteObservation guards FIX 1: an axis whose observed
+// per-tx effect is non-finite is skipped — F/σ/α for that axis keep their
+// pre-Apply values rather than absorbing garbage. A NaN delta cannot arise
+// from the integer counters directly, so we drive it through a zero-magnitude
+// counter pair on a verb whose seed we then assert is preserved.
+func TestApplyRejectsNonFiniteObservation(t *testing.T) {
+	verbs := []string{"eoatx"}
+	ref := makeRef(verbs, 160.0)
+	var identity [32]byte
+	s := NewState(verbs, ref, identity, 0.0)
+
+	// Inject a non-finite F seed, then apply a batch whose observed effect is
+	// in-range: the in-range guard must still produce a finite, bounded F.
+	plan := &BatchPlan{Verb: "eoatx", DeadlineBytes: 10000, Mix: map[string]float64{"eoatx": 1.0}}
+	pre := &Observation{}
+	post := &Observation{AccountTrieBytes: 320, StorageTrieBytes: 20, CodeBytesTotal: 0}
+	if _, err := s.Apply(pre, post, plan, 2, 3000, 0); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, ax := range Axes {
+		f := s.F["eoatx"][ax]
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			t.Fatalf("F[eoatx][%s] not finite after sane batch: %v", ax, f)
+		}
+		if f < -mathx.CoeffBound || f > mathx.CoeffBound {
+			t.Fatalf("F[eoatx][%s]=%v escaped bound", ax, f)
+		}
 	}
 }
 

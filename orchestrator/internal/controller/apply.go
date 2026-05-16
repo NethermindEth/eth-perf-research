@@ -35,24 +35,45 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	}
 
 	// Per-axis observed delta, normalised by tx count.
+	//
+	// The deltas are signed: post and pre are uint64 trie-byte counters, and a
+	// post < pre case (trie compaction, a reorg between the two observations,
+	// or stale/out-of-order counters) underflows the uint64 subtraction to a
+	// value near 2^64. Computed in int64/float64 the difference stays signed
+	// and small; the underflow path is what historically fed ~6.5e13 bytes/tx
+	// garbage into UpdateCoeff and diverged F.
+	txCountF := float64(txCount)
 	observed := [3]float64{
-		float64(post.AccountTrieBytes-pre.AccountTrieBytes) / float64(txCount),
-		float64(post.StorageTrieBytes-pre.StorageTrieBytes) / float64(txCount),
-		float64(post.CodeBytesTotal-pre.CodeBytesTotal) / float64(txCount),
+		signedDelta(post.AccountTrieBytes, pre.AccountTrieBytes) / txCountF,
+		signedDelta(post.StorageTrieBytes, pre.StorageTrieBytes) / txCountF,
+		signedDelta(post.CodeBytesTotal, pre.CodeBytesTotal) / txCountF,
 	}
 
 	verb := plan.Verb
 
 	// Update F, Sigma, Alpha via adaptive-α.
+	//
+	// Each axis update is guarded so one pathological batch cannot corrupt F:
+	//   1. A non-finite or absurd observed per-tx effect (beyond the physical
+	//      CoeffBound) is rejected — the axis keeps its current F/σ/α and the
+	//      bad observation is dropped rather than folded in.
+	//   2. The post-update F and σ are clamped to their physical bounds, so
+	//      even an in-range-but-large observation cannot ratchet the matrix
+	//      toward the divergent 6.48e13 / 4.15e14 state seen in production.
+	// The adaptive-α/Huber math itself (UpdateCoeff) is unchanged.
 	for axIdx, ax := range Axes {
+		if !mathx.IsFiniteInRange(observed[axIdx]) {
+			// Pathological observation — skip this axis's update entirely.
+			continue
+		}
 		result := mathx.UpdateCoeff(
 			s.F[verb][ax],
 			observed[axIdx],
 			s.Sigma[verb][ax],
 			s.Alpha[verb][ax],
 		)
-		s.F[verb][ax] = result.F
-		s.Sigma[verb][ax] = result.Sigma
+		s.F[verb][ax] = mathx.ClampCoeff(result.F)
+		s.Sigma[verb][ax] = mathx.ClampSigma(result.Sigma)
 		s.Alpha[verb][ax] = result.Alpha
 	}
 
@@ -96,6 +117,14 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 		L2Norm:             residualNorm,
 		DispatchedRLPBytes: dispatchedRLPBytes,
 	}, nil
+}
+
+// signedDelta returns post - pre as a signed float64. post and pre are uint64
+// trie-byte counters; computing the difference in int64 keeps a post < pre case
+// (trie compaction, a reorg between observations, stale counters) as a small
+// negative number instead of underflowing the uint64 subtraction to ~2^64.
+func signedDelta(post, pre uint64) float64 {
+	return float64(int64(post) - int64(pre))
 }
 
 // pushOvershoot records the current batch residual ratio in the rolling window.

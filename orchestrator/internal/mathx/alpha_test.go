@@ -132,6 +132,70 @@ func TestUpdateCoeff(t *testing.T) {
 	}
 }
 
+func TestClampCoeff(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{0, 0},
+		{3500, 3500},                   // largest real reference-F seed — untouched
+		{-180, -180},                   // storagerefundtx negative seed — sign kept
+		{CoeffBound, CoeffBound},        // exactly at bound
+		{CoeffBound * 2, CoeffBound},    // above bound — clamped
+		{-CoeffBound * 2, -CoeffBound},  // below -bound — clamped, sign kept
+		{6.48e13, CoeffBound},           // the production garbage value
+		{math.Inf(1), 0},                // non-finite collapses to 0
+		{math.Inf(-1), 0},
+		{math.NaN(), 0},
+	}
+	for _, tc := range cases {
+		if got := ClampCoeff(tc.in); got != tc.want {
+			t.Errorf("ClampCoeff(%v)=%v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestClampSigma(t *testing.T) {
+	cases := []struct {
+		in, want float64
+	}{
+		{sigmaFloor, sigmaFloor},
+		{0, sigmaFloor},             // below floor
+		{-5, sigmaFloor},            // negative collapses to floor
+		{100, 100},                  // in range
+		{CoeffBound * 3, CoeffBound}, // above bound
+		{4.15e14, CoeffBound},       // the production garbage σ
+		{math.NaN(), sigmaFloor},
+		{math.Inf(1), sigmaFloor},
+	}
+	for _, tc := range cases {
+		if got := ClampSigma(tc.in); got != tc.want {
+			t.Errorf("ClampSigma(%v)=%v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestIsFiniteInRange(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want bool
+	}{
+		{0, true},
+		{3500, true},
+		{-CoeffBound, true},
+		{CoeffBound, true},
+		{CoeffBound * 1.01, false},
+		{6.48e13, false},
+		{math.NaN(), false},
+		{math.Inf(1), false},
+		{math.Inf(-1), false},
+	}
+	for _, tc := range cases {
+		if got := IsFiniteInRange(tc.in); got != tc.want {
+			t.Errorf("IsFiniteInRange(%v)=%v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestUpdateCoeffPanicOnNaN(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
