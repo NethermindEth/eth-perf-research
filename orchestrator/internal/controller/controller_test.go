@@ -286,3 +286,37 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 		t.Fatalf("AvgTxRLP EWMA 2: got %v, want %v", s.AvgTxRLP["v"], want2)
 	}
 }
+
+// TestNewStateSeedsNonZeroFromDefaultReferenceF guards the cold-start fix.
+// With no --reference-f file the orchestrator now seeds NewState from the
+// built-in design-v3 §B.1 default table, so eoatx (the account-creating verb)
+// must seed F[eoatx][accounts] to its §B.1 value (~160), NOT 0. A zero seed
+// would give eoatx a zero gradient in ‖Fx − r‖² and make it permanently
+// unselectable. Every verb's F-row must be non-zero on at least one axis.
+func TestNewStateSeedsNonZeroFromDefaultReferenceF(t *testing.T) {
+	verbs := []string{
+		"eoatx", "calltx", "deploytx", "factorydeploytx",
+		"storagespam", "erc20_bloater", "erc20tx", "uniswap_swaps",
+		"storagerefundtx", "gasburnertx", "evm_fuzz", "noop",
+	}
+	identity := [32]byte{}
+
+	// referencef.DefaultReferenceF is exactly what loadReferenceF("") returns.
+	s := NewState(verbs, referencef.DefaultReferenceF(), identity, 0.0)
+
+	if got := s.F["eoatx"][AxisAccounts]; got != 160 {
+		t.Errorf("F[eoatx][accounts]: got %v, want 160 (design-v3 §B.1 seed)", got)
+	}
+
+	for _, verb := range verbs {
+		allZero := true
+		for _, ax := range Axes {
+			if s.F[verb][ax] != 0 {
+				allZero = false
+			}
+		}
+		if allZero {
+			t.Errorf("verb %q seeded an all-zero F-row (zero-gradient trap)", verb)
+		}
+	}
+}

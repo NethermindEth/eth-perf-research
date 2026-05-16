@@ -86,15 +86,21 @@ func loadTarget(path string) (*target.Target, *controller.Target, error) {
 	return t, ct, nil
 }
 
-// loadReferenceF loads the reference-F YAML (or returns an empty one if path is "").
+// loadReferenceF loads the reference-F YAML. When no path is supplied it
+// returns the built-in design-v3 §B.1 default table; when a file IS supplied,
+// any verb (or axis) absent from it is backfilled from that same default. This
+// guarantees NewState never seeds an all-zero F-row — an all-zero row gives a
+// verb a zero gradient in the controller's ‖Fx − r‖² objective, structurally
+// trapping it as unselectable cold-start dead state.
 func loadReferenceF(path string) (*referencef.ReferenceF, error) {
 	if path == "" {
-		return &referencef.ReferenceF{
-			Verbs:    map[string]map[string]float64{},
-			AvgTxRLP: map[string]float64{},
-		}, nil
+		return referencef.DefaultReferenceF(), nil
 	}
-	return referencef.Load(path)
+	rf, err := referencef.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	return referencef.WithDefaults(rf), nil
 }
 
 // resolveStartupMode inspects the state-dir and the RPC head to decide
