@@ -224,6 +224,35 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	if !anyFeasible {
 		copy(selectFrom, xProj)
 	}
+
+	// Unlearned-verb exploration floor (cold-start trap escape).
+	//
+	// WHY: a verb that has never run has an all-zero F-row, so its gradient is
+	// 0; the projected-gradient step leaves it at the baseline 1/n while
+	// productive verbs get pushed, and ProjectSimplex then clamps the
+	// untouched weight to exactly 0. A 0-weight verb is unreachable in
+	// selectVerbIndex (both the argmax and the ε-greedy weighted-sample branch
+	// skip it), so it can never get its first run — and so its F-row never
+	// gets learned: a self-perpetuating dead state.
+	//
+	// Force any feasible, never-learned verb to at least Epsilon/n here so the
+	// ε-greedy branch can sample it, get its first Apply, and populate its
+	// F-row. Once learned (F-row non-zero) the floor no longer applies and the
+	// verb competes purely on its gradient merit — this protects the
+	// exploration branch the design already has without biasing the verb mix.
+	if anyFeasible && s.Epsilon > 0 && n > 0 {
+		epsilonFloor := s.Epsilon / float64(n)
+		for i, v := range verbs {
+			if maxNTxs[i] < 1.0 {
+				continue // infeasible — skip
+			}
+			fRow := s.axisVec(v)
+			if fRow[0]+fRow[1]+fRow[2] == 0 && selectFrom[i] < epsilonFloor {
+				selectFrom[i] = epsilonFloor
+			}
+		}
+	}
+
 	total := sumFloats(selectFrom)
 	if total > 0 {
 		for i := range selectFrom {
