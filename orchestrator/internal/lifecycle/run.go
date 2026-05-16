@@ -27,12 +27,10 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/builderpool"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/facade"
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/healthd"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/lock"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/metrics"
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mode"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/sensor"
@@ -332,27 +330,7 @@ func Run(ctx context.Context, cfg Config) error {
 		feeWG.Wait()
 	}()
 
-	// 14. Mode controller + healthd. Healthd polls chain head vs sensor head
-	// at 500ms and requests throttle/halt transitions when the sensor lags.
-	// Step 7 will move both into an errgroup.
-	modeCtl := mode.NewModeController()
-	hd := healthd.New(rpcCli, sens, modeCtl)
-	healthCtx, healthCancel := context.WithCancel(ctx)
-	var healthWG sync.WaitGroup
-	healthWG.Add(1)
-	go func() {
-		defer healthWG.Done()
-		if err := hd.Run(healthCtx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("lifecycle: healthd exited", "err", err)
-		}
-	}()
-	defer func() {
-		healthCancel()
-		healthWG.Wait()
-	}()
-	_ = modeCtl // mode is consumed in a later step; declared here so healthd has a target
-
-	// 15. Hot loop.
+	// 14. Hot loop.
 	dispatcher := facade.New(pool, signr)
 	deps := &batchDeps{
 		rpc:          rpcCli,
