@@ -3,8 +3,6 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
@@ -22,13 +20,6 @@ import (
 const defaultPriorityTipWei = 1_000_000_000
 
 // batchDeps groups the live subsystems threaded through batch execution.
-//
-// reserveMu serialises the (seqID, nonce, salt) reservation triple so that
-// seqID monotonicity exactly matches nonce-range monotonicity. Without the
-// mutex, two atomic.Add calls on separate counters can interleave (planner A
-// claims seqID=5 then is preempted; planner B claims seqID=6 and races ahead
-// to reserve a lower nonce). seqCounter is the dense, gap-free counter used
-// for commit-ordering.
 type batchDeps struct {
 	rpc          *rpc.Client
 	sensor       *sensor.Sensor
@@ -43,8 +34,6 @@ type batchDeps struct {
 	target       *controller.Target
 	targetDigest []byte
 	metricsReg   *metrics.Registry
-	reserveMu    *sync.Mutex
-	seqCounter   *atomic.Uint64
 }
 
 // batchResult is the outcome of one iteration's work.
@@ -57,23 +46,11 @@ type batchResult struct {
 }
 
 // dispatched carries the unsigned state produced by dispatchBatch into
-// commitBatch. It is the unit of work flowing between the pipeline goroutines.
+// commitBatch.
 //
 // All cursor values that buildRecord needs are snapshotted here so commit
-// never reads back from facadeCtx (which the planner is concurrently mutating
-// for the next batch).
-//
-// seqID is a strictly monotonic, gap-free counter assigned at the same atomic
-// step as the nonce-range reservation. It guarantees that the commit goroutine
-// can replay batches in nonce order (= chain-accepted order) regardless of the
-// arbitrary order in which planner goroutines finish their work. `skip` marks
-// a sentinel record produced when a planner reserved a seqID but then failed
-// to dispatch (e.g. dispatch error). Commit treats skip=true as "advance the
-// next-seq counter, do not commit". Without it, a missing seqID would block
-// the commit goroutine forever.
+// reads a stable view independent of any later facadeCtx mutation.
 type dispatched struct {
-	seqID      uint64
-	skip       bool
 	batchID    uint64
 	plan       *controller.BatchPlan
 	addrBefore uint64
@@ -83,24 +60,18 @@ type dispatched struct {
 	res        *facade.Result // signed RLPs, hashes, cursors-after
 }
 
-// dispatchBatch performs Pick + fee update + Dispatch. Atomically reserves the
-// (seqID, nonce, salt) triple from a single critical section so multiple
-// planner goroutines may execute concurrently without nonce collisions AND
-// without seqID/nonce-order skew.
+// dispatchBatch performs Pick + Dispatch and reserves the nonce/salt ranges.
 //
-// Returns nil if Pick yields no plan or Dispatch yields zero txs. Returns a
-// non-nil seqID via the returned dispatched so the caller can emit a `skip`
-// sentinel if the dispatch later errors out.
+// Returns nil if Pick yields no plan or Dispatch yields zero txs. The single
+// planner produces batches strictly in order, so no commit-ordering key is
+// needed; a dispatch error is simply propagated for the caller to skip.
 func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *controller.Observation) (*dispatched, error) {
 	plan := d.state.Pick(currentObs, d.target, defaultTotalBatchBytes, d.facadeCtx.LoadBlockGasLimit())
 	if plan == nil {
 		return nil, nil
 	}
 
-	// Atomic reservation: pin disjoint nonce and salt ranges + assign a
-	// monotone seqID inside one critical section. The seqID is the ordering
-	// key the commit goroutine uses to replay batches in nonce order.
-	//
+	// Reserve a contiguous range of exactly plan.NMaxTxs nonce/salt slots.
 	// We always reserve plan.NMaxTxs slots even though Dispatch may refuse
 	// the batch (e.g. zero-tx response) — wasted slots are abandoned (salt
 	// domain is 2^64; nonce holes are converted into a hard error by the
@@ -109,11 +80,8 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 	if want == 0 {
 		want = 1
 	}
-	d.reserveMu.Lock()
-	seqID := d.seqCounter.Add(1) - 1
 	addrBefore := d.facadeCtx.ReserveAddresses(want)
 	saltBefore := d.facadeCtx.ReserveSalts(want)
-	d.reserveMu.Unlock()
 
 	res, err := d.dispatcher.Dispatch(ctx, facade.DispatchInput{
 		Plan:       plan,
@@ -122,29 +90,24 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 		NumNonces:  want,
 	}, d.facadeCtx)
 	if err != nil {
-		// seqID was already claimed under the reservation mutex. Return a
-		// skip sentinel so the commit goroutine can advance past this seqID
-		// without waiting forever. The planner skips this batch and continues;
-		// reserved nonces leak, but the chain's next batch reconciles them.
-		// `plan` is carried so the planner can log the offending verb.
-		return &dispatched{seqID: seqID, skip: true, plan: plan}, fmt.Errorf("lifecycle: dispatch: %w", err)
+		// The planner skips this batch and continues; reserved nonces leak,
+		// but the chain's next batch reconciles them.
+		return nil, fmt.Errorf("lifecycle: dispatch: %w", err)
 	}
 	if res == nil || len(res.SignedRLP) == 0 {
-		// Same rationale as above — surface a skip so the queue drains.
-		return &dispatched{seqID: seqID, skip: true, plan: plan}, nil
+		return nil, nil
 	}
 
 	// Refuse to send a batch with nonce holes. If trimSignables dropped tail
 	// txs, the reservation contains unused nonces that would stall the chain
 	// (gap-resistant mempools reject the next batch's first tx). Fail the batch
-	// loudly so the operator notices; the planner will give up and shut down.
+	// loudly so the operator notices; the planner skips it and continues.
 	if uint64(res.TxCount) != want {
-		return &dispatched{seqID: seqID, skip: true, plan: plan}, fmt.Errorf("lifecycle: nonce-range hole: reserved %d, signed %d (verb=%s, deadline=%d)",
+		return nil, fmt.Errorf("lifecycle: nonce-range hole: reserved %d, signed %d (verb=%s, deadline=%d)",
 			want, res.TxCount, plan.Verb, plan.DeadlineBytes)
 	}
 
 	return &dispatched{
-		seqID:      seqID,
 		batchID:    batchID,
 		plan:       plan,
 		addrBefore: addrBefore,
@@ -153,15 +116,6 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 		saltAfter:  res.NewSalt,
 		res:        res,
 	}, nil
-}
-
-// dispatchVerb returns the verb of a dispatched batch (skip sentinel or full
-// record), or "unknown" when the plan is absent. Used for diagnostic logging.
-func dispatchVerb(db *dispatched) string {
-	if db != nil && db.plan != nil {
-		return db.plan.Verb
-	}
-	return "unknown"
 }
 
 // commitBatch consumes a dispatched batch: writes the pending sidecar, commits
@@ -276,25 +230,11 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched, pre *control
 	}, nil
 }
 
-// runOneBatch is the sequential composition of dispatchBatch + commitBatch.
-// It is kept as a fallback path; the pipelined runLoop calls dispatchBatch and
-// commitBatch on separate goroutines.
-func runOneBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *controller.Observation) (*batchResult, error) {
-	db, err := dispatchBatch(ctx, d, batchID, currentObs)
-	if err != nil {
-		return nil, err
-	}
-	if db == nil {
-		return &batchResult{}, nil
-	}
-	return commitBatch(ctx, d, db, currentObs)
-}
-
 // buildRecord assembles the on-disk Record for one committed batch.
 //
 // All facadeCtx cursor reads come from the dispatched snapshot
-// (saltBefore/saltAfter, addrBefore) so this is safe to call while the planner
-// goroutine has already advanced facadeCtx for the next batch.
+// (saltBefore/saltAfter, addrBefore) so this is unaffected by any later
+// facadeCtx advance for the next batch.
 func buildRecord(
 	d *batchDeps,
 	batchID uint64,

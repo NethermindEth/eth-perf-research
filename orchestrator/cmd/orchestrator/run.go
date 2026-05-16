@@ -33,7 +33,6 @@ type runFlags struct {
 	enableProbe          bool
 	metricsAddr          string
 	epsilon              float64
-	planners             int
 }
 
 func newRunCmd() *cobra.Command {
@@ -64,7 +63,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&f.enableProbe, "probe", true, "Run probe phase on fresh start")
 	cmd.Flags().StringVar(&f.metricsAddr, "metrics-addr", ":9101", "TCP address for the Prometheus /metrics endpoint")
 	cmd.Flags().Float64Var(&f.epsilon, "epsilon", 0.5, "ε-greedy exploration rate for verb selection")
-	cmd.Flags().IntVar(&f.planners, "planners", 4, "Number of parallel planner goroutines (1=sequential)")
 	return cmd
 }
 
@@ -98,7 +96,6 @@ func runOrchestrator(ctx context.Context, f runFlags) error {
 		ReferenceFPath:   f.referenceFPath,
 		ManifestPath:     f.manifestPath,
 		MaxBatches:       f.maxBatches,
-		Planners:         f.planners,
 		EnableProbe:      f.enableProbe,
 		DeployPrivateKey: cmp.Or(f.deployPrivateKey, os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")),
 		BuilderWorkerCmd: strings.Fields(f.builderWorkerCmd),

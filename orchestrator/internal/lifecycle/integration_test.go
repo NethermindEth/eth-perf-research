@@ -88,12 +88,12 @@ func TestLifecycleIntegration(t *testing.T) {
 		t.Fatalf("lifecycle.Run: %v", err)
 	}
 	elapsed := time.Since(runStart)
-	t.Logf("5-batch pipelined run elapsed: %v", elapsed)
+	t.Logf("5-batch run elapsed: %v", elapsed)
 	// Generous upper bound — 5 batches with mocks should comfortably fit in 5s
-	// even on a slow CI runner. A regression that re-serialises dispatch+commit
+	// even on a slow CI runner. A regression that adds per-batch blocking work
 	// would blow past this.
 	if elapsed > 5*time.Second {
-		t.Fatalf("expected pipelined 5-batch run to complete in <=5s, got %v", elapsed)
+		t.Fatalf("expected 5-batch run to complete in <=5s, got %v", elapsed)
 	}
 
 	// ── assertions ───────────────────────────────────────────────────────────
@@ -344,12 +344,12 @@ func assertPayloads(t *testing.T, path string, wantEntries int) {
 	}
 }
 
-// TestRunLoop_4Planners_NoNonceGaps verifies that running with cfg.Planners=4
-// produces journal records whose [StartAddress, EndAddress) ranges union to a
+// TestRunLoop_NoNonceGaps verifies that the single-planner loop produces
+// journal records whose [StartAddress, EndAddress) ranges union to a
 // contiguous, gap-free, duplicate-free interval starting at the initial
-// address cursor. This is the core invariant that atomic nonce reservation
-// must preserve.
-func TestRunLoop_4Planners_NoNonceGaps(t *testing.T) {
+// address cursor. This is the core invariant that nonce reservation must
+// preserve.
+func TestRunLoop_NoNonceGaps(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -378,7 +378,6 @@ func TestRunLoop_4Planners_NoNonceGaps(t *testing.T) {
 		TargetYAMLPath:     targetPath,
 		GenesisSHA256:      genesisHash,
 		MaxBatches:         wantBatches,
-		Planners:           4,
 		EnableProbe:        false,
 		DeployPrivateKey:   deployKey,
 		BuilderWorkerCmd:   []string{workerBin},
@@ -460,10 +459,10 @@ func TestRunLoop_4Planners_NoNonceGaps(t *testing.T) {
 		t.Errorf("first interval start = %d, want 0", intervals[0].start)
 	}
 
-	// 5. STRICT: commits must be appended in nonce order. With the seqID-heap
-	// commit ordering, journal-append order must equal sorted-by-nonce order.
-	// A regression that drops the heap re-ordering would surface as a
-	// permutation here.
+	// 5. STRICT: commits must be appended in nonce order. The single planner
+	// produces batches sequentially, so journal-append order must equal
+	// sorted-by-nonce order. A regression that reordered batches would surface
+	// as a permutation here.
 	for i := 1; i < len(commitOrder); i++ {
 		if commitOrder[i] < commitOrder[i-1] {
 			t.Fatalf("commit out-of-order at i=%d: prev startNonce=%d, this startNonce=%d (journal append order must match nonce order)",
@@ -500,7 +499,7 @@ func sortIntervals(ivs []interval) {
 	}
 }
 
-// interval is used by TestRunLoop_4Planners_NoNonceGaps.
+// interval is used by TestRunLoop_NoNonceGaps.
 type interval struct {
 	batchID    uint64
 	start, end uint64

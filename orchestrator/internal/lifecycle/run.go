@@ -7,11 +7,11 @@
 //   - journal/payloads/manifest persistence,
 //   - shutdown / termination accounting.
 //
-// The hot loop lives in runLoop and delegates per-iteration work to runOneBatch.
+// The hot loop lives in runLoop, which Picks, Dispatches, Commits and journals
+// each batch sequentially in a single goroutine.
 package lifecycle
 
 import (
-	"container/heap"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/builderpool"
@@ -41,23 +40,6 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/target"
 )
 
-// batchQueue is a min-heap over *dispatched ordered by seqID. The commit
-// goroutine uses it to replay batches in nonce-correct order regardless of
-// the (out-of-order) completion order of the planner goroutines.
-type batchQueue []*dispatched
-
-func (q batchQueue) Len() int           { return len(q) }
-func (q batchQueue) Less(i, j int) bool { return q[i].seqID < q[j].seqID }
-func (q batchQueue) Swap(i, j int)      { q[i], q[j] = q[j], q[i] }
-func (q *batchQueue) Push(x any)        { *q = append(*q, x.(*dispatched)) }
-func (q *batchQueue) Pop() any {
-	old := *q
-	n := len(old)
-	x := old[n-1]
-	*q = old[:n-1]
-	return x
-}
-
 // Config is the top-level configuration for the lifecycle run.
 type Config struct {
 	RPCURL              string
@@ -68,10 +50,6 @@ type Config struct {
 	ReferenceFPath      string
 	ManifestPath        string
 	MaxBatches          int
-	// Planners is the number of parallel planner goroutines sharing one master
-	// signer via atomic nonce reservation. Default 4. Set to 1 for the old
-	// sequential pipeline behaviour.
-	Planners            int
 	EnableProbe         bool
 	DeployPrivateKey    string
 	BuilderWorkerCmd    []string
@@ -335,8 +313,8 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// 13. Prime fee policy once synchronously so the first batch has a valid
-	// max-fee/tip pair before any planner runs, then start the background
-	// refresher (single RPC per tick, independent of planner count).
+	// max-fee/tip pair before the planner loop runs, then start the background
+	// refresher (single RPC per tick).
 	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx, cfg.TargetEthPerGasWei); err != nil {
 		return fmt.Errorf("lifecycle: prime fee policy: %w", err)
 	}
@@ -390,8 +368,6 @@ func Run(ctx context.Context, cfg Config) error {
 		target:       ctrlTarget,
 		targetDigest: targetSha256Bytes(rawTarget.SHA256),
 		metricsReg:   metricsReg,
-		reserveMu:    &sync.Mutex{},
-		seqCounter:   &atomic.Uint64{},
 	}
 
 	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, currentObs, targetCh, rawTarget, mf)
@@ -440,15 +416,6 @@ func withDefaults(cfg Config) Config {
 	if cfg.TargetEthPerGasWei == 0 {
 		cfg.TargetEthPerGasWei = defaultTargetEthPerGasWei
 	}
-	// ORCH_PLANNERS env var overrides the flag/struct value when set.
-	if raw := os.Getenv("ORCH_PLANNERS"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-			cfg.Planners = v
-		}
-	}
-	if cfg.Planners <= 0 {
-		cfg.Planners = 4
-	}
 	return cfg
 }
 
@@ -494,25 +461,14 @@ func buildFacadeContext(t *target.Target, chainID, gasLimit uint64) *facade.Cont
 	return c
 }
 
-// runLoop drives the dispatch+commit pipeline until a termination condition
-// fires. Returns the termination reason and the last committed block (or nil).
+// runLoop drives the Pick → Dispatch → Commit → Apply → journal pipeline until
+// a termination condition fires. Returns the termination reason and the last
+// committed block (or nil).
 //
-// Topology:
-//   - N PLANNER goroutines (cfg.Planners, default 4): each grabs a unique
-//     batchID via atomic increment, picks a plan, reserves nonce+salt ranges
-//     atomically from the shared facadeCtx, dispatches, and sends *dispatched
-//     into the pipe. All planners share one master signer.
-//   - 1 COMMIT goroutine: drains the pipe, calls commitBatch, updates the
-//     shared observation pointer + lastBlock. Drains pipe to completion even
-//     on shutdown so no dispatched batch is orphaned.
-//   - 1 PIPE-CLOSER goroutine: waits for all planners to exit then close(pipe)
-//     so the commit goroutine sees EOF.
-//
-// Only planner 0 services the targetCh reload — the other planners pick up
-// the new target via the shared *ctrlTarget on their next iteration.
-//
-// The pipe capacity n+1 keeps backpressure tight while letting planners hand
-// off work without serialising on the commit goroutine.
+// Topology: a single goroutine — this very function — runs every batch in
+// strict order. Because batches are produced sequentially there is no commit
+// re-ordering, no shared-cursor race, and no buffered hand-off channel: the
+// loop dispatches batch N, commits it, then moves to N+1.
 func runLoop(
 	ctx context.Context,
 	cfg Config,
@@ -528,274 +484,154 @@ func runLoop(
 		startBatchID++
 	}
 
-	// Shared state.
-	obsPtr := &atomic.Pointer[controller.Observation]{}
-	obsPtr.Store(currentObs)
+	obs := currentObs
+	var lastBlock *rpc.BlockHeader
 
-	lastBlockPtr := &atomic.Pointer[rpc.BlockHeader]{}
-
-	var (
-		termOnce   sync.Once
-		termReason atomic.Pointer[string]
-	)
+	termReason := ""
 	setTerm := func(reason string) {
-		termOnce.Do(func() {
-			r := reason
-			termReason.Store(&r)
-		})
-	}
-
-	n := cfg.Planners
-	if n <= 0 {
-		n = 4
-	}
-
-	pipe := make(chan *dispatched, n+1)
-
-	// Shared batch-id allocator. Each planner does globalBatchID.Add(1)-1 to
-	// claim a unique id. Note that with N>1 planners, batch ids may commit
-	// out of strict numerical order; the commit goroutine still serialises
-	// the journal append (single writer).
-	var globalBatchID atomic.Uint64
-	globalBatchID.Store(startBatchID)
-
-	// dispatchSkipStreakHalt bounds how many consecutive dispatch/build errors a
-	// single planner tolerates before giving up. A single bad batch is skipped
-	// (the planner continues); a sustained streak still halts the run so a
-	// genuinely broken pipeline does not spin forever.
-	const dispatchSkipStreakHalt = 20
-
-	plannerLoop := func(idx int) {
-		idleBackoff := 50 * time.Millisecond
-		consecutiveDispatchSkips := 0
-		for {
-			// Early-exit when another planner already tripped a terminator.
-			if termReason.Load() != nil {
-				return
-			}
-
-			// 1. Drain target reloads (planner 0 only) and respect cancellation.
-			select {
-			case <-ctx.Done():
-				setTerm(terminationSignal)
-				return
-			default:
-			}
-			if idx == 0 {
-				select {
-				case newT := <-targetCh:
-					_, newCtrl, _ := refreshTarget(newT)
-					*ctrlTarget = newCtrl
-					deps.target = newCtrl
-					deps.targetDigest = targetSha256Bytes(newT.SHA256)
-					mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
-						AppliedAtBatch: int(globalBatchID.Load()),
-						AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
-						TargetSHA256:   newT.SHA256,
-						Shares:         cloneShares(newT.Shares),
-						TotalBytes:     newT.TotalBytes,
-					})
-					slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
-				default:
-				}
-			}
-
-			// 2. Termination predicates — checked BEFORE claiming a batchID so
-			// we never burn an id on a batch we won't dispatch.
-			threshold := overshootThreshold
-			if env := os.Getenv("ORCH_OVERSHOOT_THRESHOLD"); env != "" {
-				if v, err := strconv.ParseFloat(env, 64); err == nil {
-					threshold = v
-				}
-			}
-			if deps.state.HasInstability(threshold, overshootWindowSize, overshootMaxTrips, overshootGrace) {
-				setTerm(terminationOvershoot)
-				return
-			}
-			obsSnapshot := obsPtr.Load()
-			if reachedTarget(obsSnapshot, *ctrlTarget) {
-				setTerm(terminationTargetMet)
-				return
-			}
-			if cfg.MaxBatches > 0 && globalBatchID.Load() >= uint64(cfg.MaxBatches) {
-				setTerm(terminationBatchLimit)
-				return
-			}
-
-			// 3. Claim a batchID and dispatch.
-			batchID := globalBatchID.Add(1) - 1
-			// Re-check MaxBatches: a racing planner may have just claimed the
-			// last legal id. Drop the over-budget claim instead of dispatching.
-			if cfg.MaxBatches > 0 && batchID >= uint64(cfg.MaxBatches) {
-				setTerm(terminationBatchLimit)
-				return
-			}
-
-			db, err := dispatchBatch(ctx, deps, batchID, obsSnapshot)
-			if err != nil {
-				// dispatchBatch may return a non-nil `db` even with an error
-				// (a skip sentinel marking the seqID it already claimed). Send
-				// it so the commit-ordering heap can advance past this seqID.
-				if db != nil && db.skip {
-					select {
-					case <-ctx.Done():
-					case pipe <- db:
-					}
-				}
-				if ctx.Err() != nil {
-					setTerm(terminationSignal)
-					return
-				}
-				// A dispatch/build error (gas cap exceeded, oversized batch,
-				// builder failure, nonce hole) is batch-local and recoverable:
-				// SKIP the batch and continue planning instead of terminating
-				// the whole run. Only a sustained streak halts — a single bad
-				// batch must not kill in-memory controller learning.
-				consecutiveDispatchSkips++
-				slog.Warn("lifecycle: dispatch failed, skipping batch",
-					"planner", idx, "batch_id", batchID,
-					"verb", dispatchVerb(db), "streak", consecutiveDispatchSkips,
-					"err", err)
-				if consecutiveDispatchSkips >= dispatchSkipStreakHalt {
-					setTerm(fmt.Sprintf("error: %d consecutive dispatch failures (last: %s)",
-						consecutiveDispatchSkips, err.Error()))
-					return
-				}
-				continue
-			}
-			consecutiveDispatchSkips = 0
-			if db == nil {
-				// Pick yielded no plan (no seqID claimed yet) — back off
-				// briefly. The batchID we claimed is wasted; the commit
-				// goroutine never sees it, so journal numbering will have
-				// a small hole (acceptable — the journal carries explicit
-				// BatchId field).
-				select {
-				case <-ctx.Done():
-					setTerm(terminationSignal)
-					return
-				case <-time.After(idleBackoff):
-				}
-				continue
-			}
-
-			// 4. Send to commit goroutine. This includes skip sentinels (db.skip
-			// == true) so the heap-based commit ordering can drain past
-			// reserved-but-unused seqIDs.
-			select {
-			case <-ctx.Done():
-				setTerm(terminationSignal)
-				return
-			case pipe <- db:
-			}
+		if termReason == "" {
+			termReason = reason
 		}
 	}
 
-	var plannerWG sync.WaitGroup
-	plannerWG.Add(n)
-	for i := 0; i < n; i++ {
-		go func(idx int) {
-			defer plannerWG.Done()
-			plannerLoop(idx)
-		}(i)
-	}
+	batchID := startBatchID
+	idleBackoff := 50 * time.Millisecond
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	// Pipe-closer: waits for every planner to exit, then closes the pipe so
-	// the commit goroutine can drain to EOF.
-	go func() {
-		plannerWG.Wait()
-		close(pipe)
-	}()
-
-	// COMMIT goroutine. Drains pipe to completion even on shutdown so we never
-	// orphan a dispatched batch (which would leave a stale pending sidecar).
-	//
-	// Out-of-order arrival is the norm with N>1 planners: planner A may finish
-	// its build+sign before planner B even though A holds a later seqID. The
-	// heap (`q`) re-orders by seqID so we commit in strict nonce-monotonic
-	// order. `nextSeq` is the seqID we expect next; the commit loop dequeues
-	// only when the heap top matches it.
-	//
-	// Skip sentinels (db.skip == true) carry a seqID but no payload; they
-	// represent planner failures after reservation. We advance nextSeq past
-	// them without calling commitBatch.
+	// dispatchSkipStreakHalt bounds how many consecutive dispatch/build errors
+	// the loop tolerates before giving up. A single bad batch is skipped (the
+	// loop continues); a sustained streak still halts the run so a genuinely
+	// broken pipeline does not spin forever.
+	const dispatchSkipStreakHalt = 20
+	// rejectionStreakHalt bounds consecutive fully-rejected commits (NM included
+	// zero of the submitted txs) before halting — a sign the chain state is
+	// missing the dependencies the batch needs.
 	const rejectionStreakHalt = 5
-	go func() {
-		defer wg.Done()
-		var q batchQueue
-		var nextSeq uint64 = 0
-		var consecutiveFullRejections int
 
-		drain := func(useCtx context.Context) {
-			for q.Len() > 0 && q[0].seqID == nextSeq {
-				top := heap.Pop(&q).(*dispatched)
-				nextSeq++
-				if top.skip {
-					continue
-				}
-				if useCtx.Err() != nil {
-					continue
-				}
-				pre := obsPtr.Load()
-				res, err := commitBatch(useCtx, deps, top, pre)
-				if err != nil {
-					if useCtx.Err() != nil {
-						continue
+	consecutiveDispatchSkips := 0
+	consecutiveFullRejections := 0
+
+loop:
+	for {
+		// 1. Respect cancellation, then drain target reloads.
+		select {
+		case <-ctx.Done():
+			setTerm(terminationSignal)
+			break loop
+		default:
+		}
+		select {
+		case newT := <-targetCh:
+			_, newCtrl, _ := refreshTarget(newT)
+			*ctrlTarget = newCtrl
+			deps.target = newCtrl
+			deps.targetDigest = targetSha256Bytes(newT.SHA256)
+			mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
+				AppliedAtBatch: int(batchID),
+				AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
+				TargetSHA256:   newT.SHA256,
+				Shares:         cloneShares(newT.Shares),
+				TotalBytes:     newT.TotalBytes,
+			})
+			slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
+		default:
+		}
+
+		// 2. Termination predicates — checked BEFORE claiming a batchID so we
+		// never burn an id on a batch we won't dispatch.
+		threshold := overshootThreshold
+		if env := os.Getenv("ORCH_OVERSHOOT_THRESHOLD"); env != "" {
+			if v, err := strconv.ParseFloat(env, 64); err == nil {
+				threshold = v
+			}
+		}
+		if deps.state.HasInstability(threshold, overshootWindowSize, overshootMaxTrips, overshootGrace) {
+			setTerm(terminationOvershoot)
+			break loop
+		}
+		if reachedTarget(obs, *ctrlTarget) {
+			setTerm(terminationTargetMet)
+			break loop
+		}
+		if cfg.MaxBatches > 0 && batchID >= uint64(cfg.MaxBatches) {
+			setTerm(terminationBatchLimit)
+			break loop
+		}
+
+		// 3. Pick + Dispatch.
+		db, err := dispatchBatch(ctx, deps, batchID, obs)
+		if err != nil {
+			if ctx.Err() != nil {
+				setTerm(terminationSignal)
+				break loop
+			}
+			// A dispatch/build error (gas cap exceeded, oversized batch,
+			// builder failure, nonce hole) is batch-local and recoverable:
+			// SKIP the batch and continue planning instead of terminating the
+			// whole run. Only a sustained streak halts — a single bad batch
+			// must not kill in-memory controller learning.
+			consecutiveDispatchSkips++
+			slog.Warn("lifecycle: dispatch failed, skipping batch",
+				"batch_id", batchID, "streak", consecutiveDispatchSkips, "err", err)
+			if consecutiveDispatchSkips >= dispatchSkipStreakHalt {
+				setTerm(fmt.Sprintf("error: %d consecutive dispatch failures (last: %s)",
+					consecutiveDispatchSkips, err.Error()))
+				break loop
+			}
+			batchID++
+			continue
+		}
+		consecutiveDispatchSkips = 0
+		if db == nil {
+			// Pick yielded no plan — back off briefly. The batchID is not
+			// advanced; the next iteration retries the same id.
+			select {
+			case <-ctx.Done():
+				setTerm(terminationSignal)
+				break loop
+			case <-time.After(idleBackoff):
+			}
+			continue
+		}
+
+		// 4. Commit + Apply + journal.
+		res, err := commitBatch(ctx, deps, db, obs)
+		if err != nil {
+			if ctx.Err() != nil {
+				setTerm(terminationSignal)
+				break loop
+			}
+			if isPartialAcceptanceErr(err) {
+				expected, included := parsePartialAcceptance(err)
+				slog.Warn("lifecycle: commit partial-acceptance, skipping batch",
+					"batch_id", db.batchID,
+					"expected", expected,
+					"included", included,
+					"verb", db.plan.Verb,
+				)
+				if included == 0 {
+					consecutiveFullRejections++
+					if consecutiveFullRejections >= rejectionStreakHalt {
+						setTerm(fmt.Sprintf("error: %d consecutive batches fully rejected (verb=%s); chain state likely missing dependencies",
+							consecutiveFullRejections, db.plan.Verb))
+						break loop
 					}
-					if isPartialAcceptanceErr(err) {
-						expected, included := parsePartialAcceptance(err)
-						slog.Warn("lifecycle: commit partial-acceptance, skipping batch",
-							"batch_id", top.batchID,
-							"seq_id", top.seqID,
-							"expected", expected,
-							"included", included,
-							"verb", top.plan.Verb,
-						)
-						if included == 0 {
-							consecutiveFullRejections++
-							if consecutiveFullRejections >= rejectionStreakHalt {
-								setTerm(fmt.Sprintf("error: %d consecutive batches fully rejected (verb=%s); chain state likely missing dependencies",
-									consecutiveFullRejections, top.plan.Verb))
-								continue
-							}
-						} else {
-							consecutiveFullRejections = 0
-						}
-						continue
-					}
-					slog.Error("lifecycle: commit failed", "batch_id", top.batchID, "seq_id", top.seqID, "err", err)
-					setTerm("error: " + err.Error())
-					continue
-				}
-				if res != nil && res.committed {
-					obsPtr.Store(res.postObs)
-					lastBlockPtr.Store(res.blockHeader)
+				} else {
 					consecutiveFullRejections = 0
 				}
+				batchID++
+				continue
 			}
+			slog.Error("lifecycle: commit failed", "batch_id", db.batchID, "err", err)
+			setTerm("error: " + err.Error())
+			break loop
 		}
-
-		for db := range pipe {
-			heap.Push(&q, db)
-			drain(ctx)
+		if res != nil && res.committed {
+			obs = res.postObs
+			lastBlock = res.blockHeader
+			consecutiveFullRejections = 0
 		}
-
-		// After pipe is closed: drain residual entries. If a planner died
-		// holding a seqID without sending a sentinel (shouldn't happen, but
-		// defensively) the heap top may not match nextSeq — in that case we
-		// force-drain by advancing nextSeq to the heap top, which preserves
-		// the relative order of the remaining batches.
-		for q.Len() > 0 {
-			if q[0].seqID > nextSeq {
-				nextSeq = q[0].seqID
-			}
-			drain(ctx)
-		}
-	}()
-
-	wg.Wait()
+		batchID++
+	}
 
 	// Drain residual pending sidecar in case commit was interrupted mid-flight
 	// (commitBatch normally clears it; on cancel-during-commit we may have left
@@ -805,10 +641,10 @@ func runLoop(
 	}
 
 	reason := terminationSignal
-	if r := termReason.Load(); r != nil {
-		reason = *r
+	if termReason != "" {
+		reason = termReason
 	}
-	return reason, lastBlockPtr.Load()
+	return reason, lastBlock
 }
 
 // refreshTarget reloads the target and returns the controller projection.

@@ -10,10 +10,10 @@ import (
 // Context is the per-run mutable state owned by the orchestrator.
 // It is passed to Dispatcher.Dispatch for each batch.
 //
-// AddressCursor and SaltCursor are atomic so multiple planner goroutines may
-// reserve disjoint ranges concurrently via ReserveAddresses / ReserveSalts.
-// All other fields are written once during run setup and treated as read-only
-// thereafter.
+// AddressCursor and SaltCursor are atomic so cursor reservation stays a single
+// race-free operation; the lifecycle reserves disjoint ranges via
+// ReserveAddresses / ReserveSalts. All other fields are written once during run
+// setup and treated as read-only thereafter.
 type Context struct {
 	BaseAddress   []byte // 20-byte master signer address
 	Revision      uint64 // address-space generation
@@ -21,21 +21,21 @@ type Context struct {
 	ChainID       uint64
 	GasLimit      uint64
 	// BlockGasLimit is refreshed by the lifecycle every batch from the head
-	// block. Accessed via the atomic wrapper so concurrent planners and the
-	// commit goroutine don't race on plain reads/writes.
+	// block. Accessed via the atomic wrapper so the planner loop and the
+	// background fee refresher don't race on plain reads/writes.
 	BlockGasLimit atomic.Uint64
 
-	// Cursors — concurrently reserved by planner goroutines via the
-	// ReserveAddresses / ReserveSalts methods. Direct field access is
-	// intentionally non-atomic-safe; callers must use the helper methods.
+	// Cursors — reserved via the ReserveAddresses / ReserveSalts methods.
+	// Direct field access is intentionally non-atomic-safe; callers must use
+	// the helper methods.
 	AddressCursor atomic.Uint64 // == nonce of the next tx to sign
 	SaltCursor    atomic.Uint64 // CREATE2 salt for factorydeploytx
 
 	// Fee policy — set by the lifecycle from the latest block's baseFeePerGas.
-	// Accessed via the typed atomic.Pointer wrappers below so multiple planner
-	// goroutines may refresh them concurrently without a data race on the
-	// underlying *big.Int. Direct field access is intentionally non-atomic;
-	// callers must use SetFeePolicy / loadFeePolicy.
+	// Accessed via the typed atomic.Pointer wrappers below so the background
+	// fee refresher and the planner loop don't race on the underlying
+	// *big.Int. Direct field access is intentionally non-atomic; callers must
+	// use SetFeePolicy / loadFeePolicy.
 	maxFeePerGas         atomic.Pointer[big.Int]
 	maxPriorityFeePerGas atomic.Pointer[big.Int]
 
@@ -43,8 +43,8 @@ type Context struct {
 	VerbGasFactors map[string]float64
 }
 
-// ReserveAddresses atomically reserves n consecutive address-cursor slots and
-// returns the first one. Safe for concurrent callers.
+// ReserveAddresses reserves n consecutive address-cursor slots and returns the
+// first one.
 func (c *Context) ReserveAddresses(n uint64) (start uint64) {
 	return c.AddressCursor.Add(n) - n
 }
@@ -54,9 +54,9 @@ func (c *Context) LoadAddressCursor() uint64 {
 	return c.AddressCursor.Load()
 }
 
-// ReserveSalts atomically reserves n consecutive salt slots and returns the
-// first one. Safe for concurrent callers. The salt domain is 2^64 so any
-// unused reservations from trimming are irrelevant.
+// ReserveSalts reserves n consecutive salt slots and returns the first one.
+// The salt domain is 2^64 so any unused reservations from trimming are
+// irrelevant.
 func (c *Context) ReserveSalts(n uint64) (start uint64) {
 	return c.SaltCursor.Add(n) - n
 }

@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"container/heap"
 	"errors"
 	"testing"
 )
@@ -71,45 +70,37 @@ func TestParsePartialAcceptanceMalformedReturnsZeros(t *testing.T) {
 	}
 }
 
-// TestCommitGoroutinePartialAcceptanceSoftSkip simulates the commit goroutine's
-// inner branch: on a partial-acceptance error, the seqID advances, the run
-// does not terminate, and the obs/lastBlock pointers do not move. This is the
+// TestCommitPartialAcceptanceSoftSkip simulates the runLoop's commit branch:
+// on a partial-acceptance error the loop advances to the next batch, the run
+// does not terminate, and the obs/lastBlock state does not move. This is the
 // invariant Fix 1 establishes so a single NM partial-acceptance event does not
 // bring down the whole run.
 //
-// We exercise the decision logic in isolation (the real commit goroutine
-// integrates RPC/sensor/journal which would require ~hundreds of lines of
-// mocking). The integration_test.go path covers full end-to-end behaviour.
-func TestCommitGoroutinePartialAcceptanceSoftSkip(t *testing.T) {
-	// Mock the heap-based commit-ordering: three batches at seqIDs 0/1/2 where
-	// seq 1 fails with a partial-acceptance error. nextSeq must reach 3 and no
-	// terminator fires.
-	var q batchQueue
-	for _, seqID := range []uint64{0, 1, 2} {
-		heap.Push(&q, &dispatched{seqID: seqID, batchID: seqID, plan: nil})
-	}
+// We exercise the decision logic in isolation (the real loop integrates
+// RPC/sensor/journal which would require ~hundreds of lines of mocking). The
+// integration_test.go path covers full end-to-end behaviour.
+func TestCommitPartialAcceptanceSoftSkip(t *testing.T) {
+	// Three batches at batchIDs 0/1/2 where batch 1 fails with a
+	// partial-acceptance error. The loop must drain all three and not halt.
+	batchIDs := []uint64{0, 1, 2}
 
 	commitErr := errors.New("testing_commitBlockV1: rpc error: code=-32000 message=expected 45100 transactions but only 44653 were included")
 
 	// Stand-in for the real commit-side mutable state.
 	var (
-		nextSeq      uint64
-		terminated   bool
-		obsUpdated   int
-		skipsLogged  int
+		processed   uint64
+		terminated  bool
+		obsUpdated  int
+		skipsLogged int
 	)
 
-	// Replay the commit-loop logic for each entry in seqID order.
-	for q.Len() > 0 {
-		top := heap.Pop(&q).(*dispatched)
-		if top.seqID != nextSeq {
-			t.Fatalf("out-of-order pop: top.seqID=%d nextSeq=%d", top.seqID, nextSeq)
-		}
-		nextSeq++
+	// Replay the commit-loop logic for each batch in order.
+	for _, batchID := range batchIDs {
+		processed++
 
-		// Simulate: seq 1 returns a partial-acceptance error; others succeed.
+		// Simulate: batch 1 returns a partial-acceptance error; others succeed.
 		var err error
-		if top.seqID == 1 {
+		if batchID == 1 {
 			err = commitErr
 		}
 		if err != nil {
@@ -131,13 +122,13 @@ func TestCommitGoroutinePartialAcceptanceSoftSkip(t *testing.T) {
 	if terminated {
 		t.Fatal("run terminated on partial-acceptance; soft-skip contract violated")
 	}
-	if nextSeq != 3 {
-		t.Fatalf("nextSeq=%d, want 3 (all batches drained)", nextSeq)
+	if processed != 3 {
+		t.Fatalf("processed=%d, want 3 (all batches drained)", processed)
 	}
 	if skipsLogged != 1 {
 		t.Fatalf("skipsLogged=%d, want 1", skipsLogged)
 	}
 	if obsUpdated != 2 {
-		t.Fatalf("obsUpdated=%d, want 2 (only seq 0 and 2 commit)", obsUpdated)
+		t.Fatalf("obsUpdated=%d, want 2 (only batch 0 and 2 commit)", obsUpdated)
 	}
 }
