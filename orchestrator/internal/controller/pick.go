@@ -12,33 +12,39 @@ import (
 const projectionEta = 0.1
 const toleranceFloor = 0.005
 
-// gasCapFraction is the fraction of the block gas limit Pick will plan up to.
-// Mirrors the dispatcher's defensive ceiling (0.95 × blockGasLimit).
+// gasCapFraction is the dispatcher's hard ceiling (0.95 × blockGasLimit): a
+// batch whose cumulative gas exceeds it is rejected at dispatch time.
 const gasCapFraction = 0.95
 
-// gasCapSafetyMargin inflates the per-verb base gas estimate before computing
-// the upper bound on tx count, so transient over-estimates by the worker still
-// fit under the dispatcher's hard 0.95 ceiling.
-const gasCapSafetyMargin = 1.50
+// gasFillFraction is the fraction of the block gas limit Pick targets when
+// sizing a batch. It is the PRIMARY batch sizer: NMaxTxs is driven to fill
+// ~90% of the block's gas, sitting safely below the dispatcher's 0.95 hard
+// ceiling so transient per-tx over-estimates still dispatch cleanly.
+const gasFillFraction = 0.90
 
-// computeGasBasedMax returns the maximum number of txs of `verb` that fit
-// under `gasCapFraction × blockGasLimit` with a `gasCapSafetyMargin` safety
-// factor. Returns math.MaxInt when blockGasLimit is zero (no cap configured).
+// computeGasBasedMax returns the number of txs of `verb` that fill
+// `gasFillFraction × blockGasLimit`. This is the primary batch-size bound;
+// the byte budget is only a secondary clamp. Returns math.MaxInt32 when
+// blockGasLimit is zero (no cap configured — fresh client, first batch).
 //
-// Sourcing per-tx gas: once VerbStats has accumulated verbStatsColdStartN
-// samples for verb, the EWMA gas-per-tx is used. Below that threshold the
-// static baselineGasPerVerb table is consulted so a one-off first batch
-// can't blow the dispatcher's hard 0.95 × block-gas ceiling.
+// Sourcing per-tx gas: gasPerTxEstimate uses the EWMA estimate once VerbStats
+// has accumulated verbStatsColdStartN samples, else the static baselineGasPerVerb
+// table. Both are always non-zero, so for a non-zero blockGasLimit this bound is
+// always finite and binding — it can never return an unbounded value, which is
+// what previously let an over-sized cold-start batch crash the dispatcher.
 func (s *State) computeGasBasedMax(verb string, blockGasLimit uint64) int {
 	if blockGasLimit == 0 {
 		return math.MaxInt32
 	}
 	perTx := s.gasPerTxEstimate(verb)
-	if perTx == 0 {
-		return math.MaxInt32
+	if perTx <= 0 {
+		// gasPerTxEstimate falls back to the (non-zero) baseline table, so this
+		// is unreachable; guard defensively against a corrupted estimate rather
+		// than returning an unbounded cap for a non-zero gas limit.
+		perTx = float64(defaultBaseGasPerVerb)
 	}
-	ceiling := float64(blockGasLimit) * gasCapFraction
-	allowed := ceiling / (perTx * gasCapSafetyMargin)
+	ceiling := float64(blockGasLimit) * gasFillFraction
+	allowed := ceiling / perTx
 	if allowed < 1 {
 		return 1
 	}
@@ -234,12 +240,19 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		mix[v] = xProj[i]
 	}
 
-	// nMax: use the axis-headroom cap when finite; otherwise derive from
-	// deadlineBytes / avgTxRLP so the worker is never asked to allocate an
-	// unreasonably large slice.  A hard ceiling of 64 k txs per batch is
-	// also applied as a safety net.
+	// nMax is the MINIMUM of three bounds plus a hard ceiling:
+	//
+	//   1. gasBasedMax  — PRIMARY. floor(0.90 × blockGasLimit / gasPerTx(verb)).
+	//      Drives the batch to ~90% gas fill. Always finite & binding for a
+	//      non-zero blockGasLimit; only a zero gas limit (fresh client) leaves
+	//      it unbounded so the first batch is not wedged.
+	//   2. byteBasedMax — SECONDARY clamp. floor(deadlineBytes / avgTxRLP).
+	//      Nethermind rejects blocks above BlockProductionMaxTxKilobytes, so
+	//      this stays a real cap; for ultra-cheap verbs (eoatx) it is still the
+	//      binding constraint — that is physics, not a bug.
+	//   3. axis-headroom cap (capN) — when an over-served axis limits the verb.
+	//   4. nMaxHardCeil — a 64 k-tx safety net on the worker slice size.
 	const nMaxHardCeil = 65536
-	nMax := 0
 	byteBasedMax := nMaxHardCeil
 	if avg > 0 && deadlineBytes > 0 {
 		byteBasedMax = clampMin(deadlineBytes/int(avg), 1)
@@ -251,19 +264,14 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	if gasBasedMax > nMaxHardCeil {
 		gasBasedMax = nMaxHardCeil
 	}
-	if !math.IsInf(capN, 1) {
-		raw := int(math.Min(capN, float64(nMaxHardCeil)))
-		nMax = clampMax(raw, byteBasedMax)
-	} else {
-		// Uncapped axis: bound by bytes only so the worker slice stays sane.
+	nMax := gasBasedMax
+	if byteBasedMax < nMax {
 		nMax = byteBasedMax
 	}
-	// Apply the gas-budget cap last. The dispatcher enforces a hard
-	// 0.95 × blockGasLimit ceiling; sizing Pick's output to satisfy that here
-	// avoids dispatch-time failures and the nonce-gap fallout they trigger
-	// when planners run in parallel.
-	if gasBasedMax < nMax {
-		nMax = gasBasedMax
+	if !math.IsInf(capN, 1) {
+		if raw := int(math.Min(capN, float64(nMaxHardCeil))); raw < nMax {
+			nMax = raw
+		}
 	}
 	if nMax < 1 {
 		nMax = 1

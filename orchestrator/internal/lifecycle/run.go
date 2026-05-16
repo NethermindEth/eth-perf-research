@@ -92,8 +92,13 @@ type Config struct {
 }
 
 const (
-	defaultEpsilon         = 0.5
-	defaultTotalBatchBytes = 5 * 1024 * 1024 // stay below NM's BlockProductionMaxTxKilobytes=7.75 MiB once per-tx RLP overhead is counted
+	defaultEpsilon = 0.5
+	// defaultTotalBatchBytes is the SECONDARY batch-size clamp passed to Pick;
+	// the primary sizer is now the gas budget (gasFillFraction × blockGasLimit).
+	// 7.5 MiB stays just below NM's BlockProductionMaxTxKilobytes=7.75 MiB once
+	// per-tx RLP overhead is counted, so it remains a real cap for ultra-cheap
+	// verbs while no longer starving mid/expensive verbs of gas fill.
+	defaultTotalBatchBytes = 7680 * 1024
 	defaultAddressStride   = uint64(1) << 40
 	terminationOvershoot   = "overshoot"
 	terminationTargetMet   = "target_reached"
@@ -554,8 +559,15 @@ func runLoop(
 	var globalBatchID atomic.Uint64
 	globalBatchID.Store(startBatchID)
 
+	// dispatchSkipStreakHalt bounds how many consecutive dispatch/build errors a
+	// single planner tolerates before giving up. A single bad batch is skipped
+	// (the planner continues); a sustained streak still halts the run so a
+	// genuinely broken pipeline does not spin forever.
+	const dispatchSkipStreakHalt = 20
+
 	plannerLoop := func(idx int) {
 		idleBackoff := 50 * time.Millisecond
+		consecutiveDispatchSkips := 0
 		for {
 			// Early-exit when another planner already tripped a terminator.
 			if termReason.Load() != nil {
@@ -622,9 +634,8 @@ func runLoop(
 			db, err := dispatchBatch(ctx, deps, batchID, obsSnapshot)
 			if err != nil {
 				// dispatchBatch may return a non-nil `db` even with an error
-				// (a skip sentinel marking the seqID it already claimed). If
-				// so, send it so the commit-ordering heap can advance past
-				// this seqID before the run shuts down.
+				// (a skip sentinel marking the seqID it already claimed). Send
+				// it so the commit-ordering heap can advance past this seqID.
 				if db != nil && db.skip {
 					select {
 					case <-ctx.Done():
@@ -635,10 +646,24 @@ func runLoop(
 					setTerm(terminationSignal)
 					return
 				}
-				slog.Error("lifecycle: dispatch failed", "planner", idx, "batch_id", batchID, "err", err)
-				setTerm("error: " + err.Error())
-				return
+				// A dispatch/build error (gas cap exceeded, oversized batch,
+				// builder failure, nonce hole) is batch-local and recoverable:
+				// SKIP the batch and continue planning instead of terminating
+				// the whole run. Only a sustained streak halts — a single bad
+				// batch must not kill in-memory controller learning.
+				consecutiveDispatchSkips++
+				slog.Warn("lifecycle: dispatch failed, skipping batch",
+					"planner", idx, "batch_id", batchID,
+					"verb", dispatchVerb(db), "streak", consecutiveDispatchSkips,
+					"err", err)
+				if consecutiveDispatchSkips >= dispatchSkipStreakHalt {
+					setTerm(fmt.Sprintf("error: %d consecutive dispatch failures (last: %s)",
+						consecutiveDispatchSkips, err.Error()))
+					return
+				}
+				continue
 			}
+			consecutiveDispatchSkips = 0
 			if db == nil {
 				// Pick yielded no plan (no seqID claimed yet) — back off
 				// briefly. The batchID we claimed is wasted; the commit

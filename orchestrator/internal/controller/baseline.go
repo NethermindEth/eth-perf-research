@@ -2,8 +2,8 @@ package controller
 
 // baseGasPerVerb is the cold-start per-tx gas budget used by Pick when sizing
 // batches before VerbStats has enough EWMA samples to be trustworthy. Values
-// are empirical upper-bounds observed in bloatnet journals; the safety margin
-// (gasCapSafetyMargin) is multiplied on top in computeGasBasedMax. Some verbs
+// are empirical upper-bounds observed in bloatnet journals; computeGasBasedMax
+// targets gasFillFraction (0.90) of the block limit using these. Some verbs
 // (storagespam, gasburnertx) genuinely consume 1.5-2M+ gas per tx, so
 // under-estimating crashes the dispatcher's hard 0.95 × block-gas assertion.
 var baseGasPerVerb = map[string]uint64{

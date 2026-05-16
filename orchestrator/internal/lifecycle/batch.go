@@ -124,14 +124,14 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 	if err != nil {
 		// seqID was already claimed under the reservation mutex. Return a
 		// skip sentinel so the commit goroutine can advance past this seqID
-		// without waiting forever. Reserved nonces leak (the chain will
-		// reject the next batch with a "nonce too high" error) — the planner
-		// is expected to setTerm and shut the run down.
-		return &dispatched{seqID: seqID, skip: true}, fmt.Errorf("lifecycle: dispatch: %w", err)
+		// without waiting forever. The planner skips this batch and continues;
+		// reserved nonces leak, but the chain's next batch reconciles them.
+		// `plan` is carried so the planner can log the offending verb.
+		return &dispatched{seqID: seqID, skip: true, plan: plan}, fmt.Errorf("lifecycle: dispatch: %w", err)
 	}
 	if res == nil || len(res.SignedRLP) == 0 {
 		// Same rationale as above — surface a skip so the queue drains.
-		return &dispatched{seqID: seqID, skip: true}, nil
+		return &dispatched{seqID: seqID, skip: true, plan: plan}, nil
 	}
 
 	// Refuse to send a batch with nonce holes. If trimSignables dropped tail
@@ -139,7 +139,7 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 	// (gap-resistant mempools reject the next batch's first tx). Fail the batch
 	// loudly so the operator notices; the planner will give up and shut down.
 	if uint64(res.TxCount) != want {
-		return &dispatched{seqID: seqID, skip: true}, fmt.Errorf("lifecycle: nonce-range hole: reserved %d, signed %d (verb=%s, deadline=%d)",
+		return &dispatched{seqID: seqID, skip: true, plan: plan}, fmt.Errorf("lifecycle: nonce-range hole: reserved %d, signed %d (verb=%s, deadline=%d)",
 			want, res.TxCount, plan.Verb, plan.DeadlineBytes)
 	}
 
@@ -153,6 +153,15 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 		saltAfter:  res.NewSalt,
 		res:        res,
 	}, nil
+}
+
+// dispatchVerb returns the verb of a dispatched batch (skip sentinel or full
+// record), or "unknown" when the plan is absent. Used for diagnostic logging.
+func dispatchVerb(db *dispatched) string {
+	if db != nil && db.plan != nil {
+		return db.plan.Verb
+	}
+	return "unknown"
 }
 
 // commitBatch consumes a dispatched batch: writes the pending sidecar, commits

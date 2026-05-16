@@ -51,6 +51,48 @@ func TestPickGasburnertxRespectsBlockGasLimit(t *testing.T) {
 	}
 }
 
+// TestPickGasPrimarySizerTargetsBlockFill is the regression test for the
+// gas-fill fix: gas is now the PRIMARY batch sizer. For a mid-cost verb that
+// is gas-bound (not byte-bound), Pick must size NMaxTxs so the batch targets
+// ≥85% of the block gas limit (the old byte-dominant sizing left blocks ~13%
+// full) while never exceeding the dispatcher's 0.95 hard ceiling.
+func TestPickGasPrimarySizerTargetsBlockFill(t *testing.T) {
+	const blockGasLimit uint64 = 8_000_000_000
+
+	verbs := []string{"storagespam"}
+	rf := &referencef.ReferenceF{
+		Verbs:    map[string]map[string]float64{"storagespam": {"accounts": 100, "storage": 100, "code": 100}},
+		AvgTxRLP: map[string]float64{"storagespam": 1500.0},
+	}
+	var identity [32]byte
+	s := NewState(verbs, rf, identity, 0.0, 1_000_000_000)
+
+	tgt := makeTarget(10 * 1024 * 1024 * 1024) // 10 GiB target — far from done
+	plan := s.Pick(zeroObs(), tgt, 8*1024*1024 /* total_batch_bytes */, blockGasLimit)
+	if plan == nil {
+		t.Fatalf("Pick returned nil plan")
+	}
+	if plan.Verb != "storagespam" {
+		t.Fatalf("verb = %q, want storagespam", plan.Verb)
+	}
+
+	perTx, ok := baseGasPerVerb["storagespam"]
+	if !ok {
+		t.Fatal("baseGasPerVerb[\"storagespam\"] not registered")
+	}
+	totalGas := uint64(plan.NMaxTxs) * perTx
+	lowerBound := uint64(float64(blockGasLimit) * 0.85)
+	upperBound := uint64(float64(blockGasLimit) * gasCapFraction)
+	if totalGas < lowerBound {
+		t.Fatalf("under-filled: NMaxTxs=%d * %d = %d gas < 0.85 * %d = %d (gas must be the primary sizer)",
+			plan.NMaxTxs, perTx, totalGas, blockGasLimit, lowerBound)
+	}
+	if totalGas > upperBound {
+		t.Fatalf("over-allocated: NMaxTxs=%d * %d = %d gas > 0.95 * %d = %d ceiling",
+			plan.NMaxTxs, perTx, totalGas, blockGasLimit, upperBound)
+	}
+}
+
 // TestPickZeroBlockGasLimitDoesNotCap: when the lifecycle hasn't yet refreshed
 // the block gas limit (e.g. very first batch on a fresh client), Pick must
 // still produce a usable plan rather than wedging at NMaxTxs=0.
