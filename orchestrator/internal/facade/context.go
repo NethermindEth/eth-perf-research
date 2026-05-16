@@ -4,7 +4,7 @@ import (
 	"math/big"
 	"sync/atomic"
 
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // Context is the per-run mutable state owned by the orchestrator.
@@ -15,9 +15,10 @@ import (
 // ReserveAddresses / ReserveSalts. All other fields are written once during run
 // setup and treated as read-only thereafter.
 type Context struct {
-	BaseAddress   []byte // 20-byte master signer address
-	Revision      uint64 // address-space generation
-	AddressStride uint64 // typically 1<<40
+	BaseAddress   []byte         // 20-byte base for sequential address derivation
+	SignerAddr    common.Address // master signer address (noop self-transfer target)
+	Revision      uint64         // address-space generation
+	AddressStride uint64         // typically 1<<40
 	ChainID       uint64
 	GasLimit      uint64
 	// BlockGasLimit is refreshed by the lifecycle every batch from the head
@@ -90,22 +91,8 @@ func (c *Context) LoadBlockGasLimit() uint64 {
 	return c.BlockGasLimit.Load()
 }
 
-// ToProto converts the immutable fields of Context into the wire representation
-// sent to builder workers. The salt cursor is serialised from the current
-// load value; callers that have already reserved a specific salt range
-// should override req.Ctx.SaltCursor with the reservation start before send.
-func (c *Context) ToProto() *orchpb.FacadeCtxParams {
-	factors := make(map[string]float64, len(c.VerbGasFactors))
-	for k, v := range c.VerbGasFactors {
-		factors[k] = v
-	}
-	return &orchpb.FacadeCtxParams{
-		BaseAddress:    append([]byte(nil), c.BaseAddress...),
-		Revision:       c.Revision,
-		ChainId:        c.ChainID,
-		BlockGasLimit:  c.LoadBlockGasLimit(),
-		SaltCursor:     c.LoadSaltCursor(),
-		VerbGasFactors: factors,
-		AddressStride:  c.AddressStride,
-	}
+// signerAddress returns the master signer address used as the noop verb's
+// self-transfer recipient.
+func (c *Context) signerAddress() common.Address {
+	return c.SignerAddr
 }

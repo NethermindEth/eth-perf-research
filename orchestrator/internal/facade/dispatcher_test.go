@@ -2,63 +2,58 @@ package facade
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/signer"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/verbs"
 )
 
 // hardhat default key #0 — same key used in signer_test.go.
 const testHexKey = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
 
-// fakeBuilder implements batchBuilder for tests. It returns a configurable
-// response without spawning any subprocess.
+// fakeBuilder is a test verb with a configurable per-tx gas and an optional
+// build error. It substitutes the native verb registry in dispatcher tests.
 type fakeBuilder struct {
-	// txGas is the Gas field placed on every returned TxIn.
+	// txGas is the Gas field placed on every built template.
 	txGas uint64
-	// newSaltCursor is echoed back as BuildBatchResponse.NewSaltCursor.
-	// (Dispatch no longer treats this as authoritative — kept for the
-	// fake-builder contract.)
-	newSaltCursor uint64
-	// errMsg, if non-empty, is returned as BuildBatchResponse.Error.
+	// errMsg, if non-empty, makes BuildTx return an error.
 	errMsg string
 }
 
-func (f *fakeBuilder) Build(_ context.Context, req *orchpb.BuildBatchRequest) (*orchpb.BuildBatchResponse, error) {
-	if f.errMsg != "" {
-		return &orchpb.BuildBatchResponse{Error: f.errMsg}, nil
-	}
-	to := make([]byte, 20)
-	to[19] = 0x01
+func (f *fakeBuilder) Name() string { return "transfer" }
 
-	txs := make([]*orchpb.TxIn, req.Count)
-	for i := range txs {
-		txs[i] = &orchpb.TxIn{
-			Gas:   f.txGas,
-			To:    to,
-			Value: []byte{0},
-			Data:  nil,
-		}
+func (f *fakeBuilder) BuildTx(_ uint64, _ verbs.BuildCtx) (*types.DynamicFeeTx, error) {
+	if f.errMsg != "" {
+		return nil, errors.New(f.errMsg)
 	}
-	return &orchpb.BuildBatchResponse{
-		Signables:     txs,
-		NewSaltCursor: f.newSaltCursor,
+	to := common.Address{}
+	to[19] = 0x01
+	return &types.DynamicFeeTx{
+		To:    &to,
+		Value: new(big.Int),
+		Data:  nil,
+		Gas:   f.txGas,
 	}, nil
 }
 
-// newTestDispatcher builds a Dispatcher backed by the given fakeBuilder and the
-// real signer constructed from testHexKey.
+// newTestDispatcher builds a Dispatcher whose verb registry resolves every
+// verb name to fb, backed by the real signer constructed from testHexKey.
 func newTestDispatcher(t *testing.T, fb *fakeBuilder) (*Dispatcher, *Context) {
 	t.Helper()
 	s, err := signer.New(testHexKey)
 	if err != nil {
 		t.Fatalf("signer.New: %v", err)
 	}
-	d := &Dispatcher{Pool: fb, Signer: s}
+	d := &Dispatcher{
+		Lookup: func(string) (verbs.Verb, bool) { return fb, true },
+		Signer: s,
+	}
 	c := &Context{
 		BaseAddress:    make([]byte, 20),
 		Revision:       1,
@@ -106,7 +101,7 @@ func assertValidRLP(t *testing.T, raw []byte, idx int) {
 
 // TestDispatch_TenTxs verifies that a plan with NMaxTxs=10 yields 10 signed RLPs.
 func TestDispatch_TenTxs(t *testing.T) {
-	fb := &fakeBuilder{txGas: 21_000, newSaltCursor: 42}
+	fb := &fakeBuilder{txGas: 21_000}
 	d, c := newTestDispatcher(t, fb)
 
 	plan := makePlan("transfer", 10, 0 /* no deadline */)
@@ -131,7 +126,7 @@ func TestDispatch_TenTxs(t *testing.T) {
 // TestDispatch_CursorAdvance verifies the result's NewCursor reflects the
 // actual number of signed transactions, computed from the reserved StartNonce.
 func TestDispatch_CursorAdvance(t *testing.T) {
-	fb := &fakeBuilder{txGas: 21_000, newSaltCursor: 99}
+	fb := &fakeBuilder{txGas: 21_000}
 	d, c := newTestDispatcher(t, fb)
 	c.AddressCursor.Store(1000)
 
@@ -154,11 +149,9 @@ func TestDispatch_CursorAdvance(t *testing.T) {
 }
 
 // TestDispatch_SaltCursorAdvance verifies the returned NewSalt equals the
-// caller-supplied StartSalt + NumNonces. Dispatch no longer reads the
-// builder's response NewSaltCursor as authoritative.
+// caller-supplied StartSalt + NumNonces.
 func TestDispatch_SaltCursorAdvance(t *testing.T) {
-	const builderEcho = uint64(777) // ignored by Dispatch
-	fb := &fakeBuilder{txGas: 21_000, newSaltCursor: builderEcho}
+	fb := &fakeBuilder{txGas: 21_000}
 	d, c := newTestDispatcher(t, fb)
 
 	plan := makePlan("deploy", 3, 0)
@@ -209,10 +202,10 @@ func TestDispatch_GasCapUnderBudget(t *testing.T) {
 	}
 }
 
-// TestDispatch_WorkerError verifies that a non-empty BuildBatchResponse.Error
-// is surfaced as a Go error.
+// TestDispatch_WorkerError verifies that a verb BuildTx error is surfaced as
+// a Go error from Dispatch.
 func TestDispatch_WorkerError(t *testing.T) {
-	fb := &fakeBuilder{errMsg: "worker exploded"}
+	fb := &fakeBuilder{errMsg: "verb exploded"}
 	d, c := newTestDispatcher(t, fb)
 
 	plan := makePlan("transfer", 3, 0)

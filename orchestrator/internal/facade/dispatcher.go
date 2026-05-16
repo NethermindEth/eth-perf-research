@@ -1,8 +1,8 @@
 // Package facade implements the batch-builder + signer integration layer.
-// A Dispatcher calls a batchBuilder to obtain unsigned TxIn templates, fills
-// in the fee/nonce/chainID fields that the Python worker omits, applies
-// deadline-byte and gas-cap trimming, then signs the final slice and returns
-// the raw signed RLPs together with cursor-advance metadata.
+// A Dispatcher builds unsigned tx templates in-process via the native verb
+// registry, fills in the fee/nonce/chainID fields, applies the gas-cap check,
+// then signs the final slice and returns the raw signed RLPs together with
+// cursor-advance metadata.
 package facade
 
 import (
@@ -11,30 +11,28 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/builderpool"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/signer"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/verbs"
 )
 
-// batchBuilder is the narrow interface the Dispatcher needs from builderpool.Pool.
-// *builderpool.Pool satisfies it implicitly.
-type batchBuilder interface {
-	Build(ctx context.Context, req *orchpb.BuildBatchRequest) (*orchpb.BuildBatchResponse, error)
-}
+// verbRegistry is the narrow lookup interface the Dispatcher needs. It is
+// satisfied by verbs.Lookup; tests substitute a fake registry.
+type verbRegistry func(name string) (verbs.Verb, bool)
 
 // Dispatcher builds and signs one batch per call to Dispatch.
 type Dispatcher struct {
-	Pool   batchBuilder
+	Lookup verbRegistry
 	Signer *signer.Signer
 }
 
-// New constructs a Dispatcher. pool must not be nil; it is usually a
-// *builderpool.Pool but any batchBuilder is accepted (useful for tests).
-func New(pool *builderpool.Pool, s *signer.Signer) *Dispatcher {
-	return &Dispatcher{Pool: pool, Signer: s}
+// New constructs a Dispatcher backed by the native verb registry.
+func New(s *signer.Signer) *Dispatcher {
+	return &Dispatcher{Lookup: verbs.Lookup, Signer: s}
 }
 
 // DispatchInput carries the caller-supplied parameters for one Dispatch call.
@@ -64,14 +62,13 @@ type Result struct {
 // respect to the Context: it only reads immutable fields plus the per-call
 // fee policy (which the lifecycle refreshes pre-reservation).
 //
-// Dispatch trusts the controller's NMaxTxs to fit the deadline-byte budget;
-// no defensive trim is applied because mid-flight trimming would create nonce
-// gaps under parallel planners (the reservation is atomic and committed
-// before Dispatch returns). The gas cap is enforced as a hard ceiling: if
-// the cumulative tx gas would exceed 0.95 × BlockGasLimit, Dispatch returns
-// an error so the caller can fail the batch loudly rather than silently
-// shipping an invalid block.
-func (d *Dispatcher) Dispatch(ctx context.Context, in DispatchInput, c *Context) (*Result, error) {
+// Building is an in-process loop over the native verb's BuildTx; there is no
+// out-of-process worker. Dispatch trusts the controller's NMaxTxs to fit the
+// deadline-byte budget. The gas cap is enforced as a hard ceiling: if the
+// cumulative tx gas would exceed 0.95 × BlockGasLimit, Dispatch returns an
+// error so the caller can fail the batch loudly rather than silently shipping
+// an invalid block.
+func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (*Result, error) {
 	if in.Plan == nil {
 		return nil, errors.New("facade: plan must not be nil")
 	}
@@ -81,30 +78,29 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in DispatchInput, c *Context)
 
 	plan := in.Plan
 
-	// 1. Build the raw batch from the worker pool.
-	count := uint32(plan.NMaxTxs)
+	// 1. Resolve the native verb.
+	verb, ok := d.Lookup(plan.Verb)
+	if !ok {
+		return nil, fmt.Errorf("facade: unknown verb: %s", plan.Verb)
+	}
+
+	count := plan.NMaxTxs
 	if count == 0 {
-		count = 1 // always request at least one tx for forward-progress
-	}
-	ctxProto := c.ToProto()
-	ctxProto.SaltCursor = in.StartSalt
-	req := &orchpb.BuildBatchRequest{
-		Verb:     plan.Verb,
-		StartIdx: in.StartNonce,
-		Count:    count,
-		Ctx:      ctxProto,
-	}
-	resp, err := d.Pool.Build(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("facade: build batch: %w", err)
-	}
-	if resp.Error != "" {
-		return nil, fmt.Errorf("facade: worker error: %s", resp.Error)
+		count = 1 // always build at least one tx for forward-progress
 	}
 
-	signables := resp.Signables
+	// 2. Build the raw batch in-process. The verb returns an unsigned
+	// EIP-1559 template (To/Value/Data/Gas); the remaining fields are
+	// filled below.
+	buildCtx := verbs.BuildCtx{
+		ChainID:       new(big.Int).SetUint64(c.ChainID),
+		SignerAddr:    c.signerAddress(),
+		BaseAddress:   c.BaseAddress,
+		Revision:      c.Revision,
+		AddressStride: c.AddressStride,
+		SaltBase:      in.StartSalt,
+	}
 
-	// 2. Fill per-tx fee/nonce/chainID fields omitted by the Python worker.
 	maxFee, maxPri := c.LoadFeePolicy()
 	if maxFee == nil {
 		maxFee = new(big.Int)
@@ -112,11 +108,15 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in DispatchInput, c *Context)
 	if maxPri == nil {
 		maxPri = new(big.Int)
 	}
-	for i, tx := range signables {
-		tx.ChainId = c.ChainID
-		tx.Nonce = in.StartNonce + uint64(i)
-		tx.MaxFeePerGas = maxFee.Bytes()
-		tx.MaxPriorityFeePerGas = maxPri.Bytes()
+
+	signables := make([]*orchpb.TxIn, 0, count)
+	for i := 0; i < count; i++ {
+		idx := in.StartNonce + uint64(i)
+		tmpl, err := verb.BuildTx(idx, buildCtx)
+		if err != nil {
+			return nil, fmt.Errorf("facade: build verb %s idx=%d: %w", plan.Verb, idx, err)
+		}
+		signables = append(signables, templateToTxIn(tmpl, c.ChainID, idx, maxFee, maxPri))
 	}
 
 	// 3. Hard gas cap: assert cumulative tx gas <= 0.95 × BlockGasLimit. We
@@ -136,14 +136,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in DispatchInput, c *Context)
 	}
 
 	if len(signables) == 0 {
-		// Edge case: worker returned no txs. Caller's reserved nonce range
-		// becomes a hole; surface as error so the planner shuts down rather
-		// than silently leaking nonces.
 		return nil, errors.New("facade: builder returned zero txs for non-zero plan")
 	}
 
-	// 4. Sign the trimmed slice.
-	raws, err := d.Signer.SignBatch(ctx, signables)
+	// 4. Sign the slice.
+	raws, err := d.Signer.SignBatch(context.Background(), signables)
 	if err != nil {
 		return nil, fmt.Errorf("facade: sign batch: %w", err)
 	}
@@ -156,9 +153,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in DispatchInput, c *Context)
 		totalBytes += uint64(len(raw))
 	}
 
-	// 6. Compute cursor-advance results. Note: NewSalt is StartSalt+NumNonces
-	// even if trimming dropped tail txs — the salt range was already reserved
-	// atomically and unused slots are simply abandoned (salt domain is 2^64).
+	// 6. Compute cursor-advance results. NewSalt is StartSalt+NumNonces;
+	// the salt range was reserved atomically and unused slots are abandoned
+	// (salt domain is 2^64).
 	txCount := len(raws)
 	return &Result{
 		SignedRLP:   raws,
@@ -171,3 +168,26 @@ func (d *Dispatcher) Dispatch(ctx context.Context, in DispatchInput, c *Context)
 	}, nil
 }
 
+// templateToTxIn converts a native verb's unsigned DynamicFeeTx template into
+// the signer's protobuf TxIn, injecting the fee/nonce/chainID fields the verb
+// does not populate.
+func templateToTxIn(tmpl *types.DynamicFeeTx, chainID, nonce uint64, maxFee, maxPri *big.Int) *orchpb.TxIn {
+	var to []byte
+	if tmpl.To != nil {
+		to = tmpl.To.Bytes()
+	}
+	var value []byte
+	if tmpl.Value != nil && tmpl.Value.Sign() > 0 {
+		value = tmpl.Value.Bytes()
+	}
+	return &orchpb.TxIn{
+		ChainId:              chainID,
+		Nonce:                nonce,
+		Gas:                  tmpl.Gas,
+		To:                   to,
+		Value:                value,
+		Data:                 tmpl.Data,
+		MaxFeePerGas:         maxFee.Bytes(),
+		MaxPriorityFeePerGas: maxPri.Bytes(),
+	}
+}
