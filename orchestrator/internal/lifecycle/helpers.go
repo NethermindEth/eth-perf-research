@@ -167,11 +167,10 @@ func targetSha256Bytes(hexDigest string) []byte {
 // with non-zero trie stats. During a bootstrap or recovery scan the plugin
 // publishes all-zero gauges; committing batches under such an observation
 // would feed garbage into the controller. We block the cycle here until the
-// plugin is healthy. Honours ctx cancellation. Logs once at start and every
-// 30s thereafter while waiting.
-func waitForValidSensor(ctx context.Context, sens *sensor.Sensor) (*sensor.Snapshot, error) {
-	const pollGap = 2 * time.Second
-	logEvery := 30 * time.Second
+// plugin is healthy. Honours ctx cancellation. pollGap and logEvery are the
+// resolved RunConfig values: it logs once at start and every logEvery
+// thereafter while waiting.
+func waitForValidSensor(ctx context.Context, sens *sensor.Sensor, pollGap, logEvery time.Duration) (*sensor.Snapshot, error) {
 	lastLog := time.Now().Add(-logEvery)
 	for {
 		snap, err := sens.PollOnce(ctx)

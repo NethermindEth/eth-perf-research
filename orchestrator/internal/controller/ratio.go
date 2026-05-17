@@ -2,21 +2,19 @@ package controller
 
 import "math"
 
-const (
-	ratioTolerance = 0.02
-	floorFraction  = 0.10
-)
-
 // RatioFlowCap returns the per-axis byte budget the next batch is allowed to
 // emit before the cumulative ratio deviates from target.Shares by more than
-// ratioTolerance. Each axis is floored at floorFraction * share *
-// totalBatchBytes so the cap never collapses to zero — even a fully-served
-// axis keeps some baseline flow.
+// the configured RatioTolerance. Each axis is floored at RatioFloorFraction *
+// share * totalBatchBytes so the cap never collapses to zero — even a
+// fully-served axis keeps some baseline flow. Both tuning values come from the
+// State's resolved RunConfig.
 //
 // The cap is intersected with the existing tolerance[] array in Pick (taking
 // the min) so over-served axes get throttled harder than the share-based floor
 // alone provides.
-func RatioFlowCap(obs *Observation, t *Target, totalBatchBytes int) [3]float64 {
+func (s *State) RatioFlowCap(obs *Observation, t *Target, totalBatchBytes int) [3]float64 {
+	ratioTolerance := s.cfg.Control.RatioTolerance
+	floorFraction := s.cfg.Control.RatioFloorFraction
 	if obs == nil || t == nil || totalBatchBytes <= 0 {
 		return [3]float64{math.Inf(1), math.Inf(1), math.Inf(1)}
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/facade"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
@@ -15,11 +16,8 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/sensor"
 )
 
-// defaultPriorityTipWei is the fixed 1 gwei suggested priority tip for the
-// orchestrator's signed txs. Matches the Python lifecycle.
-const defaultPriorityTipWei = 1_000_000_000
-
-// batchDeps groups the live subsystems threaded through batch execution.
+// batchDeps groups the live subsystems threaded through batch execution. cfg
+// is the resolved RunConfig — dispatchBatch reads the batch-byte budget off it.
 type batchDeps struct {
 	rpc          *rpc.Client
 	sensor       *sensor.Sensor
@@ -34,6 +32,7 @@ type batchDeps struct {
 	target       *controller.Target
 	targetDigest []byte
 	metricsReg   *metrics.Registry
+	cfg          config.RunConfig
 }
 
 // batchResult is the outcome of one iteration's work.
@@ -80,7 +79,10 @@ type dispatched struct {
 func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs *controller.Observation) (*dispatched, error) {
 	pickStart := time.Now()
 	d.state.LockState()
-	plan := d.state.Pick(currentObs, d.target, defaultTotalBatchBytes, d.facadeCtx.LoadBlockGasLimit())
+	// Pick receives the hard byte CAP (historically the defaultTotalBatchBytes
+	// const, 7680 KiB) as its deadline_bytes ceiling — not the soft
+	// total_batch_bytes budget. Behaviour matches the pre-RunConfig const.
+	plan := d.state.Pick(currentObs, d.target, d.cfg.Run.TotalBatchBytesCap, d.facadeCtx.LoadBlockGasLimit())
 	d.state.UnlockState()
 	pickDur := time.Since(pickStart)
 	if plan == nil {
@@ -186,7 +188,9 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched) (*batchResul
 	// whatever's there, never block. The controller's F-update tolerates stale
 	// observations; new data lands when the plugin rotates.
 	sensorStart := time.Now()
-	snap, err := waitForValidSensor(ctx, d.sensor)
+	snap, err := waitForValidSensor(ctx, d.sensor,
+		time.Duration(d.cfg.Run.SensorPollGapMS)*time.Millisecond,
+		time.Duration(d.cfg.Run.SensorLogIntervalS)*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: sensor poll: %w", err)
 	}

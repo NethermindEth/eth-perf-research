@@ -10,9 +10,14 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/facade"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
+
+// testTipWei is the default RunConfig priority tip the fee-policy tests assert
+// against (config.Defaults().Cost.PriorityTipWei — the historical 1 gwei).
+var testTipWei = config.Defaults().Cost.PriorityTipWei
 
 type fakeFetcher struct {
 	calls    atomic.Uint64
@@ -49,7 +54,7 @@ func TestFeePolicyLoopOneCallPerTick(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = runFeePolicyLoop(ctx, f, fctx, interval)
+		_ = runFeePolicyLoop(ctx, f, fctx, interval, testTipWei)
 		close(done)
 	}()
 
@@ -80,7 +85,7 @@ func TestFeePolicyLoopRateIndependentOfReaders(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = runFeePolicyLoop(ctx, f, fctx, interval)
+		_ = runFeePolicyLoop(ctx, f, fctx, interval, testTipWei)
 		close(done)
 	}()
 
@@ -124,7 +129,7 @@ func TestFeePolicyLoopSurvivesTransientError(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = runFeePolicyLoop(ctx, f, fctx, 15*time.Millisecond)
+		_ = runFeePolicyLoop(ctx, f, fctx, 15*time.Millisecond, testTipWei)
 		close(done)
 	}()
 
@@ -154,7 +159,7 @@ func TestRefreshFeePolicyPrimesContext(t *testing.T) {
 	f := &fakeFetcher{baseFee: big.NewInt(7_000_000_000), gasLimit: 12_345_678}
 	fctx := &facade.Context{BaseAddress: make([]byte, 20)}
 
-	if _, err := refreshFeePolicy(context.Background(), f, fctx); err != nil {
+	if _, err := refreshFeePolicy(context.Background(), f, fctx, testTipWei); err != nil {
 		t.Fatalf("refreshFeePolicy: %v", err)
 	}
 
@@ -162,7 +167,7 @@ func TestRefreshFeePolicyPrimesContext(t *testing.T) {
 	if maxFee == nil || tip == nil {
 		t.Fatal("fee policy not set")
 	}
-	wantTip := big.NewInt(defaultPriorityTipWei)
+	wantTip := big.NewInt(testTipWei)
 	if tip.Cmp(wantTip) != 0 {
 		t.Fatalf("tip = %s, want %s", tip, wantTip)
 	}

@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/facade"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
@@ -38,7 +39,10 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/target"
 )
 
-// Config is the top-level configuration for the lifecycle run.
+// Config is the top-level configuration for the lifecycle run. It carries the
+// CLI-supplied paths/SHAs plus the resolved RunConfig holding every tunable
+// value (controller / cost / run-loop / sensor). Run resolves RunConfig from
+// target.yaml + env once at startup and threads it everywhere.
 type Config struct {
 	RPCURL              string
 	JWTPath             string
@@ -50,41 +54,32 @@ type Config struct {
 	MaxBatches          int
 	EnableProbe         bool
 	DeployPrivateKey    string
-	Epsilon             float64
-	TotalBatchBytes     int
-	SensorPollInterval  time.Duration
-	SensorDeadline      time.Duration
 	Verbs               []string
 	PluginGitSHA        string
 	NethermindCommitSHA string
 	DotnetRuntimeMajor  string
-	MetricsAddr         string // TCP address for the Prometheus /metrics endpoint (default ":9101")
+
+	// Run is the resolved RunConfig. If left zero-valued, Run() resolves it
+	// from TargetYAMLPath + environment via config.Load.
+	Run config.RunConfig
 }
 
 const (
-	defaultEpsilon = 0.5
-	// defaultTotalBatchBytes is the SECONDARY batch-size clamp passed to Pick;
-	// the primary sizer is now the gas budget (gasFillFraction × blockGasLimit).
-	// 7.5 MiB stays just below NM's BlockProductionMaxTxKilobytes=7.75 MiB once
-	// per-tx RLP overhead is counted, so it remains a real cap for ultra-cheap
-	// verbs while no longer starving mid/expensive verbs of gas fill.
-	defaultTotalBatchBytes = 7680 * 1024
-	defaultAddressStride   = uint64(1) << 40
 	terminationOvershoot   = "overshoot"
 	terminationTargetMet   = "target_reached"
 	terminationBatchLimit  = "batch_limit"
 	terminationSignal      = "signal"
 	terminationProbeFailed = "probe_failed"
-	overshootWindowSize    = 5
-	overshootMaxTrips      = 3
-	overshootGrace         = 5
-	overshootThreshold     = 0.20
 )
 
 // Run executes the orchestrator's main loop. It blocks until the context is
 // cancelled, the target is reached, or an unrecoverable error occurs.
 func Run(ctx context.Context, cfg Config) error {
-	cfg = withDefaults(cfg)
+	cfg, err := withDefaults(cfg)
+	if err != nil {
+		return err
+	}
+	rc := cfg.Run
 
 	// 1. Acquire lock.
 	lk, err := lock.Acquire(cfg.StateDir)
@@ -118,13 +113,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.JWTPath != "" {
 		rpcOpts = append(rpcOpts, rpc.WithJWTFile(cfg.JWTPath))
 	}
-	if raw := os.Getenv("ORCH_RPC_TIMEOUT_S"); raw != "" {
-		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
-			rpcOpts = append(rpcOpts, rpc.WithTimeout(time.Duration(v)*time.Second))
-		}
-	} else {
-		rpcOpts = append(rpcOpts, rpc.WithTimeout(120*time.Second))
-	}
+	rpcOpts = append(rpcOpts, rpc.WithTimeout(time.Duration(rc.Run.RPCTimeoutS)*time.Second))
 	rpcCli, err := rpc.NewClient(cfg.RPCURL, rpcOpts...)
 	if err != nil {
 		return fmt.Errorf("lifecycle: rpc client: %w", err)
@@ -144,7 +133,7 @@ func Run(ctx context.Context, cfg Config) error {
 	)
 
 	// 5. Decide fresh vs resume.
-	decision, err := resolveStartupMode(ctx, cfg.StateDir, rpcCli)
+	decision, err := resolveStartupMode(ctx, cfg.StateDir, rpcCli, rc.Run.ResumeReorgTolerance)
 	if err != nil {
 		return err
 	}
@@ -171,13 +160,13 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 7a. Metrics registry + HTTP server.
 	metricsReg := metrics.New()
-	metricsReg.Epsilon.Set(cfg.Epsilon)
+	metricsReg.Epsilon.Set(rc.Control.Epsilon)
 	metricsSrv := &http.Server{
-		Addr:    cfg.MetricsAddr,
+		Addr:    rc.Run.MetricsAddr,
 		Handler: metricsReg.Handler(),
 	}
 	go func() {
-		slog.Info("lifecycle: metrics listening", "addr", cfg.MetricsAddr)
+		slog.Info("lifecycle: metrics listening", "addr", rc.Run.MetricsAddr)
 		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Warn("lifecycle: metrics server error", "err", err)
 		}
@@ -192,15 +181,12 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 
 	// 7. Open sensor, journal writer, payloads writer. Transaction building
-	// is in-process (internal/verbs) — no builder subprocess pool.
-	sensorOpts := []sensor.SensorOption{}
-	if cfg.SensorPollInterval > 0 {
-		sensorOpts = append(sensorOpts, sensor.WithPollInterval(cfg.SensorPollInterval))
-	}
-	if cfg.SensorDeadline > 0 {
-		sensorOpts = append(sensorOpts, sensor.WithDeadline(cfg.SensorDeadline))
-	}
-	sens := sensor.New(rpcCli, sensorOpts...)
+	// is in-process (internal/verbs) — no builder subprocess pool. Every sensor
+	// poll/deadline value comes from the resolved RunConfig.
+	sens := sensor.New(rpcCli,
+		sensor.WithPollInterval(time.Duration(rc.Run.SensorPollIntervalMS)*time.Millisecond),
+		sensor.WithDeadline(time.Duration(rc.Run.SensorDeadlineMS)*time.Millisecond),
+	)
 
 	jw, err := journal.OpenWriter(decision.JournalPath)
 	if err != nil {
@@ -218,7 +204,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// controller's F / σ / α are reconstructed from the journal tail so the
 	// controller does not re-explore the verb mix from scratch every restart;
 	// if the tail carries no coefficients the State keeps its cold-start seed.
-	state := controller.NewState(cfg.Verbs, refF, chainIdentity, cfg.Epsilon)
+	state := controller.NewState(rc, cfg.Verbs, refF, chainIdentity)
 	if decision.Mode == modeResume && decision.TailRecord != nil {
 		hr := hydrateStateFromTail(state, decision.TailRecord)
 		if hr.Reconstructed {
@@ -237,7 +223,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 9. Facade context. Base address from $ORCH_BASE_ADDRESS (hex), else zeros.
 	// Initial nonce from $ORCH_INITIAL_ADDRESS_CURSOR override, else queried from RPC.
-	facadeCtx := buildFacadeContext(rawTarget, chainID, head.GasLimit)
+	facadeCtx := buildFacadeContext(rawTarget, chainID, head.GasLimit, rc.Run.AddressStride)
 	facadeCtx.SignerAddr = signr.Address()
 	if hex := strings.TrimPrefix(os.Getenv("ORCH_BASE_ADDRESS"), "0x"); hex != "" {
 		b, err := decodeBaseAddress(hex)
@@ -270,7 +256,9 @@ func Run(ctx context.Context, cfg Config) error {
 	// trie stats — during a bootstrap scan, state-comp returns all zeros. The
 	// cycle is sensor → scenario → bloat → sensor, so a blind start (zero stats)
 	// would feed garbage into the controller. Wait for the plugin instead.
-	initialSnap, err := waitForValidSensor(ctx, sens)
+	initialSnap, err := waitForValidSensor(ctx, sens,
+		time.Duration(rc.Run.SensorPollGapMS)*time.Millisecond,
+		time.Duration(rc.Run.SensorLogIntervalS)*time.Second)
 	if err != nil {
 		return fmt.Errorf("lifecycle: initial sensor read: %w", err)
 	}
@@ -300,7 +288,9 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 12. Target watcher.
 	targetCh := make(chan *target.Target, 1)
-	watcher, err := target.NewWatcher(ctx, cfg.TargetYAMLPath, func(t *target.Target) {
+	watcher, err := target.NewWatcher(ctx, cfg.TargetYAMLPath,
+		time.Duration(rc.Run.TargetWatchDebounceMS)*time.Millisecond,
+		func(t *target.Target) {
 		select {
 		case targetCh <- t:
 		default:
@@ -315,7 +305,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// 13. Prime fee policy once synchronously so the first batch has a valid
 	// max-fee/tip pair before the planner loop runs, then start the background
 	// refresher (single RPC per tick).
-	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx); err != nil {
+	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx, rc.Cost.PriorityTipWei); err != nil {
 		return fmt.Errorf("lifecycle: prime fee policy: %w", err)
 	}
 	feeCtx, feeCancel := context.WithCancel(ctx)
@@ -323,7 +313,8 @@ func Run(ctx context.Context, cfg Config) error {
 	feeWG.Add(1)
 	go func() {
 		defer feeWG.Done()
-		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, defaultFeePolicyInterval); err != nil && !errors.Is(err, context.Canceled) {
+		feeInterval := time.Duration(rc.Cost.FeePolicyIntervalMS) * time.Millisecond
+		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, feeInterval, rc.Cost.PriorityTipWei); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("lifecycle: fee policy loop exited", "err", err)
 		}
 	}()
@@ -339,11 +330,12 @@ func Run(ctx context.Context, cfg Config) error {
 	// guard inside bootstrapContracts halts the run if any required contract
 	// has no code — the orchestrator must never silently no-op again.
 	contractRegistry, err := bootstrapContracts(ctx, &bootstrapDeps{
-		rpc:       rpcCli,
-		signer:    signr,
-		facadeCtx: facadeCtx,
-		stateDir:  cfg.StateDir,
-		chainID:   chainID,
+		rpc:        rpcCli,
+		signer:     signr,
+		facadeCtx:  facadeCtx,
+		stateDir:   cfg.StateDir,
+		chainID:    chainID,
+		deployGas:  rc.Run.ContractDeployGas,
 	}, cfg.Verbs)
 	if err != nil {
 		return fmt.Errorf("lifecycle: bootstrap: %w", err)
@@ -369,6 +361,7 @@ func Run(ctx context.Context, cfg Config) error {
 		target:       ctrlTarget,
 		targetDigest: targetSha256Bytes(rawTarget.SHA256),
 		metricsReg:   metricsReg,
+		cfg:          rc,
 	}
 
 	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, currentObs, targetCh, rawTarget, mf)
@@ -398,20 +391,25 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-func withDefaults(cfg Config) Config {
-	if cfg.Epsilon <= 0 {
-		cfg.Epsilon = defaultEpsilon
-	}
-	if cfg.TotalBatchBytes <= 0 {
-		cfg.TotalBatchBytes = defaultTotalBatchBytes
-	}
+// withDefaults fills the parts of Config that callers may leave zero-valued. If
+// cfg.Run is zero-valued it is resolved from target.yaml + environment via
+// config.Load (Defaults → control:/cost:/run: blocks → env overrides). A
+// validation failure from config.Load is returned so a bad value fails fast.
+func withDefaults(cfg Config) (Config, error) {
 	if len(cfg.Verbs) == 0 {
 		cfg.Verbs = defaultVerbs()
 	}
-	if cfg.MetricsAddr == "" {
-		cfg.MetricsAddr = ":9101"
+	// A zero RunConfig is detected via MetricsAddr, which Defaults() always
+	// sets non-empty; RunConfig contains a map so it is not directly
+	// comparable.
+	if cfg.Run.Run.MetricsAddr == "" {
+		rc, err := config.Load(cfg.TargetYAMLPath)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Run = rc
 	}
-	return cfg
+	return cfg, nil
 }
 
 func defaultVerbs() []string {
@@ -442,12 +440,13 @@ func decodeBaseAddress(s string) ([]byte, error) {
 
 // buildFacadeContext creates a fresh facade.Context for this run.
 // AddressCursor / SaltCursor / BlockGasLimit are zero-valued atomics; callers
-// must use the typed Set / Reserve methods to seed/advance them.
-func buildFacadeContext(t *target.Target, chainID, gasLimit uint64) *facade.Context {
+// must use the typed Set / Reserve methods to seed/advance them. addressStride
+// is the resolved RunConfig value.
+func buildFacadeContext(t *target.Target, chainID, gasLimit, addressStride uint64) *facade.Context {
 	c := &facade.Context{
 		BaseAddress:    make([]byte, 20),
 		Revision:       0,
-		AddressStride:  defaultAddressStride,
+		AddressStride:  addressStride,
 		ChainID:        chainID,
 		GasLimit:       gasLimit,
 		VerbGasFactors: map[string]float64{},

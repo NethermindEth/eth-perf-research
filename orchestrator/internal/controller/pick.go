@@ -12,21 +12,14 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 )
 
-const projectionEta = 0.1
-const toleranceFloor = 0.005
-
-// gasCapFraction is the dispatcher's hard ceiling (0.95 × blockGasLimit): a
-// batch whose cumulative gas exceeds it is rejected at dispatch time.
-const gasCapFraction = 0.95
-
-// gasFillFraction is the fraction of the block gas limit Pick targets when
-// sizing a batch. It is the PRIMARY batch sizer: NMaxTxs is driven to fill
-// ~90% of the block's gas, sitting safely below the dispatcher's 0.95 hard
-// ceiling so transient per-tx over-estimates still dispatch cleanly.
-const gasFillFraction = 0.90
-
+// The projected-gradient step size, tolerance floor, gas-fill / gas-cap
+// fractions and the nMax hard ceiling were package-level constants here; they
+// now live in config.RunConfig.Control and are read off the State's cfg.
+// config.Defaults() carries the historical values, so Pick's behaviour is
+// unchanged.
+//
 // computeGasBasedMax returns the number of txs of `verb` that fill
-// `gasFillFraction × blockGasLimit`. This is the primary batch-size bound;
+// `GasFillFraction × blockGasLimit`. This is the primary batch-size bound;
 // the byte budget is only a secondary clamp. Returns math.MaxInt32 when
 // blockGasLimit is zero (no cap configured — fresh client, first batch).
 //
@@ -45,9 +38,9 @@ func (s *State) computeGasBasedMax(verb string, blockGasLimit uint64) int {
 		// gasPerTxEstimate falls back to the (non-zero) baseline table, so this
 		// is unreachable; guard defensively against a corrupted estimate rather
 		// than returning an unbounded cap for a non-zero gas limit.
-		perTx = float64(defaultBaseGasPerVerb)
+		perTx = float64(s.cfg.Control.DefaultBaseGasPerVerb)
 	}
-	ceiling := float64(blockGasLimit) * gasFillFraction
+	ceiling := float64(blockGasLimit) * s.cfg.Control.GasFillFraction
 	allowed := ceiling / perTx
 	if allowed < 1 {
 		return 1
@@ -60,7 +53,7 @@ func (s *State) computeGasBasedMax(verb string, blockGasLimit uint64) int {
 	// the batch's baseline-priced gas exceed the dispatcher's hard 0.95 ceiling.
 	// floor() already guarantees this, but shrink defensively if rounding or a
 	// future change ever breaks the invariant.
-	hardCeiling := float64(blockGasLimit) * gasCapFraction
+	hardCeiling := float64(blockGasLimit) * s.cfg.Control.GasCapFraction
 	for cap > 1 && float64(cap)*perTx > hardCeiling {
 		cap--
 	}
@@ -81,9 +74,9 @@ func (s *State) computeGasBasedMax(verb string, blockGasLimit uint64) int {
 // static baseline guarantees computeGasBasedMax can never oversize a batch past
 // what the baseline permits, regardless of EWMA pollution.
 func (s *State) gasPerTxEstimate(verb string) float64 {
-	estimate := float64(baselineGasPerVerb(verb))
+	estimate := float64(s.baselineGasPerVerb(verb))
 	vs := s.GetVerbStats(verb)
-	if vs != nil && vs.Samples >= verbStatsColdStartN {
+	if vs != nil && vs.Samples >= s.cfg.Control.VerbStatsColdStartN {
 		if v := vs.GasPerTx.Value(); v > estimate {
 			estimate = v
 		}
@@ -163,7 +156,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	// Projected gradient step onto simplex.
 	step := make([]float64, n)
 	for i := range step {
-		step[i] = x[i] - projectionEta*grad[i]
+		step[i] = x[i] - s.cfg.Control.ProjectionEta*grad[i]
 	}
 	xProj := mathx.ProjectSimplex(step)
 
@@ -176,11 +169,11 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	tolerance := [3]float64{}
 	for axIdx := 0; axIdx < 3; axIdx++ {
 		headroom := math.Max(0, desired[axIdx]-current[axIdx])
-		tol := math.Max(p[axIdx], toleranceFloor) * float64(totalBatchBytes)
+		tol := math.Max(p[axIdx], s.cfg.Control.ToleranceFloor) * float64(totalBatchBytes)
 		tolerance[axIdx] = headroom + tol
 	}
 
-	flow := RatioFlowCap(obs, tgt, totalBatchBytes)
+	flow := s.RatioFlowCap(obs, tgt, totalBatchBytes)
 	for axIdx := 0; axIdx < 3; axIdx++ {
 		if flow[axIdx] < tolerance[axIdx] {
 			tolerance[axIdx] = flow[axIdx]
@@ -273,7 +266,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 
 	avg := s.AvgTxRLP[topVerb]
 	if avg <= 0 {
-		avg = defaultAvgTxRLP
+		avg = s.cfg.Control.DefaultAvgTxRLP
 	}
 
 	var deadlineBytes int
@@ -305,7 +298,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	//      Measured: ~65 k-tx blocks commit at ~47 µs/tx, ~7-12 k-tx blocks at
 	//      ~25-30 µs/tx — large blocks are ~1.7x worse per tx, so a smaller cap
 	//      raises sustained throughput. 12 k matches the Python reference orch.
-	const nMaxHardCeil = 12000
+	nMaxHardCeil := s.cfg.Control.NMaxHardCeil
 	byteBasedMax := nMaxHardCeil
 	if avg > 0 && deadlineBytes > 0 {
 		byteBasedMax = clampMin(deadlineBytes/int(avg), 1)

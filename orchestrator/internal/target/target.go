@@ -13,8 +13,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const debounceDuration = 100 * time.Millisecond
-
 type Target struct {
 	Shares     map[string]float64 `yaml:"shares" json:"shares"`
 	TotalBytes int64              `yaml:"total_bytes" json:"total_bytes"`
@@ -59,7 +57,9 @@ type Watcher struct {
 	done     chan struct{}
 }
 
-func NewWatcher(ctx context.Context, path string, onChange func(*Target)) (*Watcher, error) {
+// NewWatcher starts an fsnotify watcher on path. debounce is the resolved
+// RunConfig coalescing window applied to file-change events before reloading.
+func NewWatcher(ctx context.Context, path string, debounce time.Duration, onChange func(*Target)) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("target: create fsnotify watcher: %w", err)
@@ -76,11 +76,11 @@ func NewWatcher(ctx context.Context, path string, onChange func(*Target)) (*Watc
 		done:   make(chan struct{}),
 	}
 
-	go w.loop(ctx, path, onChange)
+	go w.loop(ctx, path, debounce, onChange)
 	return w, nil
 }
 
-func (w *Watcher) loop(ctx context.Context, path string, onChange func(*Target)) {
+func (w *Watcher) loop(ctx context.Context, path string, debounceDuration time.Duration, onChange func(*Target)) {
 	defer close(w.done)
 	var debounce <-chan time.Time
 	for {

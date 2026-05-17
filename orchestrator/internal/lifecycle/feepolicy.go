@@ -11,8 +11,6 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
-const defaultFeePolicyInterval = time.Second
-
 // headBlockFetcher is the minimal RPC surface the fee-policy loop needs.
 // The lifecycle passes a *rpc.Client; tests substitute an in-memory fake.
 type headBlockFetcher interface {
@@ -20,9 +18,10 @@ type headBlockFetcher interface {
 }
 
 // refreshFeePolicy fetches the latest head and writes the EIP-1559 fee policy
-// and block gas limit into the facade context. Returns the fetched header so
-// startup callers can use it for one-shot priming before launching the loop.
-func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context) (*rpc.BlockHeader, error) {
+// and block gas limit into the facade context. priorityTipWei is the resolved
+// RunConfig fixed priority tip. Returns the fetched header so startup callers
+// can use it for one-shot priming before launching the loop.
+func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, priorityTipWei int64) (*rpc.BlockHeader, error) {
 	head, err := fetcher.BlockByNumber(ctx, -1)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: head for fee policy: %w", err)
@@ -31,7 +30,7 @@ func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 	if baseFee == nil {
 		baseFee = new(big.Int)
 	}
-	tip := big.NewInt(defaultPriorityTipWei)
+	tip := big.NewInt(priorityTipWei)
 	maxFee := new(big.Int).Mul(baseFee, big.NewInt(2))
 	maxFee.Add(maxFee, tip)
 	fctx.SetFeePolicy(maxFee, tip)
@@ -50,9 +49,9 @@ func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 // Exits when ctx is cancelled. RPC errors are logged at warn level and do not
 // terminate the loop — the previous policy stays in place until the next tick
 // succeeds.
-func runFeePolicyLoop(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, interval time.Duration) error {
+func runFeePolicyLoop(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, interval time.Duration, priorityTipWei int64) error {
 	if interval <= 0 {
-		interval = defaultFeePolicyInterval
+		interval = time.Second
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -62,7 +61,7 @@ func runFeePolicyLoop(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-tick.C:
-			if _, err := refreshFeePolicy(ctx, fetcher, fctx); err != nil {
+			if _, err := refreshFeePolicy(ctx, fetcher, fctx, priorityTipWei); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}

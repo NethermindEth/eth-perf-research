@@ -3,14 +3,9 @@ package controller
 import (
 	"fmt"
 	"math"
-	"os"
-	"strconv"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 )
-
-const avgTxRLPDecayNew = 0.3
-const avgTxRLPDecayOld = 0.7
 
 // Apply updates F, Sigma, Alpha, AvgTxRLP, and VerbStats after a committed
 // batch. pre is the observation taken BEFORE the block, post is taken AFTER.
@@ -24,14 +19,16 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 		return nil, fmt.Errorf("controller: txCount must be positive, got %d", txCount)
 	}
 
-	// Update AvgTxRLP EWMA.
+	// Update AvgTxRLP EWMA. The new/old split is config-driven: the prior keeps
+	// (1 - AvgTxRLPDecayNew).
 	if dispatchedRLPBytes > 0 {
 		observedAvg := float64(dispatchedRLPBytes) / float64(txCount)
 		prev, ok := s.AvgTxRLP[plan.Verb]
 		if !ok {
 			prev = observedAvg
 		}
-		s.AvgTxRLP[plan.Verb] = avgTxRLPDecayNew*observedAvg + avgTxRLPDecayOld*prev
+		decayNew := s.cfg.Control.AvgTxRLPDecayNew
+		s.AvgTxRLP[plan.Verb] = decayNew*observedAvg + (1.0-decayNew)*prev
 	}
 
 	// Per-axis observed delta, normalised by tx count.
@@ -50,6 +47,9 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	}
 
 	verb := plan.Verb
+	tuning := s.alphaTuning()
+	coeffBound := s.cfg.Control.CoeffBound
+	sigmaFloor := s.cfg.Control.SigmaFloor
 
 	// Update F, Sigma, Alpha via adaptive-α.
 	//
@@ -62,7 +62,7 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	//      toward the divergent 6.48e13 / 4.15e14 state seen in production.
 	// The adaptive-α/Huber math itself (UpdateCoeff) is unchanged.
 	for axIdx, ax := range Axes {
-		if !mathx.IsFiniteInRange(observed[axIdx]) {
+		if !mathx.IsFiniteInRange(observed[axIdx], coeffBound) {
 			// Pathological observation — skip this axis's update entirely.
 			continue
 		}
@@ -71,9 +71,10 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 			observed[axIdx],
 			s.Sigma[verb][ax],
 			s.Alpha[verb][ax],
+			tuning,
 		)
-		s.F[verb][ax] = mathx.ClampCoeff(result.F)
-		s.Sigma[verb][ax] = mathx.ClampSigma(result.Sigma)
+		s.F[verb][ax] = mathx.ClampCoeff(result.F, coeffBound)
+		s.Sigma[verb][ax] = mathx.ClampSigma(result.Sigma, sigmaFloor, coeffBound)
 		s.Alpha[verb][ax] = result.Alpha
 	}
 
@@ -128,24 +129,15 @@ func signedDelta(post, pre uint64) float64 {
 }
 
 // pushOvershoot records the current batch residual ratio in the rolling window.
-// Gated by the grace period (OVERSHOOT_GRACE_BATCHES = 5 in Python).
-const overshootGraceBatches = 5
-const residualNormFloor = 1024.0
-
+// The grace period and trip threshold come from the resolved RunConfig.
 func (s *State) pushOvershoot(residualNorm float64, commanded [3]float64) {
 	// BatchID has already been incremented above.
-	if s.BatchID <= overshootGraceBatches {
+	if s.BatchID <= uint64(s.cfg.Control.OvershootGrace) {
 		return
 	}
-	denom := math.Max(l2Norm3(commanded), residualNormFloor)
+	denom := math.Max(l2Norm3(commanded), s.cfg.Control.ResidualNormFloor)
 	ratio := residualNorm / denom
-	threshold := overshootThreshold
-	if env := os.Getenv("ORCH_OVERSHOOT_THRESHOLD"); env != "" {
-		if v, err := strconv.ParseFloat(env, 64); err == nil {
-			threshold = v
-		}
-	}
-	tripped := ratio > threshold
+	tripped := ratio > s.cfg.Control.OvershootThreshold
 
 	s.overshootMu.Lock()
 	defer s.overshootMu.Unlock()
@@ -162,5 +154,3 @@ func (s *State) pushOvershoot(residualNorm float64, commanded [3]float64) {
 		s.overshootFilled++
 	}
 }
-
-const overshootThreshold = 0.20

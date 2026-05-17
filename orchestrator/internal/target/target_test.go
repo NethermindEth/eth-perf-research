@@ -70,7 +70,7 @@ func TestWatcherFiresOnChange(t *testing.T) {
 	defer cancel()
 
 	var callCount atomic.Int32
-	w, err := NewWatcher(ctx, path, func(tgt *Target) {
+	w, err := NewWatcher(ctx, path, 100*time.Millisecond, func(tgt *Target) {
 		callCount.Add(1)
 	})
 	if err != nil {
@@ -114,7 +114,7 @@ func TestWatcherContextCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	w, err := NewWatcher(ctx, path, func(*Target) {})
+	w, err := NewWatcher(ctx, path, 100*time.Millisecond, func(*Target) {})
 	if err != nil {
 		t.Fatalf("NewWatcher: %v", err)
 	}

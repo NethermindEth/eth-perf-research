@@ -8,6 +8,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
@@ -179,7 +180,7 @@ func newColdState(verbs []string) *controller.State {
 		AvgTxRLP: map[string]float64{},
 	}
 	var identity [32]byte
-	return controller.NewState(verbs, ref, identity, 0.5)
+	return controller.NewState(config.Defaults(), verbs, ref, identity)
 }
 
 // TestHydrateStateFromTailReconstructsCoefficients verifies the resume path

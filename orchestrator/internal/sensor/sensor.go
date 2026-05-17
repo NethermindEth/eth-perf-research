@@ -13,9 +13,13 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
+// The poll-interval and deadline defaults used to be package-level constants
+// here; they now live in config.RunConfig.Run (sensor_poll_interval_ms /
+// sensor_deadline_ms) and are passed in by the lifecycle via WithPollInterval /
+// WithDeadline. New still applies a built-in fallback if an option is omitted.
 const (
-	defaultPollInterval = 100 * time.Millisecond
-	defaultDeadline     = 2 * time.Second
+	fallbackPollInterval = 100 * time.Millisecond
+	fallbackDeadline     = 2 * time.Second
 )
 
 // ErrSensorTimeout is returned when blockNumber fails to reach the expected
@@ -63,8 +67,8 @@ type Sensor struct {
 // New constructs a Sensor backed by the provided RPC client.
 func New(c *rpc.Client, opts ...SensorOption) *Sensor {
 	o := &sensorOpts{
-		pollInterval: defaultPollInterval,
-		deadline:     defaultDeadline,
+		pollInterval: fallbackPollInterval,
+		deadline:     fallbackDeadline,
 	}
 	for _, fn := range opts {
 		fn(o)

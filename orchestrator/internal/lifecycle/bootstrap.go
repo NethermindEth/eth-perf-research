@@ -17,12 +17,14 @@ import (
 )
 
 // bootstrapDeps is the narrow set of subsystems the bootstrap phase needs.
+// deployGas is the resolved RunConfig gas limit for each bootstrap CREATE tx.
 type bootstrapDeps struct {
 	rpc       *rpc.Client
 	signer    *signer.Signer
 	facadeCtx *facade.Context
 	stateDir  string
 	chainID   uint64
+	deployGas uint64
 }
 
 // bootstrapContracts ensures every Spamoor scenario contract the run's verbs
@@ -129,7 +131,7 @@ func deployContracts(ctx context.Context, deps *bootstrapDeps, required []verbs.
 	reg := verbs.NewContractRegistry()
 	txIns := make([]*orchpb.TxIn, 0, len(required))
 	for i, name := range required {
-		spec, ok := verbs.ContractSpecFor(name)
+		spec, ok := verbs.ContractSpecFor(name, deps.deployGas)
 		if !ok {
 			return nil, fmt.Errorf("lifecycle: bootstrap: no catalog spec for %q", name)
 		}

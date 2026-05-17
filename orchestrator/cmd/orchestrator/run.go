@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/lifecycle"
 )
 
@@ -39,7 +39,7 @@ func newRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Run the orchestrator main loop against a Nethermind RPC",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runOrchestrator(cmd.Context(), f)
+			return runOrchestrator(cmd.Context(), cmd, f)
 		},
 	}
 	cmd.Flags().StringVar(&f.rpcURL, "rpc-url", "", "Nethermind JSON-RPC URL (required)")
@@ -78,50 +78,49 @@ func (f runFlags) validate() error {
 	return nil
 }
 
-func runOrchestrator(ctx context.Context, f runFlags) error {
+// runOrchestrator resolves the RunConfig (config.Load: built-in defaults →
+// target.yaml control:/cost:/run: blocks → env overrides), applies any
+// explicitly-set CLI flag overrides on top, then hands off to lifecycle.Run.
+func runOrchestrator(ctx context.Context, cmd *cobra.Command, f runFlags) error {
 	if err := f.validate(); err != nil {
 		return err
 	}
 
+	rc, err := config.Load(f.targetYAML)
+	if err != nil {
+		return err
+	}
+	// CLI flags are the highest-precedence override, but only when the user
+	// actually set them — an unset flag must not clobber a target.yaml / env
+	// value with the cobra default.
+	if cmd.Flags().Changed("epsilon") {
+		rc.Control.Epsilon = f.epsilon
+	}
+	if cmd.Flags().Changed("metrics-addr") {
+		rc.Run.MetricsAddr = f.metricsAddr
+	}
+	if err := config.Validate(rc); err != nil {
+		return err
+	}
+
 	cfg := lifecycle.Config{
-		RPCURL:           f.rpcURL,
-		JWTPath:          f.jwtPath,
-		StateDir:         f.stateDir,
-		TargetYAMLPath:   f.targetYAML,
-		GenesisSHA256:    f.genesisSHA256,
-		ReferenceFPath:   f.referenceFPath,
-		ManifestPath:     f.manifestPath,
-		MaxBatches:       f.maxBatches,
-		EnableProbe:      f.enableProbe,
-		DeployPrivateKey: cmp.Or(f.deployPrivateKey, os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")),
-		Epsilon:          f.epsilon,
-		TotalBatchBytes:  resolveTotalBatchBytes(),
-		Verbs:            resolveVerbs(),
+		RPCURL:              f.rpcURL,
+		JWTPath:             f.jwtPath,
+		StateDir:            f.stateDir,
+		TargetYAMLPath:      f.targetYAML,
+		GenesisSHA256:       f.genesisSHA256,
+		ReferenceFPath:      f.referenceFPath,
+		ManifestPath:        f.manifestPath,
+		MaxBatches:          f.maxBatches,
+		EnableProbe:         f.enableProbe,
+		DeployPrivateKey:    cmp.Or(f.deployPrivateKey, os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")),
+		Verbs:               resolveVerbs(),
 		PluginGitSHA:        f.pluginGitSHA,
 		NethermindCommitSHA: f.nethermindCommitSHA,
 		DotnetRuntimeMajor:  f.dotnetRuntimeMajor,
-		MetricsAddr:         f.metricsAddr,
+		Run:                 rc,
 	}
 	return lifecycle.Run(ctx, cfg)
-}
-
-// defaultRunTotalBatchBytes sizes the per-block tx payload. Kept at 2 MiB so a
-// single block's FlatDb persist stays light enough for the EL client to keep
-// up: at 5 MiB the EL produced ~47k-tx / ~983-MGas blocks and its persist path
-// fell progressively behind ("Slow task Persisting" climbing 6→8→10s) until it
-// died. Raise via ORCH_TOTAL_BATCH_BYTES once the EL persist path is faster.
-const defaultRunTotalBatchBytes = 2 * 1024 * 1024
-
-func resolveTotalBatchBytes() int {
-	raw := os.Getenv("ORCH_TOTAL_BATCH_BYTES")
-	if raw == "" {
-		return defaultRunTotalBatchBytes
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil || v < 1024 {
-		return defaultRunTotalBatchBytes
-	}
-	return v
 }
 
 func resolveVerbs() []string {

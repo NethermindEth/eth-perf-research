@@ -22,7 +22,7 @@ func TestPickGasburnertxRespectsBlockGasLimit(t *testing.T) {
 		AvgTxRLP: map[string]float64{"gasburnertx": 1500.0},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := newTestState(verbs, rf, identity, 0.0)
 
 	tgt := makeTarget(10 * 1024 * 1024 * 1024) // 10 GiB target — far from done
 	obs := zeroObs()
@@ -38,12 +38,12 @@ func TestPickGasburnertxRespectsBlockGasLimit(t *testing.T) {
 		t.Fatalf("NMaxTxs = %d, want > 0", plan.NMaxTxs)
 	}
 
-	perTx, ok := baseGasPerVerb["gasburnertx"]
+	perTx, ok := testBaseGasPerVerb["gasburnertx"]
 	if !ok {
-		t.Fatal("baseGasPerVerb[\"gasburnertx\"] not registered")
+		t.Fatal("testBaseGasPerVerb[\"gasburnertx\"] not registered")
 	}
 	totalGas := uint64(plan.NMaxTxs) * perTx
-	ceiling := uint64(float64(blockGasLimit) * gasCapFraction)
+	ceiling := uint64(float64(blockGasLimit) * testGasCapFraction)
 	if totalGas > ceiling {
 		t.Fatalf("Pick over-allocated: NMaxTxs=%d * %d = %d gas > 0.95 * %d = %d ceiling",
 			plan.NMaxTxs, perTx, totalGas, blockGasLimit, ceiling)
@@ -64,7 +64,7 @@ func TestPickGasPrimarySizerTargetsBlockFill(t *testing.T) {
 		AvgTxRLP: map[string]float64{"storagespam": 1500.0},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := newTestState(verbs, rf, identity, 0.0)
 
 	tgt := makeTarget(10 * 1024 * 1024 * 1024) // 10 GiB target — far from done
 	plan := s.Pick(zeroObs(), tgt, 8*1024*1024 /* total_batch_bytes */, blockGasLimit)
@@ -75,13 +75,13 @@ func TestPickGasPrimarySizerTargetsBlockFill(t *testing.T) {
 		t.Fatalf("verb = %q, want storagespam", plan.Verb)
 	}
 
-	perTx, ok := baseGasPerVerb["storagespam"]
+	perTx, ok := testBaseGasPerVerb["storagespam"]
 	if !ok {
-		t.Fatal("baseGasPerVerb[\"storagespam\"] not registered")
+		t.Fatal("testBaseGasPerVerb[\"storagespam\"] not registered")
 	}
 	totalGas := uint64(plan.NMaxTxs) * perTx
 	lowerBound := uint64(float64(blockGasLimit) * 0.85)
-	upperBound := uint64(float64(blockGasLimit) * gasCapFraction)
+	upperBound := uint64(float64(blockGasLimit) * testGasCapFraction)
 	if totalGas < lowerBound {
 		t.Fatalf("under-filled: NMaxTxs=%d * %d = %d gas < 0.85 * %d = %d (gas must be the primary sizer)",
 			plan.NMaxTxs, perTx, totalGas, blockGasLimit, lowerBound)
@@ -102,7 +102,7 @@ func TestPickZeroBlockGasLimitDoesNotCap(t *testing.T) {
 		AvgTxRLP: map[string]float64{"eoatx": 1500.0},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := newTestState(verbs, rf, identity, 0.0)
 
 	plan := s.Pick(zeroObs(), makeTarget(10_000_000), 4_000_000, 0)
 	if plan == nil {
@@ -129,7 +129,7 @@ func TestPickProjectedGradientSteersAwayFromOverTargetAxis(t *testing.T) {
 		AvgTxRLP: map[string]float64{"accountfiller": 1500, "storagefiller": 1500},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0)
+	s := newTestState(verbs, rf, identity, 0.0)
 
 	// Target: accounts 50% / storage 50%. Observation: storage far OVER, accounts
 	// far UNDER — the residual must drive the mix toward accountfiller.
@@ -154,17 +154,17 @@ func TestPickProjectedGradientSteersAwayFromOverTargetAxis(t *testing.T) {
 // most likely to hit the ceiling.
 func TestComputeGasBasedMaxTable(t *testing.T) {
 	const blockGasLimit uint64 = 8_000_000_000
-	ceiling := uint64(float64(blockGasLimit) * gasCapFraction)
+	ceiling := uint64(float64(blockGasLimit) * testGasCapFraction)
 
-	verbs := make([]string, 0, len(baseGasPerVerb))
-	for v := range baseGasPerVerb {
+	verbs := make([]string, 0, len(testBaseGasPerVerb))
+	for v := range testBaseGasPerVerb {
 		verbs = append(verbs, v)
 	}
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
-	for verb, perTx := range baseGasPerVerb {
+	for verb, perTx := range testBaseGasPerVerb {
 		got := s.computeGasBasedMax(verb, blockGasLimit)
 		if got <= 0 {
 			t.Errorf("verb=%s: computeGasBasedMax=%d, want > 0", verb, got)
@@ -191,26 +191,26 @@ func TestComputeGasBasedMaxIgnoresMislearnedLowEWMA(t *testing.T) {
 	verbs := []string{verb}
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
 	// Pollute the EWMA with a mis-learned LOW value (50k gas/tx, 50x too low)
 	// across enough samples to pass the cold-start threshold.
-	for i := 0; i < int(verbStatsColdStartN)+5; i++ {
+	for i := 0; i < int(testVerbStatsColdStartN)+5; i++ {
 		s.UpdateVerbStats(verb, 50_000, 1, 1500.0)
 	}
 	vs := s.GetVerbStats(verb)
-	if vs == nil || vs.Samples < verbStatsColdStartN {
+	if vs == nil || vs.Samples < testVerbStatsColdStartN {
 		t.Fatalf("EWMA not warm: samples=%v", vs)
 	}
-	if learned := vs.GasPerTx.Value(); learned >= float64(baselineGasPerVerb(verb)) {
+	if learned := vs.GasPerTx.Value(); learned >= float64(s.baselineGasPerVerb(verb)) {
 		t.Fatalf("test setup: learned EWMA=%.0f not below baseline=%d",
-			learned, baselineGasPerVerb(verb))
+			learned, s.baselineGasPerVerb(verb))
 	}
 
 	// The estimate must be clamped UP to the baseline, not the low EWMA.
-	if est := s.gasPerTxEstimate(verb); est < float64(baselineGasPerVerb(verb)) {
+	if est := s.gasPerTxEstimate(verb); est < float64(s.baselineGasPerVerb(verb)) {
 		t.Errorf("gasPerTxEstimate=%.0f below baseline=%d — under-estimate not clamped",
-			est, baselineGasPerVerb(verb))
+			est, s.baselineGasPerVerb(verb))
 	}
 
 	// The resulting cap, priced at the BASELINE gas, must fit under the hard
@@ -219,10 +219,10 @@ func TestComputeGasBasedMaxIgnoresMislearnedLowEWMA(t *testing.T) {
 	if got <= 0 {
 		t.Fatalf("computeGasBasedMax=%d, want > 0", got)
 	}
-	hardCeiling := uint64(float64(blockGasLimit) * gasCapFraction)
-	totalGas := uint64(got) * baselineGasPerVerb(verb)
+	hardCeiling := uint64(float64(blockGasLimit) * testGasCapFraction)
+	totalGas := uint64(got) * s.baselineGasPerVerb(verb)
 	if totalGas > hardCeiling {
 		t.Errorf("cap=%d * baselineGas=%d = %d > hard ceiling=%d — batch would be rejected",
-			got, baselineGasPerVerb(verb), totalGas, hardCeiling)
+			got, s.baselineGasPerVerb(verb), totalGas, hardCeiling)
 	}
 }

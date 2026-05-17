@@ -11,9 +11,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
@@ -28,26 +28,7 @@ const (
 	journalFilename  = "journal.bin"
 	payloadsFilename = "payloads.rlp"
 	pendingFilename  = "pending-batch.bin"
-
-	// defaultResumeReorgTolerance bounds the head/journal-tail gap that a resume
-	// will tolerate. After an EL-client crash + restart the chain rolls back to
-	// its FlatDb reorg boundary; the journal then sits a few blocks ahead of (or,
-	// if its last write didn't flush, behind) the chain head. Anything inside
-	// this window is a recoverable resume — the master-nonce cursor is re-derived
-	// from the chain so a bounded mismatch self-heals. NM's FlatDb.MaxReorgDepth
-	// is 192; 256 leaves headroom.
-	defaultResumeReorgTolerance = 256
 )
-
-// resumeReorgTolerance reads ORCH_RESUME_REORG_TOLERANCE or returns the default.
-func resumeReorgTolerance() int64 {
-	if raw := os.Getenv("ORCH_RESUME_REORG_TOLERANCE"); raw != "" {
-		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v >= 0 {
-			return v
-		}
-	}
-	return defaultResumeReorgTolerance
-}
 
 // startupMode enumerates the run's startup decision.
 type startupMode int
@@ -106,8 +87,9 @@ func loadReferenceF(path string) (*referencef.ReferenceF, error) {
 }
 
 // resolveStartupMode inspects the state-dir and the RPC head to decide
-// between fresh start, resume, or error.
-func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client) (*startupDecision, error) {
+// between fresh start, resume, or error. resumeReorgTolerance is the resolved
+// RunConfig value bounding the head/journal-tail gap a resume tolerates.
+func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client, resumeReorgTolerance int64) (*startupDecision, error) {
 	jp := filepath.Join(stateDir, journalFilename)
 	pp := filepath.Join(stateDir, payloadsFilename)
 	pendp := filepath.Join(stateDir, pendingFilename)
@@ -121,7 +103,7 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 	journalExists := jErr == nil && jStat.Size() > 0
 
 	if !journalExists {
-		if head.Number == 0 || os.Getenv("ORCH_ALLOW_NON_ZERO_FRESH_HEAD") == "1" {
+		if head.Number == 0 || config.EnvTruthy("ORCH_ALLOW_NON_ZERO_FRESH_HEAD") {
 			return &startupDecision{
 				Mode:         modeFresh,
 				JournalPath:  jp,
@@ -171,7 +153,7 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 		// re-derived from the chain at startup, so the orchestrator picks up
 		// from wherever the chain actually is. Only a gap larger than the
 		// window indicates a genuinely different chain.
-		tol := resumeReorgTolerance()
+		tol := resumeReorgTolerance
 		delta := int64(head.Number) - int64(tailBlock)
 		if delta < -tol || delta > tol {
 			return nil, fmt.Errorf(
@@ -242,6 +224,7 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		ax   controller.Axis
 		val  float64
 	}
+	coeffBound := state.CoeffBound()
 	var fCells, sigmaCells, alphaCells []cell
 	for k, v := range obs.CoeffsAfter {
 		verb, ax, ok := splitFlatKey(k)
@@ -251,9 +234,9 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		if _, has := state.F[verb]; !has {
 			continue
 		}
-		if !mathx.IsFiniteInRange(v) {
+		if !mathx.IsFiniteInRange(v, coeffBound) {
 			slog.Error("journal F reconstruction rejected — corrupt coefficients, cold-starting from reference-F",
-				"cell", k, "value", v, "bound", mathx.CoeffBound)
+				"cell", k, "value", v, "bound", coeffBound)
 			return res
 		}
 		fCells = append(fCells, cell{verb, ax, v})
@@ -266,9 +249,9 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		if _, has := state.Sigma[verb]; !has {
 			continue
 		}
-		if !mathx.IsFiniteInRange(v) {
+		if !mathx.IsFiniteInRange(v, coeffBound) {
 			slog.Error("journal F reconstruction rejected — corrupt coefficients, cold-starting from reference-F",
-				"cell", k, "sigma", v, "bound", mathx.CoeffBound)
+				"cell", k, "sigma", v, "bound", coeffBound)
 			return res
 		}
 		sigmaCells = append(sigmaCells, cell{verb, ax, v})

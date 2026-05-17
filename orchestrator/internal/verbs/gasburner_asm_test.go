@@ -42,18 +42,19 @@ func TestGasBurnerCreationCode(t *testing.T) {
 }
 
 // TestContractCatalogComplete asserts every contract a verb targets has a
-// catalog entry with non-empty init code.
+// catalog entry with non-empty init code and carries the supplied deploy gas.
 func TestContractCatalogComplete(t *testing.T) {
+	const deployGas uint64 = 2_000_000
 	for verb, name := range contractVerbTargets {
-		spec, ok := ContractSpecFor(name)
+		spec, ok := ContractSpecFor(name, deployGas)
 		if !ok {
 			t.Fatalf("verb %s targets %q which has no catalog spec", verb, name)
 		}
 		if len(spec.InitCode) == 0 {
 			t.Fatalf("contract %q (verb %s) has empty init code", name, verb)
 		}
-		if spec.Gas == 0 {
-			t.Fatalf("contract %q (verb %s) has zero deploy gas", name, verb)
+		if spec.Gas != deployGas {
+			t.Fatalf("contract %q (verb %s) gas=%d, want %d", name, verb, spec.Gas, deployGas)
 		}
 	}
 }

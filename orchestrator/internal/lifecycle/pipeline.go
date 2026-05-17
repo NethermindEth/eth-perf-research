@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -15,17 +13,10 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/target"
 )
 
-const (
-	// idleBackoff is how long the planner sleeps when Pick yields no plan.
-	idleBackoff = 50 * time.Millisecond
-	// dispatchSkipStreakHalt bounds consecutive dispatch/build errors the
-	// planner tolerates before halting the run. A single bad batch is skipped;
-	// a sustained streak still stops a genuinely broken pipeline.
-	dispatchSkipStreakHalt = 20
-	// rejectionStreakHalt bounds consecutive fully-rejected commits (NM
-	// included zero submitted txs) before the committer halts the run.
-	rejectionStreakHalt = 5
-)
+// The planner idle backoff, dispatch-skip-streak halt and rejection-streak
+// halt were package-level constants here; they now live in
+// config.RunConfig.Run and are read off cfg.Run (the resolved RunConfig
+// carried on Config). config.Defaults() holds the historical values.
 
 // pipeline holds the state shared between the planner and committer goroutines
 // of the depth-1 build-ahead loop.
@@ -139,13 +130,8 @@ func (p *pipeline) planner(
 		// batch (the committer may not have folded in the latest commit yet);
 		// that is acceptable for these coarse stop conditions.
 		obs := p.loadObs()
-		threshold := overshootThreshold
-		if env := os.Getenv("ORCH_OVERSHOOT_THRESHOLD"); env != "" {
-			if v, err := strconv.ParseFloat(env, 64); err == nil {
-				threshold = v
-			}
-		}
-		if deps.state.HasInstability(threshold, overshootWindowSize, overshootMaxTrips, overshootGrace) {
+		ck := cfg.Run.Control
+		if deps.state.HasInstability(ck.OvershootThreshold, ck.OvershootWindow, ck.OvershootMaxTrips, ck.OvershootGrace) {
 			p.setTerm(terminationOvershoot)
 			cancel()
 			return
@@ -175,7 +161,7 @@ func (p *pipeline) planner(
 			consecutiveDispatchSkips++
 			slog.Warn("lifecycle: dispatch failed, skipping batch",
 				"batch_id", batchID, "streak", consecutiveDispatchSkips, "err", err)
-			if consecutiveDispatchSkips >= dispatchSkipStreakHalt {
+			if consecutiveDispatchSkips >= cfg.Run.Run.DispatchSkipStreakHalt {
 				p.setTerm(fmt.Sprintf("error: %d consecutive dispatch failures (last: %s)",
 					consecutiveDispatchSkips, err.Error()))
 				cancel()
@@ -192,7 +178,7 @@ func (p *pipeline) planner(
 			case <-loopCtx.Done():
 				p.setTerm(terminationSignal)
 				return
-			case <-time.After(idleBackoff):
+			case <-time.After(time.Duration(cfg.Run.Run.IdleBackoffMS) * time.Millisecond):
 			}
 			continue
 		}
@@ -236,7 +222,7 @@ func (p *pipeline) committer(loopCtx context.Context, cancel context.CancelFunc,
 				)
 				if included == 0 {
 					consecutiveFullRejections++
-					if consecutiveFullRejections >= rejectionStreakHalt {
+					if consecutiveFullRejections >= deps.cfg.Run.RejectionStreakHalt {
 						p.setTerm(fmt.Sprintf("error: %d consecutive batches fully rejected (verb=%s); chain state likely missing dependencies",
 							consecutiveFullRejections, db.plan.Verb))
 						cancel()

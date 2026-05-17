@@ -40,13 +40,15 @@ type ContractSpec struct {
 // contractCatalog returns the deterministic, ordered list of contracts the
 // bootstrap phase deploys. Order is fixed so CreateAddress nonce arithmetic is
 // reproducible across runs. The gas burner init code is assembled at call time
-// from the geas templates (gasBurnerCreationCode).
-func contractCatalog() []ContractSpec {
+// from the geas templates (gasBurnerCreationCode). deployGas is the resolved
+// RunConfig per-CREATE-tx gas limit (config.Defaults() holds the historical
+// 2_000_000).
+func contractCatalog(deployGas uint64) []ContractSpec {
 	return []ContractSpec{
-		{Name: ContractStorageSpam, InitCode: mustHex(storageSpamInitHex), Gas: 2_000_000},
-		{Name: ContractTestToken, InitCode: mustHex(testTokenInitHex), Gas: 2_000_000},
-		{Name: ContractStorageRefund, InitCode: mustHex(storageRefundInitHex), Gas: 2_000_000},
-		{Name: ContractGasBurner, InitCode: gasBurnerCreationCode(), Gas: 2_000_000},
+		{Name: ContractStorageSpam, InitCode: mustHex(storageSpamInitHex), Gas: deployGas},
+		{Name: ContractTestToken, InitCode: mustHex(testTokenInitHex), Gas: deployGas},
+		{Name: ContractStorageRefund, InitCode: mustHex(storageRefundInitHex), Gas: deployGas},
+		{Name: ContractGasBurner, InitCode: gasBurnerCreationCode(), Gas: deployGas},
 	}
 }
 
@@ -132,7 +134,8 @@ func ContractVerbTarget(verb string) (ContractName, bool) {
 
 // RequiredContracts returns the set of contracts the given verbs require, in
 // catalog order. Used by the bootstrap phase to deploy only what is needed and
-// by the fail-loud guard to know which addresses must have code.
+// by the fail-loud guard to know which addresses must have code. The catalog
+// order does not depend on the deploy-gas value, so a zero is passed here.
 func RequiredContracts(verbs []string) []ContractName {
 	want := map[ContractName]bool{}
 	for _, v := range verbs {
@@ -141,7 +144,7 @@ func RequiredContracts(verbs []string) []ContractName {
 		}
 	}
 	out := make([]ContractName, 0, len(want))
-	for _, spec := range contractCatalog() {
+	for _, spec := range contractCatalog(0) {
 		if want[spec.Name] {
 			out = append(out, spec.Name)
 		}
@@ -149,9 +152,10 @@ func RequiredContracts(verbs []string) []ContractName {
 	return out
 }
 
-// ContractSpecFor returns the catalog spec for a contract name.
-func ContractSpecFor(name ContractName) (ContractSpec, bool) {
-	for _, spec := range contractCatalog() {
+// ContractSpecFor returns the catalog spec for a contract name, with the spec's
+// Gas set to deployGas (the resolved RunConfig per-CREATE-tx gas limit).
+func ContractSpecFor(name ContractName, deployGas uint64) (ContractSpec, bool) {
+	for _, spec := range contractCatalog(deployGas) {
 		if spec.Name == name {
 			return spec, true
 		}

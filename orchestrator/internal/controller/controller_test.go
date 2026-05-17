@@ -4,8 +4,32 @@ import (
 	"math"
 	"testing"
 
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
+)
+
+// testCfg is the resolved RunConfig the controller tests run against — the
+// built-in defaults, which equal the historical hardcoded constants.
+func testCfg() config.RunConfig { return config.Defaults() }
+
+// newTestState builds a controller State for tests with the default RunConfig
+// and a test-supplied ε. Before RunConfig, NewState took ε directly; this
+// helper preserves the old test ergonomics.
+func newTestState(verbs []string, ref *referencef.ReferenceF, identity [32]byte, epsilon float64) *State {
+	cfg := testCfg()
+	cfg.Control.Epsilon = epsilon
+	return NewState(cfg, verbs, ref, identity)
+}
+
+// Test-facing aliases for tuning values that used to be package-level
+// constants. They read straight off config.Defaults() so the assertions stay
+// pinned to the historical numbers.
+var (
+	testCoeffBound          = config.Defaults().Control.CoeffBound
+	testGasCapFraction      = config.Defaults().Control.GasCapFraction
+	testFloorFraction       = config.Defaults().Control.RatioFloorFraction
+	testBaseGasPerVerb      = config.Defaults().Control.BaseGasPerVerb
+	testVerbStatsColdStartN = config.Defaults().Control.VerbStatsColdStartN
 )
 
 // makeRef returns a minimal ReferenceF with known F values for two verbs.
@@ -49,7 +73,7 @@ func TestPickSingleVerbReturnsThatVerb(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 100.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
 	tgt := makeTarget(1_000_000)
 	plan := s.Pick(zeroObs(), tgt, 4_000_000, 0)
@@ -75,7 +99,7 @@ func TestPickDeterministicWithEpsilonZero(t *testing.T) {
 		AvgTxRLP: map[string]float64{"verb_a": 1500, "verb_b": 1500, "verb_c": 1500},
 	}
 	var identity [32]byte
-	s := NewState(verbs, rf, identity, 0.0) // ε = 0
+	s := newTestState(verbs, rf, identity, 0.0) // ε = 0
 
 	tgt := makeTarget(10_000_000)
 	obs := zeroObs()
@@ -95,7 +119,7 @@ func TestApplyMovesFInExpectedDirection(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 50.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
 	pre := &Observation{AccountTrieBytes: 1_000_000}
 	// post has +1000 bytes per axis in accounts, much more than F=50 predicts for 10 txs.
@@ -123,7 +147,7 @@ func TestApplyIncrementsBatchID(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 50.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
 	if s.BatchID != 0 {
 		t.Fatalf("initial BatchID want 0, got %d", s.BatchID)
@@ -148,7 +172,7 @@ func TestApplyErrorOnZeroTxCount(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 50.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 	plan := &BatchPlan{Verb: "eoa_transfer", DeadlineBytes: 1000, Mix: map[string]float64{"eoa_transfer": 1.0}}
 	_, err := s.Apply(zeroObs(), zeroObs(), plan, 0, 0, 0)
 	if err == nil {
@@ -166,7 +190,7 @@ func TestInstabilityTripsAfterMaxTrips(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 1.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
 	// Pre-size the window.
 	s.initOvershootWindow(window)
@@ -177,7 +201,7 @@ func TestInstabilityTripsAfterMaxTrips(t *testing.T) {
 	}
 	s.overshootFilled = window
 
-	if !s.HasInstability(overshootThreshold, window, maxTrips, grace) {
+	if !s.HasInstability(testCfg().Control.OvershootThreshold, window, maxTrips, grace) {
 		t.Fatal("expected instability to be detected")
 	}
 
@@ -185,7 +209,7 @@ func TestInstabilityTripsAfterMaxTrips(t *testing.T) {
 	for i := 0; i < window; i++ {
 		s.overshootWindow[i] = i < maxTrips-1
 	}
-	if s.HasInstability(overshootThreshold, window, maxTrips, grace) {
+	if s.HasInstability(testCfg().Control.OvershootThreshold, window, maxTrips, grace) {
 		t.Fatal("should not detect instability with fewer than maxTrips exceedances")
 	}
 }
@@ -199,7 +223,7 @@ func TestInstabilityNotTripBeforeWindowFull(t *testing.T) {
 	verbs := []string{"eoa_transfer"}
 	ref := makeRef(verbs, 1.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 	s.initOvershootWindow(window)
 	// filled < window — should never trip.
 	s.overshootFilled = window - 1
@@ -207,7 +231,7 @@ func TestInstabilityNotTripBeforeWindowFull(t *testing.T) {
 		s.overshootWindow[i] = true
 	}
 
-	if s.HasInstability(overshootThreshold, window, maxTrips, 0) {
+	if s.HasInstability(testCfg().Control.OvershootThreshold, window, maxTrips, 0) {
 		t.Fatal("must not trip before window is full")
 	}
 }
@@ -228,7 +252,7 @@ func TestResidualL2NormHandComputed(t *testing.T) {
 	verbs := []string{"v"}
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
 	pre := &Observation{}
 	post := &Observation{AccountTrieBytes: 150, StorageTrieBytes: 150, CodeBytesTotal: 150}
@@ -260,7 +284,7 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 	verbs := []string{"v"}
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 	// Seed with known value.
 	s.AvgTxRLP["v"] = 1000.0
 
@@ -295,7 +319,7 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 // post < pre trie-byte counter pair: the uint64 subtraction underflowed to
 // ~2^64, divided by a small txCount, and fed ~1e13+ bytes/tx into UpdateCoeff.
 // Each sub-case feeds such a batch; F and σ must stay finite and within
-// mathx.CoeffBound afterwards.
+// testCoeffBound afterwards.
 func TestApplyBoundsFAgainstPathologicalObservation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -321,7 +345,7 @@ func TestApplyBoundsFAgainstPathologicalObservation(t *testing.T) {
 			verbs := []string{"eoatx"}
 			ref := makeRef(verbs, 160.0)
 			var identity [32]byte
-			s := NewState(verbs, ref, identity, 0.0)
+			s := newTestState(verbs, ref, identity, 0.0)
 
 			plan := &BatchPlan{Verb: "eoatx", DeadlineBytes: 10000, Mix: map[string]float64{"eoatx": 1.0}}
 			// txCount=1 maximises the per-tx effect of the bad delta.
@@ -334,15 +358,15 @@ func TestApplyBoundsFAgainstPathologicalObservation(t *testing.T) {
 				if math.IsNaN(f) || math.IsInf(f, 0) {
 					t.Fatalf("F[eoatx][%s] not finite: %v", ax, f)
 				}
-				if f < -mathx.CoeffBound || f > mathx.CoeffBound {
-					t.Fatalf("F[eoatx][%s]=%v escaped bound ±%v", ax, f, mathx.CoeffBound)
+				if f < -testCoeffBound || f > testCoeffBound {
+					t.Fatalf("F[eoatx][%s]=%v escaped bound ±%v", ax, f, testCoeffBound)
 				}
 				sig := s.Sigma["eoatx"][ax]
 				if math.IsNaN(sig) || math.IsInf(sig, 0) {
 					t.Fatalf("Sigma[eoatx][%s] not finite: %v", ax, sig)
 				}
-				if sig > mathx.CoeffBound {
-					t.Fatalf("Sigma[eoatx][%s]=%v escaped bound %v", ax, sig, mathx.CoeffBound)
+				if sig > testCoeffBound {
+					t.Fatalf("Sigma[eoatx][%s]=%v escaped bound %v", ax, sig, testCoeffBound)
 				}
 			}
 		})
@@ -358,7 +382,7 @@ func TestApplyRejectsNonFiniteObservation(t *testing.T) {
 	verbs := []string{"eoatx"}
 	ref := makeRef(verbs, 160.0)
 	var identity [32]byte
-	s := NewState(verbs, ref, identity, 0.0)
+	s := newTestState(verbs, ref, identity, 0.0)
 
 	// Inject a non-finite F seed, then apply a batch whose observed effect is
 	// in-range: the in-range guard must still produce a finite, bounded F.
@@ -373,7 +397,7 @@ func TestApplyRejectsNonFiniteObservation(t *testing.T) {
 		if math.IsNaN(f) || math.IsInf(f, 0) {
 			t.Fatalf("F[eoatx][%s] not finite after sane batch: %v", ax, f)
 		}
-		if f < -mathx.CoeffBound || f > mathx.CoeffBound {
+		if f < -testCoeffBound || f > testCoeffBound {
 			t.Fatalf("F[eoatx][%s]=%v escaped bound", ax, f)
 		}
 	}
@@ -394,7 +418,7 @@ func TestNewStateSeedsNonZeroFromDefaultReferenceF(t *testing.T) {
 	identity := [32]byte{}
 
 	// referencef.DefaultReferenceF is exactly what loadReferenceF("") returns.
-	s := NewState(verbs, referencef.DefaultReferenceF(), identity, 0.0)
+	s := newTestState(verbs, referencef.DefaultReferenceF(), identity, 0.0)
 
 	if got := s.F["eoatx"][AxisAccounts]; got != 160 {
 		t.Errorf("F[eoatx][accounts]: got %v, want 160 (design-v3 §B.1 seed)", got)

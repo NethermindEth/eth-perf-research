@@ -3,10 +3,10 @@
 package controller
 
 import (
-	"os"
-	"strings"
 	"sync"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 )
 
@@ -21,13 +21,6 @@ const (
 
 // Axes is the canonical ordered triple used wherever axis iteration is needed.
 var Axes = [3]Axis{AxisAccounts, AxisStorage, AxisCode}
-
-const defaultAvgTxRLP = 1500.0
-const defaultSigma = 1.0
-
-// aMinSeed is the A_MIN constant from mathx (0.02). We keep it local to avoid
-// depending on an unexported constant; the value is pinned by the adaptive-α spec.
-const aMinSeed = 0.02
 
 // Observation is a snapshot of the three state-growth counters.
 type Observation struct {
@@ -91,18 +84,17 @@ type State struct {
 	// enabled on a live system without a rebuild. Off by default; when off,
 	// Pick performs no extra formatting and its behaviour is unaffected.
 	debugPick bool
+
+	// cfg holds every controller tuning value. It is resolved once at startup
+	// (config.Load) and threaded in via NewState so no controller constant is
+	// package-level any more.
+	cfg config.RunConfig
 }
 
-// envTruthy reports whether an environment variable is set to a truthy value.
-// Accepted truthy values: "1", "true", "yes", "on" (case-insensitive).
-func envTruthy(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
+// CoeffBound returns the physical magnitude ceiling for an F-coefficient / σ
+// from the resolved RunConfig. Used by the journal-tail hydration to validate
+// reconstructed coefficients against the same bound the controller enforces.
+func (s *State) CoeffBound() float64 { return s.cfg.Control.CoeffBound }
 
 // LockState acquires the mutex guarding the controller matrices for the
 // pipeline's Pick/Apply hand-off. Callers must pair it with UnlockState.
@@ -111,9 +103,11 @@ func (s *State) LockState() { s.pickApplyMu.Lock() }
 // UnlockState releases the LockState mutex.
 func (s *State) UnlockState() { s.pickApplyMu.Unlock() }
 
-// NewState initialises a State from the reference-F seed values.
-// verbs must be the complete ordered list.
-func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte, epsilon float64) *State {
+// NewState initialises a State from the reference-F seed values and the
+// resolved RunConfig. verbs must be the complete ordered list. Every tuning
+// value (ε, the σ/α seeds, the gas tables) is read from cfg — no controller
+// constant is package-level.
+func NewState(cfg config.RunConfig, verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte) *State {
 	verbsCopy := make([]string, len(verbs))
 	copy(verbsCopy, verbs)
 
@@ -131,8 +125,8 @@ func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte
 
 		for _, ax := range Axes {
 			fRow[ax] = refPerVerb[string(ax)] // zero if not present
-			sigmaRow[ax] = defaultSigma
-			alphaRow[ax] = aMinSeed
+			sigmaRow[ax] = cfg.Control.DefaultSigma
+			alphaRow[ax] = cfg.Control.AlphaMin
 		}
 		f[verb] = fRow
 		sigma[verb] = sigmaRow
@@ -141,7 +135,7 @@ func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte
 		if rlp, ok := ref.AvgTxRLP[verb]; ok && rlp > 0 {
 			avgTxRLP[verb] = rlp
 		} else {
-			avgTxRLP[verb] = defaultAvgTxRLP
+			avgTxRLP[verb] = cfg.Control.DefaultAvgTxRLP
 		}
 	}
 
@@ -153,10 +147,28 @@ func NewState(verbs []string, ref *referencef.ReferenceF, chainIdentity [32]byte
 		AvgTxRLP:       avgTxRLP,
 		BatchID:        0,
 		ChainIdentity:  chainIdentity,
-		Epsilon:        epsilon,
+		Epsilon:        cfg.Control.Epsilon,
 		VerbStats:      make(map[string]*VerbStats),
 		lastResidualL2: 0,
-		debugPick:      envTruthy("ORCH_DEBUG_PICK"),
+		debugPick:      config.EnvTruthy("ORCH_DEBUG_PICK"),
+		cfg:            cfg,
+	}
+}
+
+// alphaTuning derives the mathx adaptive-α parameters from the controller's
+// resolved RunConfig.
+func (s *State) alphaTuning() mathx.Tuning {
+	ck := s.cfg.Control
+	return mathx.Tuning{
+		AMin:           ck.AlphaMin,
+		AMax:           ck.AlphaMax,
+		C:              ck.SigmoidCenter,
+		K:              ck.SigmoidK,
+		SigmaFloor:     ck.SigmaFloor,
+		Eps:            ck.AlphaEpsilon,
+		SigmaEWMADecay: ck.SigmaEWMADecay,
+		AlphaEWMADecay: ck.AlphaEWMADecay,
+		CoeffBound:     ck.CoeffBound,
 	}
 }
 
