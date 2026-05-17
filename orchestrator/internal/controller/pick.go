@@ -156,8 +156,16 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 	}
 
+	// A verb whose contract dependency is not deployed on this chain is
+	// structurally dead — every batch of it is 100%-rejected on commit. Such a
+	// verb is excluded from the candidate set entirely: zero gradient here,
+	// skipped by the R1 floor, and zeroed in xProj below so it can never be
+	// selected.
 	grad := make([]float64, n)
 	for j := 0; j < n; j++ {
+		if !s.isContractEligible(verbs[j]) {
+			continue
+		}
 		for axIdx := 0; axIdx < 3; axIdx++ {
 			if overTarget[axIdx] {
 				continue
@@ -179,16 +187,42 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	xProj := mathx.ProjectSimplex(step)
 
+	// Contract-eligibility clamp. The simplex projection works on the uniform
+	// 1/n seed and can leave a contract-ineligible verb with positive weight;
+	// zero it before R1 so the verb is excluded from the entropy floor and is
+	// unreachable in selectVerbIndex. Renormalise so the remaining weights
+	// still form a simplex.
+	if s.contractEligible != nil {
+		zeroed := false
+		for i, v := range verbs {
+			if !s.isContractEligible(v) {
+				xProj[i] = 0
+				zeroed = true
+			}
+		}
+		if zeroed {
+			if total := sumFloats(xProj); total > 0 {
+				for i := range xProj {
+					xProj[i] /= total
+				}
+			}
+		}
+	}
+
 	// R1 — entropy floor. The Michelot projection routinely drives the weight
 	// of a momentarily-unfavoured verb to exactly zero; a zero-weight verb is
 	// unreachable in selectVerbIndex, so a verb that is the sole grower of an
 	// under-target axis becomes permanently unselectable and that axis can
-	// never converge. Clamp every eligible verb (one with a non-degenerate
-	// F-row — capable of moving at least one axis) up to EntropyFloor, then
-	// renormalize. Degenerate verbs (all-zero F-row, no measured effect) are
-	// exempt and stay at zero.
+	// never converge. Clamp every eligible verb up to EntropyFloor, then
+	// renormalize. A verb is eligible for the floor iff it has a non-degenerate
+	// F-row (capable of moving at least one axis) AND its contract dependency
+	// is deployed on this chain. Degenerate verbs (all-zero F-row) and
+	// contract-ineligible verbs are exempt and stay at zero.
 	if floor := s.cfg.Control.EntropyFloor; floor > 0 && n > 0 {
 		for i, v := range verbs {
+			if !s.isContractEligible(v) {
+				continue // contract-ineligible verb — exempt
+			}
 			fRow := s.axisVec(v)
 			if fRow[0]+fRow[1]+fRow[2] == 0 {
 				continue // degenerate verb — exempt
@@ -278,6 +312,9 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		for i, v := range verbs {
 			if maxNTxs[i] < 1.0 {
 				continue // infeasible — skip
+			}
+			if !s.isContractEligible(v) {
+				continue // contract-ineligible — never explore a structurally dead verb
 			}
 			fRow := s.axisVec(v)
 			if fRow[0]+fRow[1]+fRow[2] == 0 && selectFrom[i] < epsilonFloor {

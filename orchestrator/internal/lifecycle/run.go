@@ -343,6 +343,19 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("lifecycle: pre-loop contract guard: %w", err)
 	}
 
+	// 13b. Contract-dependency-aware verb eligibility. A verb whose contract
+	// dependency is not deployed-and-verified on this chain is structurally
+	// dead — every batch of it is 100%-rejected on commit. Compute the eligible
+	// set from the bootstrap registry and install it on the controller so Pick
+	// never selects an undeployed-contract verb. Fail loud if no verb can run.
+	eligibility := computeEligibleVerbs(cfg.Verbs, contractRegistry)
+	logEligibility(eligibility)
+	if len(eligibility.eligible) == 0 {
+		return fmt.Errorf(
+			"lifecycle: no eligible verbs — every configured verb's contract dependency is undeployed; refusing to start")
+	}
+	state.SetEligibleVerbs(eligibility.eligible)
+
 	// 14. Hot loop.
 	dispatcher := facade.New(signr)
 	deps := &batchDeps{

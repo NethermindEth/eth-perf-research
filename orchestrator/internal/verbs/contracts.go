@@ -26,6 +26,13 @@ const (
 	// ContractGasBurner backs the gasburnertx verb. Its runtime loops,
 	// burning gas until a remainder threshold, then emits one LOG1.
 	ContractGasBurner ContractName = "GasBurner"
+	// ContractUniswapRouter is the Uniswap V2 router the uniswap_swaps verb
+	// targets. It is intentionally NOT in contractCatalog: the orchestrator's
+	// bootstrap has no init code for a Uniswap router/pool, so this contract
+	// can never enter the deployed-and-verified set. A verb declaring it as a
+	// dependency is therefore structurally excluded on any devnet that does
+	// not already host Uniswap — exactly the desired behaviour.
+	ContractUniswapRouter ContractName = "UniswapRouter"
 )
 
 // ContractSpec describes one contract the bootstrap phase deploys.
@@ -101,8 +108,8 @@ func (r *ContractRegistry) Names() []ContractName {
 }
 
 // contractVerbTargets maps each contract-calling verb to the contract it must
-// target. Verbs absent from this map (eoatx, deploytx, factorydeploytx,
-// uniswap_swaps) need no pre-deployed contract.
+// target. Verbs absent from this map (eoatx, deploytx, factorydeploytx) need
+// no pre-deployed contract.
 //
 //   - storagespam      → StorageSpam     (setRandomForGas — real storage write)
 //   - erc20tx          → TestToken       (transferMint — real mint/transfer)
@@ -113,9 +120,9 @@ func (r *ContractRegistry) Names() []ContractName {
 //                                         shares StorageSpam with storagespam,
 //                                         it has no dedicated Spamoor contract)
 //
-// uniswap_swaps is absent: the EELS build_uniswap_swaps_transactions
-// adaptation targets a fixed router placeholder address, not a contract the
-// bootstrap phase deploys, so the verb resolves its target internally.
+// uniswap_swaps is absent: it targets a fixed router placeholder address that
+// the bootstrap deployer cannot CREATE (verbTarget is never called for it).
+// Its real dependency is declared in verbContractDeps below, not here.
 var contractVerbTargets = map[string]ContractName{
 	"storagespam":     ContractStorageSpam,
 	"erc20tx":         ContractTestToken,
@@ -125,11 +132,41 @@ var contractVerbTargets = map[string]ContractName{
 	"erc20_bloater":   ContractStorageSpam,
 }
 
+// verbContractDeps maps every verb to the full set of contracts it needs
+// deployed-and-verified on-chain before it can do real work. It is the
+// authoritative verb→contract-dependency declaration the controller's
+// eligibility gate consumes.
+//
+// It is a superset of contractVerbTargets: a verb in contractVerbTargets
+// depends on its target contract, AND uniswap_swaps — which has no catalog
+// target but does require a Uniswap V2 router at its placeholder address —
+// declares ContractUniswapRouter here. Because ContractUniswapRouter is not in
+// contractCatalog the bootstrap never deploys it, so uniswap_swaps can satisfy
+// its dependency only on a chain that already hosts Uniswap.
+//
+// A verb absent from this map (eoatx, deploytx, factorydeploytx) has no
+// contract dependency and is always contract-eligible.
+var verbContractDeps = map[string][]ContractName{
+	"storagespam":     {ContractStorageSpam},
+	"erc20tx":         {ContractTestToken},
+	"storagerefundtx": {ContractStorageRefund},
+	"gasburnertx":     {ContractGasBurner},
+	"calltx":          {ContractStorageSpam},
+	"erc20_bloater":   {ContractStorageSpam},
+	"uniswap_swaps":   {ContractUniswapRouter},
+}
+
 // ContractVerbTarget returns the contract a verb must target, or false when
 // the verb needs no pre-deployed contract.
 func ContractVerbTarget(verb string) (ContractName, bool) {
 	c, ok := contractVerbTargets[verb]
 	return c, ok
+}
+
+// VerbContractDeps returns the contracts a verb depends on. An empty slice
+// means the verb has no contract dependency (it is always contract-eligible).
+func VerbContractDeps(verb string) []ContractName {
+	return verbContractDeps[verb]
 }
 
 // RequiredContracts returns the set of contracts the given verbs require, in

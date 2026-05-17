@@ -89,6 +89,38 @@ type State struct {
 	// (config.Load) and threaded in via NewState so no controller constant is
 	// package-level any more.
 	cfg config.RunConfig
+
+	// contractEligible is the set of verbs whose contract dependencies are
+	// deployed-and-verified on this chain. It is computed once after bootstrap
+	// and installed via SetEligibleVerbs; Pick restricts its candidate set to
+	// these verbs (ineligible verbs get zero gradient weight, are skipped by
+	// the simplex, and are NOT floored by R1). A nil map means "eligibility
+	// not configured" — every verb is treated as eligible, which preserves the
+	// pre-eligibility behaviour for tests and any caller that never calls
+	// SetEligibleVerbs.
+	contractEligible map[string]bool
+}
+
+// SetEligibleVerbs installs the contract-eligible verb set the lifecycle
+// computes after bootstrap. It is called once, before the hot loop starts and
+// before any Pick — Pick itself stays read-only on State. A verb absent from
+// the set is structurally dead on this chain (its contract is not deployed)
+// and is excluded from the gradient, the simplex, and the R1 entropy floor.
+func (s *State) SetEligibleVerbs(eligible []string) {
+	set := make(map[string]bool, len(eligible))
+	for _, v := range eligible {
+		set[v] = true
+	}
+	s.contractEligible = set
+}
+
+// isContractEligible reports whether verb may be selected this run. A nil
+// eligibility set (SetEligibleVerbs never called) means every verb is eligible.
+func (s *State) isContractEligible(verb string) bool {
+	if s.contractEligible == nil {
+		return true
+	}
+	return s.contractEligible[verb]
 }
 
 // CoeffBound returns the physical magnitude ceiling for an F-coefficient / σ
