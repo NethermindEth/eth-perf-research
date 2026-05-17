@@ -305,7 +305,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// 13. Prime fee policy once synchronously so the first batch has a valid
 	// max-fee/tip pair before the planner loop runs, then start the background
 	// refresher (single RPC per tick).
-	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx, rc.Cost.PriorityTipWei); err != nil {
+	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx, rc.Cost.EthPerGasTarget, rc.Cost.PriorityTipWei); err != nil {
 		return fmt.Errorf("lifecycle: prime fee policy: %w", err)
 	}
 	feeCtx, feeCancel := context.WithCancel(ctx)
@@ -314,7 +314,7 @@ func Run(ctx context.Context, cfg Config) error {
 	go func() {
 		defer feeWG.Done()
 		feeInterval := time.Duration(rc.Cost.FeePolicyIntervalMS) * time.Millisecond
-		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, feeInterval, rc.Cost.PriorityTipWei); err != nil && !errors.Is(err, context.Canceled) {
+		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, feeInterval, rc.Cost.EthPerGasTarget, rc.Cost.PriorityTipWei); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("lifecycle: fee policy loop exited", "err", err)
 		}
 	}()

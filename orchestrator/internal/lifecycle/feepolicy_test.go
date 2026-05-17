@@ -15,9 +15,12 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
-// testTipWei is the default RunConfig priority tip the fee-policy tests assert
-// against (config.Defaults().Cost.PriorityTipWei — the historical 1 gwei).
-var testTipWei = config.Defaults().Cost.PriorityTipWei
+// testTipWei / testEthPerGas are the default RunConfig fee parameters the
+// fee-policy tests assert against (config.Defaults().Cost).
+var (
+	testTipWei    = config.Defaults().Cost.PriorityTipWei
+	testEthPerGas = config.Defaults().Cost.EthPerGasTarget
+)
 
 type fakeFetcher struct {
 	calls    atomic.Uint64
@@ -54,7 +57,7 @@ func TestFeePolicyLoopOneCallPerTick(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = runFeePolicyLoop(ctx, f, fctx, interval, testTipWei)
+		_ = runFeePolicyLoop(ctx, f, fctx, interval, testEthPerGas, testTipWei)
 		close(done)
 	}()
 
@@ -85,7 +88,7 @@ func TestFeePolicyLoopRateIndependentOfReaders(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = runFeePolicyLoop(ctx, f, fctx, interval, testTipWei)
+		_ = runFeePolicyLoop(ctx, f, fctx, interval, testEthPerGas, testTipWei)
 		close(done)
 	}()
 
@@ -129,7 +132,7 @@ func TestFeePolicyLoopSurvivesTransientError(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = runFeePolicyLoop(ctx, f, fctx, 15*time.Millisecond, testTipWei)
+		_ = runFeePolicyLoop(ctx, f, fctx, 15*time.Millisecond, testEthPerGas, testTipWei)
 		close(done)
 	}()
 
@@ -155,11 +158,15 @@ func TestFeePolicyLoopSurvivesTransientError(t *testing.T) {
 	}
 }
 
-func TestRefreshFeePolicyPrimesContext(t *testing.T) {
-	f := &fakeFetcher{baseFee: big.NewInt(7_000_000_000), gasLimit: 12_345_678}
+// TestRefreshFeePolicyFixedEthPerGas verifies the normal case: when base fee is
+// below the configured eth-per-gas target, maxFeePerGas is the fixed target —
+// not 2x base fee. The policy stays cheap and predictable.
+func TestRefreshFeePolicyFixedEthPerGas(t *testing.T) {
+	// Base fee 1 wei (far below the 1 gwei target) — target must dominate.
+	f := &fakeFetcher{baseFee: big.NewInt(1), gasLimit: 12_345_678}
 	fctx := &facade.Context{BaseAddress: make([]byte, 20)}
 
-	if _, err := refreshFeePolicy(context.Background(), f, fctx, testTipWei); err != nil {
+	if _, err := refreshFeePolicy(context.Background(), f, fctx, testEthPerGas, testTipWei); err != nil {
 		t.Fatalf("refreshFeePolicy: %v", err)
 	}
 
@@ -167,16 +174,33 @@ func TestRefreshFeePolicyPrimesContext(t *testing.T) {
 	if maxFee == nil || tip == nil {
 		t.Fatal("fee policy not set")
 	}
-	wantTip := big.NewInt(testTipWei)
-	if tip.Cmp(wantTip) != 0 {
-		t.Fatalf("tip = %s, want %s", tip, wantTip)
+	if tip.Cmp(big.NewInt(testTipWei)) != 0 {
+		t.Fatalf("tip = %s, want %d", tip, testTipWei)
 	}
-	wantMax := new(big.Int).Mul(f.baseFee, big.NewInt(2))
-	wantMax.Add(wantMax, wantTip)
-	if maxFee.Cmp(wantMax) != 0 {
-		t.Fatalf("maxFee = %s, want %s", maxFee, wantMax)
+	if maxFee.Cmp(big.NewInt(testEthPerGas)) != 0 {
+		t.Fatalf("maxFee = %s, want fixed target %d", maxFee, testEthPerGas)
 	}
 	if got := fctx.LoadBlockGasLimit(); got != f.gasLimit {
 		t.Fatalf("gas limit = %d, want %d", got, f.gasLimit)
+	}
+}
+
+// TestRefreshFeePolicyFloorsOnBaseFeeSpike verifies that when base fee spikes
+// above the eth-per-gas target, maxFeePerGas falls back to the baseFee+tip
+// floor so a tx can never be rejected for underpricing.
+func TestRefreshFeePolicyFloorsOnBaseFeeSpike(t *testing.T) {
+	// Base fee 7 gwei — far above the 1 gwei target.
+	spike := big.NewInt(7_000_000_000)
+	f := &fakeFetcher{baseFee: spike, gasLimit: 12_345_678}
+	fctx := &facade.Context{BaseAddress: make([]byte, 20)}
+
+	if _, err := refreshFeePolicy(context.Background(), f, fctx, testEthPerGas, testTipWei); err != nil {
+		t.Fatalf("refreshFeePolicy: %v", err)
+	}
+
+	maxFee, _ := fctx.LoadFeePolicy()
+	wantFloor := new(big.Int).Add(spike, big.NewInt(testTipWei))
+	if maxFee.Cmp(wantFloor) != 0 {
+		t.Fatalf("maxFee = %s, want baseFee+tip floor %s", maxFee, wantFloor)
 	}
 }

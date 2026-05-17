@@ -18,10 +18,17 @@ type headBlockFetcher interface {
 }
 
 // refreshFeePolicy fetches the latest head and writes the EIP-1559 fee policy
-// and block gas limit into the facade context. priorityTipWei is the resolved
-// RunConfig fixed priority tip. Returns the fetched header so startup callers
-// can use it for one-shot priming before launching the loop.
-func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, priorityTipWei int64) (*rpc.BlockHeader, error) {
+// and block gas limit into the facade context. ethPerGasTarget and
+// priorityTipWei are the resolved RunConfig fixed fee parameters. Returns the
+// fetched header so startup callers can use it for one-shot priming before
+// launching the loop.
+//
+// The fee policy is a fixed ETH-per-gas target — bloating stays cheap and
+// predictable rather than tracking 2x base fee. maxFeePerGas is the configured
+// target, floored at baseFee+tip so a base-fee spike above target can never
+// cause an underpriced-tx rejection. This is pure cost control; it is invisible
+// to verb selection.
+func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, ethPerGasTarget, priorityTipWei int64) (*rpc.BlockHeader, error) {
 	head, err := fetcher.BlockByNumber(ctx, -1)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: head for fee policy: %w", err)
@@ -31,8 +38,11 @@ func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 		baseFee = new(big.Int)
 	}
 	tip := big.NewInt(priorityTipWei)
-	maxFee := new(big.Int).Mul(baseFee, big.NewInt(2))
-	maxFee.Add(maxFee, tip)
+	maxFee := big.NewInt(ethPerGasTarget)
+	floor := new(big.Int).Add(baseFee, tip)
+	if floor.Cmp(maxFee) > 0 {
+		maxFee = floor
+	}
 	fctx.SetFeePolicy(maxFee, tip)
 	if head.GasLimit > 0 {
 		fctx.SetBlockGasLimit(head.GasLimit)
@@ -49,7 +59,7 @@ func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 // Exits when ctx is cancelled. RPC errors are logged at warn level and do not
 // terminate the loop — the previous policy stays in place until the next tick
 // succeeds.
-func runFeePolicyLoop(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, interval time.Duration, priorityTipWei int64) error {
+func runFeePolicyLoop(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, interval time.Duration, ethPerGasTarget, priorityTipWei int64) error {
 	if interval <= 0 {
 		interval = time.Second
 	}
@@ -61,7 +71,7 @@ func runFeePolicyLoop(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-tick.C:
-			if _, err := refreshFeePolicy(ctx, fetcher, fctx, priorityTipWei); err != nil {
+			if _, err := refreshFeePolicy(ctx, fetcher, fctx, ethPerGasTarget, priorityTipWei); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
