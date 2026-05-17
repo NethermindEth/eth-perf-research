@@ -324,6 +324,128 @@ func TestPickBytesPerGasTieBreakNeverOverridesGradient(t *testing.T) {
 	}
 }
 
+// TestPickExcludesContractIneligibleVerb is the regression test for the
+// verb-selection bug: a verb with the most attractive seed gradient must NOT
+// be selected when its contract dependency is undeployed. uniswap_swaps has a
+// storage-heavy F-row and would dominate the argmax, but with eligibility set
+// to only eoatx it must be excluded from the candidate set entirely.
+func TestPickExcludesContractIneligibleVerb(t *testing.T) {
+	verbs := []string{"eoatx", "uniswap_swaps"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			// uniswap_swaps gets the largest F-row on every axis so its raw
+			// gradient is the most attractive; only eligibility can keep it out.
+			"eoatx":         {"accounts": 8, "storage": 5, "code": 0},
+			"uniswap_swaps": {"accounts": 8, "storage": 220, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"eoatx": 1500, "uniswap_swaps": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.0) // ε=0 → deterministic argmax
+
+	// Only eoatx is contract-eligible; uniswap_swaps' router is not deployed.
+	s.SetEligibleVerbs([]string{"eoatx"})
+
+	tgt := makeTarget(10 * 1024 * 1024 * 1024)
+	for i := 0; i < 20; i++ {
+		s.BatchID = uint64(i)
+		plan := s.Pick(zeroObs(), tgt, 8*1024*1024, 8_000_000_000)
+		if plan.Verb != "eoatx" {
+			t.Fatalf("batch %d: verb = %q, want eoatx (ineligible verb must never be selected)", i, plan.Verb)
+		}
+		if w := plan.Mix["uniswap_swaps"]; w != 0 {
+			t.Fatalf("batch %d: ineligible verb has weight %.6f, want 0", i, w)
+		}
+	}
+}
+
+// TestPickSelectsVerbOnceDependencyDeployed verifies the eligibility gate is
+// not a permanent ban: the same verb becomes selectable once its contract is
+// marked deployed. This proves the gate keys off the deployed set, not a
+// hardcoded exclusion of uniswap_swaps.
+func TestPickSelectsVerbOnceDependencyDeployed(t *testing.T) {
+	verbs := []string{"eoatx", "uniswap_swaps"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"eoatx":         {"accounts": 8, "storage": 5, "code": 0},
+			"uniswap_swaps": {"accounts": 8, "storage": 220, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"eoatx": 1500, "uniswap_swaps": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.0)
+
+	// Storage far under-target so the storage-heavy uniswap_swaps is the clear
+	// gradient winner — it must be picked once its dependency is deployed.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.1, AxisStorage: 0.9, AxisCode: 0.0},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := zeroObs()
+
+	s.SetEligibleVerbs([]string{"eoatx", "uniswap_swaps"})
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan.Verb != "uniswap_swaps" {
+		t.Fatalf("verb = %q, want uniswap_swaps once its dependency is deployed", plan.Verb)
+	}
+	if w := plan.Mix["uniswap_swaps"]; w <= 0 {
+		t.Fatalf("eligible uniswap_swaps has weight %.6f, want > 0", w)
+	}
+}
+
+// TestPickR2KeepsOverTargetStorageVerbUnattractive is the R2 reproduction
+// test for the live scenario: accounts under-target, storage over-target, and
+// a verb with the live uniswap F-row [8,220,0]. R2 (per-axis anti-windup)
+// clamps the over-target storage axis's gradient contribution to zero, so a
+// storage-heavy verb must NOT out-score an account-driven verb purely because
+// the over-target storage axis is large. Asserting on Pick's Mix exercises R2
+// through the same path verb scoring uses.
+func TestPickR2KeepsOverTargetStorageVerbUnattractive(t *testing.T) {
+	// storageheavy mirrors the live uniswap_swaps seed F-row [8,220,0];
+	// accountverb only meaningfully grows the under-target accounts axis.
+	verbs := []string{"accountverb", "storageheavy"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"accountverb":  {"accounts": 160, "storage": 0, "code": 0},
+			"storageheavy": {"accounts": 8, "storage": 220, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"accountverb": 1500, "storageheavy": 1500},
+	}
+	var identity [32]byte
+
+	// accounts far under-target, storage far over-target — the live scenario.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.5, AxisStorage: 0.5, AxisCode: 0.0},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := &Observation{AccountTrieBytes: 1_000_000, StorageTrieBytes: 500_000_000}
+
+	// With R2 ON the over-target storage axis contributes no gradient, so
+	// storageheavy is scored only by its small accounts coefficient (8) vs
+	// accountverb's 160 — the under-target account verb must dominate.
+	s := newTestState(verbs, rf, identity, 0.0)
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan.Mix["storageheavy"] >= plan.Mix["accountverb"] {
+		t.Errorf("R2 broken: over-target storage-heavy verb weight=%.6f >= "+
+			"account-driven verb weight=%.6f — a satisfied axis still attracts",
+			plan.Mix["storageheavy"], plan.Mix["accountverb"])
+	}
+	if plan.Verb != "accountverb" {
+		t.Errorf("R2: selected verb=%q, want accountverb (under-target axis must win)", plan.Verb)
+	}
+
+	// Cross-check: with R2 OFF the over-target storage axis DOES contribute, so
+	// storageheavy keeps more weight. This confirms the test exercises R2
+	// rather than passing trivially on the F-row asymmetry alone.
+	off := newTestState(verbs, rf, identity, 0.0)
+	off.cfg.Control.AntiWindupEnabled = false
+	planOff := off.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if planOff.Mix["storageheavy"] <= plan.Mix["storageheavy"] {
+		t.Errorf("R2 inert: storage-heavy weight with anti-windup off=%.6f "+
+			"is not larger than with it on=%.6f", planOff.Mix["storageheavy"], plan.Mix["storageheavy"])
+	}
+}
+
 // TestComputeGasBasedMaxTable spot-checks the gas-cap formula for the verbs
 // most likely to hit the ceiling.
 func TestComputeGasBasedMaxTable(t *testing.T) {
