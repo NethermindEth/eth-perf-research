@@ -79,6 +79,10 @@ type runYAML struct {
 	MetricsAddr            *string `json:"metrics_addr"`
 	TargetWatchDebounceMS  *int64  `json:"target_watch_debounce_ms"`
 	ContractDeployGas      *uint64 `json:"contract_deploy_gas"`
+
+	ReconnectMaxWaitS         *int64 `json:"reconnect_max_wait_s"`
+	ReconnectBackoffInitialMS *int64 `json:"reconnect_backoff_initial_ms"`
+	ReconnectBackoffMaxMS     *int64 `json:"reconnect_backoff_max_ms"`
 }
 
 // Load resolves a RunConfig for the run. Precedence, low to high:
@@ -175,6 +179,9 @@ func applyYAML(cfg *RunConfig, yf *yamlFile) {
 		setStr(&cfg.Run.MetricsAddr, r.MetricsAddr)
 		setI64(&cfg.Run.TargetWatchDebounceMS, r.TargetWatchDebounceMS)
 		setU64(&cfg.Run.ContractDeployGas, r.ContractDeployGas)
+		setI64(&cfg.Run.ReconnectMaxWaitS, r.ReconnectMaxWaitS)
+		setI64(&cfg.Run.ReconnectBackoffInitialMS, r.ReconnectBackoffInitialMS)
+		setI64(&cfg.Run.ReconnectBackoffMaxMS, r.ReconnectBackoffMaxMS)
 	}
 }
 
@@ -424,6 +431,16 @@ func (c RunConfig) validate() error {
 	}
 	if r.ContractDeployGas == 0 {
 		return rangeErr("run.contract_deploy_gas", 0, "> 0")
+	}
+	if r.ReconnectMaxWaitS <= 0 {
+		return rangeErr("run.reconnect_max_wait_s", float64(r.ReconnectMaxWaitS), "> 0")
+	}
+	if r.ReconnectBackoffInitialMS <= 0 {
+		return rangeErr("run.reconnect_backoff_initial_ms", float64(r.ReconnectBackoffInitialMS), "> 0")
+	}
+	if r.ReconnectBackoffMaxMS < r.ReconnectBackoffInitialMS {
+		return fmt.Errorf("config: run.reconnect_backoff_max_ms (%d) must not be below run.reconnect_backoff_initial_ms (%d)",
+			r.ReconnectBackoffMaxMS, r.ReconnectBackoffInitialMS)
 	}
 	return nil
 }

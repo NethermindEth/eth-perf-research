@@ -179,7 +179,14 @@ func waitForValidSensor(ctx context.Context, sens *sensor.Sensor, pollGap, logEv
 			return snap, nil
 		}
 		if time.Since(lastLog) >= logEvery {
-			slog.Warn("lifecycle: sensor returns zero stats; waiting for state-comp plugin", "err", err)
+			if isTransportError(err) {
+				// NM is unreachable mid-restart: tolerate the gap and keep
+				// polling rather than failing the run — the sensor resumes
+				// once NM answers again.
+				slog.Warn("lifecycle: sensor poll hit transport error — NM unreachable, will keep polling", "err", err)
+			} else {
+				slog.Warn("lifecycle: sensor returns zero stats; waiting for state-comp plugin", "err", err)
+			}
 			lastLog = time.Now()
 		}
 		select {

@@ -107,6 +107,15 @@ func TestDefaultsMatchHistoricalConstants(t *testing.T) {
 	if r.ContractDeployGas != 2_000_000 {
 		t.Errorf("contract_deploy_gas = %d, want 2000000", r.ContractDeployGas)
 	}
+	if r.ReconnectMaxWaitS != 1800 {
+		t.Errorf("reconnect_max_wait_s = %d, want 1800", r.ReconnectMaxWaitS)
+	}
+	if r.ReconnectBackoffInitialMS != 500 {
+		t.Errorf("reconnect_backoff_initial_ms = %d, want 500", r.ReconnectBackoffInitialMS)
+	}
+	if r.ReconnectBackoffMaxMS != 15000 {
+		t.Errorf("reconnect_backoff_max_ms = %d, want 15000", r.ReconnectBackoffMaxMS)
+	}
 }
 
 // TestLoadOverlaysYAMLBlock verifies a control:/cost:/run: block in target.yaml

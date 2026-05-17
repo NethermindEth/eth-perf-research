@@ -212,6 +212,29 @@ func (p *pipeline) committer(loopCtx context.Context, cancel context.CancelFunc,
 				cancel()
 				continue
 			}
+			// A transport error means NM is unreachable (restart / redeploy),
+			// not a logical failure. Enter the reconnect-wait loop instead of
+			// terminating; the controller State, journal and address/nonce
+			// cursor stay in memory, so on reconnect we just move to the next
+			// batch. Only a reconnect timeout terminates the run.
+			if isTransportError(err) {
+				slog.Warn("lifecycle: commit hit transport error — NM unreachable",
+					"batch_id", db.batchID, "err", err)
+				rcRun := deps.cfg.Run
+				if rerr := awaitReconnect(loopCtx, deps.rpc,
+					time.Duration(rcRun.ReconnectMaxWaitS)*time.Second,
+					time.Duration(rcRun.ReconnectBackoffInitialMS)*time.Millisecond,
+					time.Duration(rcRun.ReconnectBackoffMaxMS)*time.Millisecond); rerr != nil {
+					if loopCtx.Err() != nil {
+						p.setTerm(terminationSignal)
+					} else {
+						p.setTerm(terminationNMUnreachable)
+					}
+					cancel()
+					continue
+				}
+				continue
+			}
 			if isPartialAcceptanceErr(err) {
 				expected, included := parsePartialAcceptance(err)
 				slog.Warn("lifecycle: commit partial-acceptance, skipping batch",

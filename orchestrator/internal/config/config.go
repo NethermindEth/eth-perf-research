@@ -131,6 +131,16 @@ type Run struct {
 	TargetWatchDebounceMS int64 `json:"target_watch_debounce_ms"`
 	// ContractDeployGas is the gas limit for each bootstrap CREATE tx.
 	ContractDeployGas uint64 `json:"contract_deploy_gas"`
+
+	// ReconnectMaxWaitS bounds the total time the run keeps retrying a probe
+	// endpoint while NM is unreachable before terminating with
+	// nm_unreachable_timeout. An NM redeploy + bootstrap scan can take ~15-20
+	// minutes, so the default (1800s) leaves headroom.
+	ReconnectMaxWaitS int64 `json:"reconnect_max_wait_s"`
+	// ReconnectBackoffInitialMS is the first reconnect-probe backoff delay, in ms.
+	ReconnectBackoffInitialMS int64 `json:"reconnect_backoff_initial_ms"`
+	// ReconnectBackoffMaxMS caps the exponential reconnect-probe backoff, in ms.
+	ReconnectBackoffMaxMS int64 `json:"reconnect_backoff_max_ms"`
 }
 
 // RunConfig is the single resolved configuration for an orchestrator run.
@@ -216,6 +226,9 @@ func Defaults() RunConfig {
 			MetricsAddr:            ":9101",
 			TargetWatchDebounceMS:  100,
 			ContractDeployGas:      2_000_000,
+			ReconnectMaxWaitS:         1800,
+			ReconnectBackoffInitialMS: 500,
+			ReconnectBackoffMaxMS:     15000,
 		},
 	}
 }
