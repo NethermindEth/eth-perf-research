@@ -293,7 +293,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 	}
 
-	topIndex := s.selectVerbIndex(selectFrom)
+	topIndex := s.selectVerbIndex(verbs, selectFrom)
 	topVerb := verbs[topIndex]
 
 	if s.debugPick {
@@ -443,13 +443,16 @@ func (s *State) logPickDebug(
 // Seed: sha256(chainIdentity || batchID_big_endian).
 // Python: seed_input = f"{chain_identity_hash}:{target_sha256}:{batch_id}"
 // We encode the same components in binary for determinism.
-func (s *State) selectVerbIndex(weights []float64) int {
+//
+// The exploit (argmax) branch is tie-broken by BytesPerGas (Change 4); the
+// stochastic explore branch is left untouched so exploration stays unbiased.
+func (s *State) selectVerbIndex(verbs []string, weights []float64) int {
 	if s.Epsilon <= 0 {
-		return argmaxFloats(weights)
+		return s.argmaxTieBroken(verbs, weights)
 	}
 	tot := sumFloats(weights)
 	if tot <= 0 || math.IsInf(tot, 0) || math.IsNaN(tot) {
-		return argmaxFloats(weights)
+		return s.argmaxTieBroken(verbs, weights)
 	}
 
 	h := sha256.New()
@@ -464,7 +467,7 @@ func (s *State) selectVerbIndex(weights []float64) int {
 	rng := rand.New(rand.NewPCG(seed0, seed1))
 
 	if rng.Float64() >= s.Epsilon {
-		return argmaxFloats(weights)
+		return s.argmaxTieBroken(verbs, weights)
 	}
 	// Weighted sample without normalising (weights already sum to ~1).
 	r := rng.Float64() * tot
@@ -476,6 +479,48 @@ func (s *State) selectVerbIndex(weights []float64) int {
 		}
 	}
 	return len(weights) - 1
+}
+
+// argmaxTieBroken picks the highest-weight verb, breaking ties by BytesPerGas
+// (Change 4 / design-v3 §B). Verbs whose selection weight is within
+// ToleranceFloor of the maximum are deemed gradient-equivalent; among them the
+// verb with the higher measured BytesPerGas is preferred — more state growth
+// per gas spent is cheaper bloating. This NEVER overrides the gradient ranking:
+// a verb outside the equivalence band can never be chosen over the argmax. With
+// the tie-break gated off it degrades to a plain argmax.
+func (s *State) argmaxTieBroken(verbs []string, weights []float64) int {
+	best := argmaxFloats(weights)
+	if !s.cfg.Control.BytesPerGasTieBreak || len(verbs) != len(weights) {
+		return best
+	}
+	band := s.cfg.Control.ToleranceFloor
+	pick := best
+	bestBPG := s.bytesPerGasFor(verbs[best])
+	for i, w := range weights {
+		if i == best {
+			continue
+		}
+		if weights[best]-w > band {
+			continue // outside the equivalence band — gradient ranks it strictly lower
+		}
+		if bpg := s.bytesPerGasFor(verbs[i]); bpg > bestBPG {
+			bestBPG = bpg
+			pick = i
+		}
+	}
+	return pick
+}
+
+// bytesPerGasFor returns the learned BytesPerGas EWMA for verb, or 0 when the
+// verb has no warm stats yet. A cold verb's 0 means it cannot win a tie-break
+// over a verb with a measured value — correct, since an unmeasured verb has no
+// efficiency evidence.
+func (s *State) bytesPerGasFor(verb string) float64 {
+	vs := s.GetVerbStats(verb)
+	if vs == nil || vs.BytesPerGas == nil {
+		return 0
+	}
+	return vs.BytesPerGas.Value()
 }
 
 // buildFMatrix builds a [3][n] matrix: rows = axes, cols = verbs.

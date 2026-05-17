@@ -257,6 +257,73 @@ func TestPickR2AntiWindupZeroesOverTargetAxisGradient(t *testing.T) {
 	}
 }
 
+// TestPickBytesPerGasTieBreakPrefersEfficientVerb is the regression test for
+// Change 4: among verbs the gradient deems equivalent (selection weights
+// within ToleranceFloor), Pick must select the one with the higher learned
+// BytesPerGas — the cheaper bloating choice.
+func TestPickBytesPerGasTieBreakPrefersEfficientVerb(t *testing.T) {
+	// Two verbs with IDENTICAL F-rows → identical gradient → equal weights.
+	verbs := []string{"cheapfiller", "pricyfiller"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"cheapfiller": {"accounts": 100, "storage": 100, "code": 100},
+			"pricyfiller": {"accounts": 100, "storage": 100, "code": 100},
+		},
+		AvgTxRLP: map[string]float64{"cheapfiller": 1500, "pricyfiller": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.0) // ε=0 → deterministic argmax
+
+	// Warm BytesPerGas: cheapfiller emits far more bytes per gas than pricyfiller.
+	for i := 0; i < int(testVerbStatsColdStartN)+5; i++ {
+		s.UpdateVerbStats("cheapfiller", 100_000, 1, 5000.0) // 0.05 bytes/gas
+		s.UpdateVerbStats("pricyfiller", 100_000, 1, 500.0)  // 0.005 bytes/gas
+	}
+
+	plan := s.Pick(zeroObs(), makeTarget(10*1024*1024*1024), 8*1024*1024, 8_000_000_000)
+	if plan.Verb != "cheapfiller" {
+		t.Errorf("tie-break: verb = %q, want cheapfiller (higher BytesPerGas)", plan.Verb)
+	}
+}
+
+// TestPickBytesPerGasTieBreakNeverOverridesGradient verifies the tie-break is
+// strictly a tie-breaker: a verb the gradient ranks clearly higher must win
+// even if a low-BytesPerGas verb, never the reverse.
+func TestPickBytesPerGasTieBreakNeverOverridesGradient(t *testing.T) {
+	// gradverb is the clear gradient winner (only grower of the under-target
+	// axis); effverb has a far higher BytesPerGas but a gradient-inferior F-row.
+	verbs := []string{"gradverb", "effverb"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"gradverb": {"accounts": 1500, "storage": 0, "code": 0},
+			"effverb":  {"accounts": 0, "storage": 1500, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"gradverb": 1500, "effverb": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.0)
+
+	// effverb has a hugely better BytesPerGas — must still NOT be chosen.
+	for i := 0; i < int(testVerbStatsColdStartN)+5; i++ {
+		s.UpdateVerbStats("gradverb", 100_000, 1, 100.0)     // 0.001 bytes/gas
+		s.UpdateVerbStats("effverb", 100_000, 1, 100_000.0)  // 1.0 bytes/gas
+	}
+
+	// accounts far under-target, storage far over-target → gradient strongly
+	// favours gradverb; the two weights are NOT within ToleranceFloor.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.5, AxisStorage: 0.5, AxisCode: 0.0},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := &Observation{AccountTrieBytes: 1_000_000, StorageTrieBytes: 500_000_000}
+
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan.Verb != "gradverb" {
+		t.Errorf("tie-break overrode gradient: verb = %q, want gradverb "+
+			"(gradient-superior verb must win despite lower BytesPerGas)", plan.Verb)
+	}
+}
+
 // TestComputeGasBasedMaxTable spot-checks the gas-cap formula for the verbs
 // most likely to hit the ceiling.
 func TestComputeGasBasedMaxTable(t *testing.T) {
