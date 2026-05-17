@@ -48,10 +48,11 @@ func (e *EWMA) Value() float64 { return e.mean }
 func (e *EWMA) Samples() uint64 { return e.n }
 
 // VerbStats tracks per-verb runtime measurements used by Pick for gas-aware
-// sizing once the cold-start window has passed.
+// sizing once the cold-start window has passed. Average tx size is tracked by
+// the separate State.AvgTxRLP EWMA (design-v3 §2.6, batch-byte sizing) — this
+// struct does not duplicate it.
 type VerbStats struct {
 	GasPerTx    *EWMA
-	BytesPerTx  *EWMA
 	BytesPerGas *EWMA
 	Samples     uint64
 }
@@ -59,7 +60,6 @@ type VerbStats struct {
 func newVerbStats(alpha float64, coldStartN uint64) *VerbStats {
 	return &VerbStats{
 		GasPerTx:    NewEWMA(alpha, coldStartN),
-		BytesPerTx:  NewEWMA(alpha, coldStartN),
 		BytesPerGas: NewEWMA(alpha, coldStartN),
 	}
 }
@@ -67,8 +67,9 @@ func newVerbStats(alpha float64, coldStartN uint64) *VerbStats {
 // UpdateVerbStats folds one batch's measurements into the running EWMAs.
 // gasUsed is the block's total gas consumption attributed to this batch;
 // txCount is the number of txs actually included; bytesPerTx is the per-tx
-// dispatched RLP byte average (sumF). Calls with txCount == 0 or gasUsed == 0
-// are ignored so a no-op batch can't pollute the EWMAs.
+// dispatched RLP byte average (sumF), used only to derive BytesPerGas. Calls
+// with txCount == 0 or gasUsed == 0 are ignored so a no-op batch can't pollute
+// the EWMAs.
 func (s *State) UpdateVerbStats(verb string, gasUsed, txCount uint64, bytesPerTx float64) {
 	if txCount == 0 || gasUsed == 0 {
 		return
@@ -96,7 +97,6 @@ func (s *State) UpdateVerbStats(verb string, gasUsed, txCount uint64, bytesPerTx
 		s.VerbStats[verb] = vs
 	}
 	vs.GasPerTx.Update(gasPerTx)
-	vs.BytesPerTx.Update(bytesPerTx)
 	vs.BytesPerGas.Update(bytesPerGas)
 	vs.Samples = vs.GasPerTx.Samples()
 }
