@@ -27,7 +27,6 @@ func newTestState(verbs []string, ref *referencef.ReferenceF, identity [32]byte,
 var (
 	testCoeffBound          = config.Defaults().Control.CoeffBound
 	testGasCapFraction      = config.Defaults().Control.GasCapFraction
-	testFloorFraction       = config.Defaults().Control.RatioFloorFraction
 	testBaseGasPerVerb      = config.Defaults().Control.BaseGasPerVerb
 	testVerbStatsColdStartN = config.Defaults().Control.VerbStatsColdStartN
 )

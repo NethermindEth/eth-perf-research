@@ -37,8 +37,6 @@ func TestDefaultsMatchHistoricalConstants(t *testing.T) {
 	checkI(t, "overshoot_max_trips", ck.OvershootMaxTrips, 3)
 	checkI(t, "overshoot_grace", ck.OvershootGrace, 5)
 	checkF(t, "residual_norm_floor", ck.ResidualNormFloor, 1024.0)
-	checkF(t, "ratio_tolerance", ck.RatioTolerance, 0.02)
-	checkF(t, "ratio_floor_fraction", ck.RatioFloorFraction, 0.10)
 	checkF(t, "default_avg_tx_rlp", ck.DefaultAvgTxRLP, 1500.0)
 	checkF(t, "default_sigma", ck.DefaultSigma, 1.0)
 	checkF(t, "avg_tx_rlp_decay_new", ck.AvgTxRLPDecayNew, 0.3)

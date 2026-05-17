@@ -47,8 +47,6 @@ type controlYAML struct {
 	OvershootMaxTrips     *int              `json:"overshoot_max_trips"`
 	OvershootGrace        *int              `json:"overshoot_grace"`
 	ResidualNormFloor     *float64          `json:"residual_norm_floor"`
-	RatioTolerance        *float64          `json:"ratio_tolerance"`
-	RatioFloorFraction    *float64          `json:"ratio_floor_fraction"`
 	DefaultAvgTxRLP       *float64          `json:"default_avg_tx_rlp"`
 	DefaultSigma          *float64          `json:"default_sigma"`
 	AvgTxRLPDecayNew      *float64          `json:"avg_tx_rlp_decay_new"`
@@ -138,8 +136,6 @@ func applyYAML(cfg *RunConfig, yf *yamlFile) {
 		setI(&cfg.Control.OvershootMaxTrips, c.OvershootMaxTrips)
 		setI(&cfg.Control.OvershootGrace, c.OvershootGrace)
 		setF(&cfg.Control.ResidualNormFloor, c.ResidualNormFloor)
-		setF(&cfg.Control.RatioTolerance, c.RatioTolerance)
-		setF(&cfg.Control.RatioFloorFraction, c.RatioFloorFraction)
 		setF(&cfg.Control.DefaultAvgTxRLP, c.DefaultAvgTxRLP)
 		setF(&cfg.Control.DefaultSigma, c.DefaultSigma)
 		setF(&cfg.Control.AvgTxRLPDecayNew, c.AvgTxRLPDecayNew)
@@ -339,12 +335,6 @@ func (c RunConfig) validate() error {
 	}
 	if ck.ResidualNormFloor <= 0 {
 		return rangeErr("control.residual_norm_floor", ck.ResidualNormFloor, "> 0")
-	}
-	if ck.RatioTolerance < 0 {
-		return rangeErr("control.ratio_tolerance", ck.RatioTolerance, ">= 0")
-	}
-	if !inUnit(ck.RatioFloorFraction) {
-		return rangeErr("control.ratio_floor_fraction", ck.RatioFloorFraction, "[0, 1]")
 	}
 	if ck.DefaultAvgTxRLP <= 0 {
 		return rangeErr("control.default_avg_tx_rlp", ck.DefaultAvgTxRLP, "> 0")

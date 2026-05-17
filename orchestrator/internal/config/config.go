@@ -59,11 +59,6 @@ type Control struct {
 
 	// ResidualNormFloor is the denominator floor for the overshoot ratio.
 	ResidualNormFloor float64 `json:"residual_norm_floor"`
-	// RatioTolerance is the per-axis cumulative-ratio deviation RatioFlowCap
-	// allows before throttling; RatioFloorFraction is its per-axis floor so the
-	// cap never collapses to zero.
-	RatioTolerance     float64 `json:"ratio_tolerance"`
-	RatioFloorFraction float64 `json:"ratio_floor_fraction"`
 	// DefaultAvgTxRLP / DefaultSigma seed AvgTxRLP and the σ matrix.
 	DefaultAvgTxRLP float64 `json:"default_avg_tx_rlp"`
 	DefaultSigma    float64 `json:"default_sigma"`
@@ -178,8 +173,6 @@ func Defaults() RunConfig {
 			OvershootMaxTrips:     3,
 			OvershootGrace:        5,
 			ResidualNormFloor:     1024.0,
-			RatioTolerance:        0.02,
-			RatioFloorFraction:    0.10,
 			DefaultAvgTxRLP:       1500.0,
 			DefaultSigma:          1.0,
 			AvgTxRLPDecayNew:      0.3,
