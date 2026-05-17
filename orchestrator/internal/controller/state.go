@@ -99,6 +99,14 @@ type State struct {
 	// pre-eligibility behaviour for tests and any caller that never calls
 	// SetEligibleVerbs.
 	contractEligible map[string]bool
+
+	// refF retains the reference-F seed (per-verb expected per-axis effect
+	// coefficients) NewState was constructed from. NewState folds the seed into
+	// the live F matrix, where online learning then overwrites it — so once a
+	// verb has learned, F no longer reflects the seed. The exploration floor
+	// needs the *original* expected effect of a never-learned verb to decide
+	// which axes it would grow, so the seed is kept here unmodified.
+	refF *referencef.ReferenceF
 }
 
 // SetEligibleVerbs installs the contract-eligible verb set the lifecycle
@@ -184,6 +192,7 @@ func NewState(cfg config.RunConfig, verbs []string, ref *referencef.ReferenceF, 
 		lastResidualL2: 0,
 		debugPick:      config.EnvTruthy("ORCH_DEBUG_PICK"),
 		cfg:            cfg,
+		refF:           ref,
 	}
 }
 

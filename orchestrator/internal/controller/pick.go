@@ -307,6 +307,15 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	// F-row. Once learned (F-row non-zero) the floor no longer applies and the
 	// verb competes purely on its gradient merit — this protects the
 	// exploration branch the design already has without biasing the verb mix.
+	//
+	// The floor is gated on the over-paced-axis exclusion: a never-learned
+	// verb whose gradient was deliberately zeroed because every axis it grows
+	// is already over its progress-scaled target must STAY zeroed. "Verb never
+	// tried because the gradient is flat" (legitimate cold-start trap — rescue
+	// it) and "verb zeroed because its axis is over-paced" (respect it) are
+	// distinguished via the verb's reference-F seed: the floor lifts verb i
+	// only when at least one axis it is seeded to grow is still under-paced
+	// (pre-clip residual desired−current > 0).
 	if anyFeasible && s.Epsilon > 0 && n > 0 {
 		epsilonFloor := s.Epsilon / float64(n)
 		for i, v := range verbs {
@@ -317,9 +326,13 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 				continue // contract-ineligible — never explore a structurally dead verb
 			}
 			fRow := s.axisVec(v)
-			if fRow[0]+fRow[1]+fRow[2] == 0 && selectFrom[i] < epsilonFloor {
-				selectFrom[i] = epsilonFloor
+			if fRow[0]+fRow[1]+fRow[2] != 0 || selectFrom[i] >= epsilonFloor {
+				continue // already learned, or already at/above the floor
 			}
+			if !floorHelpsUnderPacedAxis(s.referenceAxisVec(v), residual) {
+				continue // every axis this verb grows is over-paced — respect the gradient's exclusion
+			}
+			selectFrom[i] = epsilonFloor
 		}
 	}
 
@@ -431,18 +444,25 @@ func (s *State) logPickDebug(
 
 		// Classify why (if at all) this verb's final selection weight is zero.
 		// Stages, checked in pipeline order:
-		//   projection-clamped  — ProjectSimplex zeroed xProj[j].
-		//   cap-zeroed          — per-verb cap < 1 tx (over-served axis).
-		//   feasibility-filtered— selectFrom[j] still 0 after the feasibility
-		//                         filter and exploration floor.
+		//   projection-clamped     — ProjectSimplex zeroed xProj[j].
+		//   cap-zeroed             — per-verb cap < 1 tx (over-served axis).
+		//   floor-gated-overpaced  — a never-learned verb the exploration floor
+		//                            would lift, but every axis it is seeded to
+		//                            grow is over-paced, so the floor's
+		//                            over-paced-axis gate kept it zeroed.
+		//   feasibility-filtered   — selectFrom[j] still 0 after the feasibility
+		//                            filter and exploration floor.
 		zeroed := selectFrom[j] <= 0
 		stage := "none"
 		if zeroed {
+			neverLearned := fSum == 0
 			switch {
 			case xProj[j] <= 0:
 				stage = "projection-clamped"
 			case maxNTxs[j] < 1.0:
 				stage = "cap-zeroed"
+			case neverLearned && !floorHelpsUnderPacedAxis(s.referenceAxisVec(v), residual):
+				stage = "floor-gated-overpaced"
 			default:
 				stage = "feasibility-filtered"
 			}
@@ -584,6 +604,26 @@ func (s *State) axisVec(verb string) [3]float64 {
 	return out
 }
 
+// referenceAxisVec returns the [3]float64 reference-F seed row for a verb,
+// ordered by Axes. Unlike axisVec it reads the immutable seed (refF), not the
+// live F matrix that online learning overwrites — so for a never-learned verb
+// it still reports the verb's expected per-axis effect. Returns all-zero when
+// no seed is available (refF nil, or the verb missing from it).
+func (s *State) referenceAxisVec(verb string) [3]float64 {
+	var out [3]float64
+	if s.refF == nil {
+		return out
+	}
+	row, ok := s.refF.Verbs[verb]
+	if !ok {
+		return out
+	}
+	for i, ax := range Axes {
+		out[i] = row[string(ax)]
+	}
+	return out
+}
+
 // obsToVec converts an Observation to an axis-ordered float64 triple.
 func obsToVec(obs *Observation) [3]float64 {
 	return [3]float64{
@@ -614,6 +654,23 @@ func l2NormSlice(v []float64) float64 {
 
 func l2Norm3(v [3]float64) float64 {
 	return math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
+}
+
+// floorHelpsUnderPacedAxis reports whether lifting a never-learned verb by the
+// exploration floor can serve an under-paced axis. refRow is the verb's
+// reference-F seed effect [accounts, storage, code]; residual is the pre-clip
+// per-axis residual (desired − current) — an axis is under-paced iff its
+// residual is > 0. Returns true iff at least one axis the verb is seeded to
+// grow (refRow[ax] > 0) is under-paced. When the seed row is all-zero this
+// returns false, which is correct: a verb with no expected effect cannot help
+// any axis and there is nothing to explore toward.
+func floorHelpsUnderPacedAxis(refRow, residual [3]float64) bool {
+	for ax := 0; ax < 3; ax++ {
+		if refRow[ax] > 0 && residual[ax] > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func sumFloats(v []float64) float64 {

@@ -446,6 +446,172 @@ func TestPickR2KeepsOverTargetStorageVerbUnattractive(t *testing.T) {
 	}
 }
 
+// zeroLearnedFRow clears a verb's live F matrix row to all-zero, simulating a
+// never-learned verb whose reference-F seed (s.refF) is left intact. NewState
+// folds the seed into both F and refF; the exploration floor keys "never
+// learned" off the live F-row summing to zero, so a test that needs that state
+// must zero F explicitly while keeping refF as the seed of record.
+func zeroLearnedFRow(s *State, verb string) {
+	for _, ax := range Axes {
+		s.F[verb][ax] = 0
+	}
+}
+
+// TestPickExplorationFloorSkipsOverPacedNeverLearnedVerb is the regression test
+// for the exploration-floor over-paced-axis gate. A never-learned storage-only
+// verb whose gradient was deliberately zeroed because storage is over-paced
+// (residual <= 0) must STAY zeroed — the floor must not resurrect it.
+//
+// accountverb is left learned (non-zero live F-row) so the projected gradient
+// pushes all simplex weight onto it and zeroes storagespammer; only the
+// exploration floor could lift storagespammer back, and the gate must stop it.
+func TestPickExplorationFloorSkipsOverPacedNeverLearnedVerb(t *testing.T) {
+	verbs := []string{"accountverb", "storagespammer"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"accountverb":    {"accounts": 160, "storage": 0, "code": 0},
+			"storagespammer": {"accounts": 0, "storage": 191, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"accountverb": 1500, "storagespammer": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.5) // ε > 0 so the floor is active
+	// storagespammer is never-learned (live F-row all-zero, refF seed retained);
+	// accountverb keeps its learned seed so the gradient has something to push.
+	zeroLearnedFRow(s, "storagespammer")
+
+	// accounts far under-target, storage far over-target — storage residual <= 0.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.5, AxisStorage: 0.5, AxisCode: 0.0},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := &Observation{AccountTrieBytes: 1_000_000, StorageTrieBytes: 500_000_000}
+
+	// Over many batch IDs the ε-greedy branch must NEVER reach storagespammer:
+	// a zeroed selection weight is unreachable in selectVerbIndex, and the gate
+	// must keep the over-paced never-learned verb at zero.
+	for batchID := uint64(0); batchID < 300; batchID++ {
+		s.BatchID = batchID
+		plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+		if plan.Verb == "storagespammer" {
+			t.Fatalf("batch %d: exploration floor resurrected an over-paced "+
+				"never-learned verb — selected=%q, want accountverb", batchID, plan.Verb)
+		}
+	}
+}
+
+// TestPickExplorationFloorLiftsUnderPacedNeverLearnedVerb verifies the gate is
+// not a blanket suppression: the SAME never-learned storage verb IS floored
+// when storage is under-paced (residual > 0), so the ε-greedy branch can still
+// sample it and learn its F-row.
+func TestPickExplorationFloorLiftsUnderPacedNeverLearnedVerb(t *testing.T) {
+	verbs := []string{"accountverb", "storagespammer"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"accountverb":    {"accounts": 160, "storage": 0, "code": 0},
+			"storagespammer": {"accounts": 0, "storage": 191, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"accountverb": 1500, "storagespammer": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.5)
+	zeroLearnedFRow(s, "accountverb")
+	zeroLearnedFRow(s, "storagespammer")
+
+	// Both axes under-target (zero observation, positive byte targets) → both
+	// residuals > 0. The storage verb must be lifted to the epsilon floor.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.5, AxisStorage: 0.5, AxisCode: 0.0},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := zeroObs()
+
+	// Drive Pick directly is opaque (selectFrom is internal); assert via the
+	// same selectFrom path Pick uses. With both verbs floored to ε/n and ε>0,
+	// the ε-greedy branch can sample either; over many batch IDs the storage
+	// verb must be reachable. A zeroed verb is unreachable in selectVerbIndex,
+	// so any selection of it proves the floor lifted it.
+	storageSelected := false
+	for batchID := uint64(0); batchID < 200; batchID++ {
+		s.BatchID = batchID
+		plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+		if plan.Verb == "storagespammer" {
+			storageSelected = true
+			break
+		}
+	}
+	if !storageSelected {
+		t.Fatalf("under-paced never-learned storage verb was never selected — "+
+			"exploration floor failed to lift it (cold-start escape broken)")
+	}
+}
+
+// TestPickExplorationFloorPreservesColdStartEscape verifies the gate does not
+// break the original cold-start-trap escape: a never-learned verb whose seed
+// effect lands on an under-paced axis is still floored and reachable.
+func TestPickExplorationFloorPreservesColdStartEscape(t *testing.T) {
+	// codeverb is the sole grower of the code axis and is never-learned.
+	verbs := []string{"accountverb", "codeverb"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"accountverb": {"accounts": 160, "storage": 0, "code": 0},
+			"codeverb":    {"accounts": 0, "storage": 0, "code": 2200},
+		},
+		AvgTxRLP: map[string]float64{"accountverb": 1500, "codeverb": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.5)
+	zeroLearnedFRow(s, "accountverb")
+	zeroLearnedFRow(s, "codeverb")
+
+	// code axis under-target (zero code observed, positive code share) — the
+	// never-learned codeverb must escape the cold-start trap and be selectable.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.5, AxisStorage: 0.0, AxisCode: 0.5},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := zeroObs()
+
+	codeSelected := false
+	for batchID := uint64(0); batchID < 200; batchID++ {
+		s.BatchID = batchID
+		plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+		if plan.Verb == "codeverb" {
+			codeSelected = true
+			break
+		}
+	}
+	if !codeSelected {
+		t.Fatalf("cold-start escape broken: never-learned under-paced codeverb "+
+			"was never selected — the exploration floor must still lift it")
+	}
+}
+
+// TestFloorHelpsUnderPacedAxis unit-tests the gate predicate directly.
+func TestFloorHelpsUnderPacedAxis(t *testing.T) {
+	cases := []struct {
+		name     string
+		refRow   [3]float64
+		residual [3]float64
+		want     bool
+	}{
+		{"storage verb, storage over-paced", [3]float64{0, 191, 0}, [3]float64{100, -50, 0}, false},
+		{"storage verb, storage under-paced", [3]float64{0, 191, 0}, [3]float64{-10, 50, 0}, true},
+		{"multi-axis verb, one axis under-paced", [3]float64{160, 10, 0}, [3]float64{50, -10, 0}, true},
+		{"verb grows only over-paced axes", [3]float64{160, 10, 0}, [3]float64{-1, -1, 5}, false},
+		{"all-zero seed row never helps", [3]float64{0, 0, 0}, [3]float64{5, 5, 5}, false},
+		{"residual exactly zero is not under-paced", [3]float64{0, 191, 0}, [3]float64{0, 0, 0}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := floorHelpsUnderPacedAxis(tc.refRow, tc.residual); got != tc.want {
+				t.Errorf("floorHelpsUnderPacedAxis(%v, %v) = %v, want %v",
+					tc.refRow, tc.residual, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestComputeGasBasedMaxTable spot-checks the gas-cap formula for the verbs
 // most likely to hit the ceiling.
 func TestComputeGasBasedMaxTable(t *testing.T) {
