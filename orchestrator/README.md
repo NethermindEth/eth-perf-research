@@ -59,7 +59,7 @@ internal/
   controller/             pick_next_batch + apply_observation
   mathx/                  Michelot simplex + tanh-saturated α
   facade/                 dispatcher: native verb builder → signer
-  verbs/                  native Go transaction builders (13 verbs)
+  verbs/                  native Go transaction builders (10 verbs)
   signer/                 in-process ECDSA via go-ethereum
   rpc/                    JSON-RPC client + JWT round-tripper
   sensor/                 statecomp_get poller
@@ -68,7 +68,6 @@ internal/
   manifest/               run-manifest.json
   target/                 YAML loader + fsnotify watcher
   referencef/             REFERENCE_F.yaml loader
-  probe/                  F-matrix probe
   replay/                 Engine API cross-client driver
   lock/                   POSIX flock(2) state-dir lock
   orchpb/                 generated protobuf bindings

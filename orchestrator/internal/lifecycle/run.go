@@ -52,7 +52,6 @@ type Config struct {
 	ReferenceFPath      string
 	ManifestPath        string
 	MaxBatches          int
-	EnableProbe         bool
 	DeployPrivateKey    string
 	Verbs               []string
 	PluginGitSHA        string
@@ -65,11 +64,10 @@ type Config struct {
 }
 
 const (
-	terminationOvershoot   = "overshoot"
-	terminationTargetMet   = "target_reached"
-	terminationBatchLimit  = "batch_limit"
-	terminationSignal      = "signal"
-	terminationProbeFailed = "probe_failed"
+	terminationOvershoot  = "overshoot"
+	terminationTargetMet  = "target_reached"
+	terminationBatchLimit = "batch_limit"
+	terminationSignal     = "signal"
 )
 
 // Run executes the orchestrator's main loop. It blocks until the context is
