@@ -16,6 +16,13 @@ func TestDefaultsMatchHistoricalConstants(t *testing.T) {
 	checkF(t, "epsilon", ck.Epsilon, 0.5)
 	checkF(t, "projection_eta", ck.ProjectionEta, 0.1)
 	checkF(t, "tolerance_floor", ck.ToleranceFloor, 0.005)
+	checkF(t, "entropy_floor", ck.EntropyFloor, 0.02)
+	if !ck.AntiWindupEnabled {
+		t.Errorf("anti_windup_enabled = false, want true")
+	}
+	if !ck.BytesPerGasTieBreak {
+		t.Errorf("bytes_per_gas_tie_break = false, want true")
+	}
 	checkF(t, "gas_fill_fraction", ck.GasFillFraction, 0.90)
 	checkF(t, "gas_cap_fraction", ck.GasCapFraction, 0.95)
 	checkI(t, "nmax_hard_ceil", ck.NMaxHardCeil, 12000)

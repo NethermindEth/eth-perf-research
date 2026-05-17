@@ -28,6 +28,9 @@ type controlYAML struct {
 	Epsilon               *float64          `json:"epsilon"`
 	ProjectionEta         *float64          `json:"projection_eta"`
 	ToleranceFloor        *float64          `json:"tolerance_floor"`
+	EntropyFloor          *float64          `json:"entropy_floor"`
+	AntiWindupEnabled     *bool             `json:"anti_windup_enabled"`
+	BytesPerGasTieBreak   *bool             `json:"bytes_per_gas_tie_break"`
 	GasFillFraction       *float64          `json:"gas_fill_fraction"`
 	GasCapFraction        *float64          `json:"gas_cap_fraction"`
 	NMaxHardCeil          *int              `json:"nmax_hard_ceil"`
@@ -117,6 +120,9 @@ func applyYAML(cfg *RunConfig, yf *yamlFile) {
 		setF(&cfg.Control.Epsilon, c.Epsilon)
 		setF(&cfg.Control.ProjectionEta, c.ProjectionEta)
 		setF(&cfg.Control.ToleranceFloor, c.ToleranceFloor)
+		setB(&cfg.Control.AntiWindupEnabled, c.AntiWindupEnabled)
+		setB(&cfg.Control.BytesPerGasTieBreak, c.BytesPerGasTieBreak)
+		setF(&cfg.Control.EntropyFloor, c.EntropyFloor)
 		setF(&cfg.Control.GasFillFraction, c.GasFillFraction)
 		setF(&cfg.Control.GasCapFraction, c.GasCapFraction)
 		setI(&cfg.Control.NMaxHardCeil, c.NMaxHardCeil)
@@ -193,6 +199,11 @@ func setU64(dst *uint64, v *uint64) {
 	}
 }
 func setStr(dst *string, v *string) {
+	if v != nil {
+		*dst = *v
+	}
+}
+func setB(dst *bool, v *bool) {
 	if v != nil {
 		*dst = *v
 	}
@@ -278,6 +289,9 @@ func (c RunConfig) validate() error {
 	}
 	if ck.ToleranceFloor < 0 {
 		return rangeErr("control.tolerance_floor", ck.ToleranceFloor, ">= 0")
+	}
+	if math.IsNaN(ck.EntropyFloor) || ck.EntropyFloor <= 0 || ck.EntropyFloor >= 0.5 {
+		return rangeErr("control.entropy_floor", ck.EntropyFloor, "(0, 0.5)")
 	}
 	if !inUnit(ck.GasFillFraction) || ck.GasFillFraction <= 0 {
 		return rangeErr("control.gas_fill_fraction", ck.GasFillFraction, "(0, 1]")

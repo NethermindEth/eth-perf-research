@@ -3,6 +3,7 @@ package controller
 import (
 	"testing"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 )
 
@@ -147,6 +148,112 @@ func TestPickProjectedGradientSteersAwayFromOverTargetAxis(t *testing.T) {
 		t.Errorf("projected gradient must favour the under-served axis: "+
 			"accountfiller weight=%.6f must exceed storagefiller weight=%.6f",
 			plan.Mix["accountfiller"], plan.Mix["storagefiller"])
+	}
+}
+
+// TestPickR1EntropyFloorKeepsSoleAxisGrower is the regression test for R1: a
+// verb that is the ONLY non-degenerate grower of an under-target axis must
+// never be zeroed by the Michelot projection — it must keep at least
+// EntropyFloor weight so the ε-greedy branch can still reach it.
+func TestPickR1EntropyFloorKeepsSoleAxisGrower(t *testing.T) {
+	// codefiller is the sole grower of the code axis; calltx grows nothing but
+	// is non-degenerate (touches accounts), so the gradient will heavily favour
+	// the verbs serving the larger residuals and try to zero codefiller.
+	verbs := []string{"calltx", "storagefiller", "codefiller"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"calltx":        {"accounts": 8, "storage": 0, "code": 0},
+			"storagefiller": {"accounts": 0, "storage": 1500, "code": 0},
+			"codefiller":    {"accounts": 0, "storage": 0, "code": 1500},
+		},
+		AvgTxRLP: map[string]float64{"calltx": 1500, "storagefiller": 1500, "codefiller": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.5)
+
+	// code is far under-target; accounts/storage near their lines.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.1, AxisStorage: 0.1, AxisCode: 0.8},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := &Observation{AccountTrieBytes: 100_000_000, StorageTrieBytes: 100_000_000, CodeBytesTotal: 1_000}
+
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	floor := config.Defaults().Control.EntropyFloor
+	if plan.Mix["codefiller"] < floor {
+		t.Errorf("R1: sole code-axis grower weight=%.6f, want >= EntropyFloor=%.3f",
+			plan.Mix["codefiller"], floor)
+	}
+	for v, w := range plan.Mix {
+		if w <= 0 {
+			t.Errorf("R1: eligible verb %q zeroed (weight=%.6f)", v, w)
+		}
+	}
+}
+
+// TestPickR1EntropyFloorExemptsDegenerateVerb verifies a verb with an all-zero
+// F-row (no measured effect) is NOT lifted by the entropy floor — it correctly
+// stays at zero.
+func TestPickR1EntropyFloorExemptsDegenerateVerb(t *testing.T) {
+	verbs := []string{"accountfiller", "deadverb"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"accountfiller": {"accounts": 1500, "storage": 0, "code": 0},
+			"deadverb":      {"accounts": 0, "storage": 0, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"accountfiller": 1500, "deadverb": 1500},
+	}
+	var identity [32]byte
+	s := newTestState(verbs, rf, identity, 0.5)
+
+	plan := s.Pick(zeroObs(), makeTarget(10*1024*1024*1024), 8*1024*1024, 8_000_000_000)
+	if plan.Mix["deadverb"] != 0 {
+		t.Errorf("R1: degenerate verb should stay at 0, got weight=%.6f", plan.Mix["deadverb"])
+	}
+}
+
+// TestPickR2AntiWindupZeroesOverTargetAxisGradient is the regression test for
+// R2: when an axis is over-target its gradient contribution is clamped to zero,
+// so a verb that ONLY grows that over-target axis must not be penalised away by
+// the over-target pressure — the controller stops fighting a satisfied axis.
+func TestPickR2AntiWindupZeroesOverTargetAxisGradient(t *testing.T) {
+	verbs := []string{"accountfiller", "storagefiller"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"accountfiller": {"accounts": 1500, "storage": 0, "code": 0},
+			"storagefiller": {"accounts": 0, "storage": 1500, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"accountfiller": 1500, "storagefiller": 1500},
+	}
+	var identity [32]byte
+
+	// storage far over-target, accounts far under-target.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.5, AxisStorage: 0.5, AxisCode: 0.0},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := &Observation{AccountTrieBytes: 1_000_000, StorageTrieBytes: 500_000_000}
+
+	// With anti-windup ON the over-target storage axis contributes no gradient,
+	// so storagefiller's weight is driven purely by the (zero) storage term and
+	// stays near baseline rather than being pushed down.
+	on := newTestState(verbs, rf, identity, 0.0)
+	planOn := on.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+
+	off := newTestState(verbs, rf, identity, 0.0)
+	off.cfg.Control.AntiWindupEnabled = false
+	planOff := off.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+
+	// Anti-windup must reduce the away-pushing pressure: storagefiller keeps
+	// more weight with the clamp on than off.
+	if planOn.Mix["storagefiller"] <= planOff.Mix["storagefiller"] {
+		t.Errorf("R2: anti-windup should not push the over-target verb down harder; "+
+			"on=%.6f off=%.6f", planOn.Mix["storagefiller"], planOff.Mix["storagefiller"])
+	}
+	// The under-served axis must still be the controller's priority.
+	if planOn.Mix["accountfiller"] <= planOn.Mix["storagefiller"] {
+		t.Errorf("R2: under-served accounts must still dominate: acc=%.6f sto=%.6f",
+			planOn.Mix["accountfiller"], planOn.Mix["storagefiller"])
 	}
 }
 

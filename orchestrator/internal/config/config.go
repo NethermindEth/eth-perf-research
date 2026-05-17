@@ -18,8 +18,23 @@ type Control struct {
 	Epsilon float64 `json:"epsilon"`
 	// ProjectionEta is the projected-gradient step size in Pick.
 	ProjectionEta float64 `json:"projection_eta"`
-	// ToleranceFloor is the minimum per-axis tolerance fraction.
+	// ToleranceFloor is the minimum per-axis tolerance fraction. It also
+	// defines the gradient-equivalence band for the BytesPerGas tie-breaker:
+	// verbs whose gradient scores are within ToleranceFloor of the best are
+	// treated as equivalent.
 	ToleranceFloor float64 `json:"tolerance_floor"`
+	// EntropyFloor (R1) is the minimum simplex weight every eligible verb (one
+	// with a non-degenerate F-row) keeps after the Michelot projection, so a
+	// verb that is the sole grower of an under-target axis can never be zeroed
+	// out of selection.
+	EntropyFloor float64 `json:"entropy_floor"`
+	// AntiWindupEnabled (R2) gates the per-axis anti-windup clamp: when an axis
+	// is at or above target, its away-pushing gradient contribution is clamped
+	// to zero so the controller stops integrating error on a satisfied axis.
+	AntiWindupEnabled bool `json:"anti_windup_enabled"`
+	// BytesPerGasTieBreak gates the BytesPerGas tie-breaker among
+	// gradient-equivalent verbs (Change 4 / design-v3 §B).
+	BytesPerGasTieBreak bool `json:"bytes_per_gas_tie_break"`
 	// GasFillFraction is the fraction of block gas Pick targets when sizing a batch.
 	GasFillFraction float64 `json:"gas_fill_fraction"`
 	// GasCapFraction is the dispatcher's hard gas ceiling fraction.
@@ -154,6 +169,9 @@ func Defaults() RunConfig {
 			Epsilon:               0.5,
 			ProjectionEta:         0.1,
 			ToleranceFloor:        0.005,
+			EntropyFloor:          0.02,
+			AntiWindupEnabled:     true,
+			BytesPerGasTieBreak:   true,
 			GasFillFraction:       0.90,
 			GasCapFraction:        0.95,
 			NMaxHardCeil:          12000,

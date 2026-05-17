@@ -140,9 +140,28 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	// Gradient: 2 * F^T * (F*x - residualForGrad).
 	fx := matVecMul3(fMat, x) // shape [3]
 	diff := [3]float64{fx[0] - residualForGrad[0], fx[1] - residualForGrad[1], fx[2] - residualForGrad[2]}
+
+	// R2 — per-axis anti-windup. An axis with residual <= 0 is at or above its
+	// target; its diff term is positive and integrates a gradient component
+	// that pushes the simplex away from every verb touching that axis. Once an
+	// axis is satisfied that pressure only causes overshoot oscillation, so
+	// clamp the per-axis contribution to zero — standard anti-windup: stop
+	// integrating error on a saturated axis. Under-target axes are untouched.
+	overTarget := [3]bool{}
+	if s.cfg.Control.AntiWindupEnabled {
+		for axIdx := 0; axIdx < 3; axIdx++ {
+			if residual[axIdx] <= 0 {
+				overTarget[axIdx] = true
+			}
+		}
+	}
+
 	grad := make([]float64, n)
 	for j := 0; j < n; j++ {
 		for axIdx := 0; axIdx < 3; axIdx++ {
+			if overTarget[axIdx] {
+				continue
+			}
 			grad[j] += 2.0 * fMat[axIdx][j] * diff[axIdx]
 		}
 	}
@@ -159,6 +178,31 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		step[i] = x[i] - s.cfg.Control.ProjectionEta*grad[i]
 	}
 	xProj := mathx.ProjectSimplex(step)
+
+	// R1 — entropy floor. The Michelot projection routinely drives the weight
+	// of a momentarily-unfavoured verb to exactly zero; a zero-weight verb is
+	// unreachable in selectVerbIndex, so a verb that is the sole grower of an
+	// under-target axis becomes permanently unselectable and that axis can
+	// never converge. Clamp every eligible verb (one with a non-degenerate
+	// F-row — capable of moving at least one axis) up to EntropyFloor, then
+	// renormalize. Degenerate verbs (all-zero F-row, no measured effect) are
+	// exempt and stay at zero.
+	if floor := s.cfg.Control.EntropyFloor; floor > 0 && n > 0 {
+		for i, v := range verbs {
+			fRow := s.axisVec(v)
+			if fRow[0]+fRow[1]+fRow[2] == 0 {
+				continue // degenerate verb — exempt
+			}
+			if xProj[i] < floor {
+				xProj[i] = floor
+			}
+		}
+		if total := sumFloats(xProj); total > 0 {
+			for i := range xProj {
+				xProj[i] /= total
+			}
+		}
+	}
 
 	// Per-axis shares and tolerance.
 	p := [3]float64{
