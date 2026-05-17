@@ -129,7 +129,7 @@ func resolveVerbs() []string {
 		return []string{
 			"eoatx", "calltx", "deploytx", "factorydeploytx",
 			"storagespam", "erc20_bloater", "erc20tx", "uniswap_swaps",
-			"storagerefundtx", "gasburnertx", "evm_fuzz", "noop",
+			"storagerefundtx", "gasburnertx",
 		}
 	}
 	parts := strings.Split(raw, ",")

@@ -26,7 +26,7 @@ import (
 type BuildCtx struct {
 	// ChainID is informational; the dispatcher sets DynamicFeeTx.ChainID.
 	ChainID *big.Int
-	// SignerAddr is the master signer address — the recipient for noop.
+	// SignerAddr is the master signer address.
 	SignerAddr common.Address
 	// BaseAddress is the 20-byte base for sequential address derivation.
 	BaseAddress []byte
@@ -56,7 +56,6 @@ type Verb interface {
 // rather than shipping unverified on-chain state.
 var Registry = map[string]Verb{
 	verbEoatx{}.Name():           verbEoatx{},
-	verbNoop{}.Name():            verbNoop{},
 	verbCalltx{}.Name():          verbCalltx{},
 	verbDeploytx{}.Name():        verbDeploytx{},
 	verbFactoryDeploytx{}.Name(): verbFactoryDeploytx{},
@@ -66,8 +65,6 @@ var Registry = map[string]Verb{
 	verbUniswapSwaps{}.Name():    verbUniswapSwaps{},
 	verbStorageRefundtx{}.Name(): verbStorageRefundtx{},
 	verbGasburnertx{}.Name():     verbGasburnertx{},
-	verbEvmFuzz{}.Name():         verbEvmFuzz{},
-	verbBlobCombined{}.Name():    verbBlobCombined{},
 }
 
 // Lookup returns the verb registered under name, or false if unknown.

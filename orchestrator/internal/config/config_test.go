@@ -54,7 +54,7 @@ func TestDefaultsMatchHistoricalConstants(t *testing.T) {
 		"eoatx": 21_000, "deploytx": 1_000_000, "factorydeploytx": 500_000,
 		"storagespam": 2_050_000, "storagerefundtx": 3_000_000, "erc20tx": 100_000,
 		"erc20_bloater": 16_700_000, "uniswap_swaps": 200_000, "gasburnertx": 2_000_000,
-		"calltx": 500_000, "evm_fuzz": 1_000_000, "noop": 21_000,
+		"calltx": 500_000,
 	}
 	for verb, want := range wantGas {
 		if got := ck.BaseGasPerVerb[verb]; got != want {

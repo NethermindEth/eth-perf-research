@@ -155,8 +155,6 @@ func defaultBaseGasPerVerb() map[string]uint64 {
 		"uniswap_swaps":   200_000,
 		"gasburnertx":     2_000_000,
 		"calltx":          500_000,
-		"evm_fuzz":        1_000_000,
-		"noop":            21_000,
 	}
 }
 

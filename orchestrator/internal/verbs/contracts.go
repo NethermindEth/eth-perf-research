@@ -101,8 +101,8 @@ func (r *ContractRegistry) Names() []ContractName {
 }
 
 // contractVerbTargets maps each contract-calling verb to the contract it must
-// target. Verbs absent from this map (eoatx, noop, deploytx, factorydeploytx,
-// evm_fuzz, blob_combined, uniswap_swaps) need no pre-deployed contract.
+// target. Verbs absent from this map (eoatx, deploytx, factorydeploytx,
+// uniswap_swaps) need no pre-deployed contract.
 //
 //   - storagespam      → StorageSpam     (setRandomForGas — real storage write)
 //   - erc20tx          → TestToken       (transferMint — real mint/transfer)

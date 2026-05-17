@@ -38,11 +38,11 @@ func Load(path string) (*ReferenceF, error) {
 // the gradient "sees" each verb from batch 1. Apply's online learning then
 // overwrites the seed with measured values once a verb has actually run.
 //
-// The first nine verbs are design-v3 §B.1 verbatim. gasburnertx, evm_fuzz,
-// noop and the blob_combined stub are not in §B.1's table — they emit ≈0 state,
-// so they are seeded small but non-zero on every axis purely so they too have a
-// non-zero gradient (the optimiser correctly down-weights them once observed).
-// storagerefundtx's storage value is negative by design (SSTORE→0 shrinkage).
+// The first nine verbs are design-v3 §B.1 verbatim. gasburnertx is not in
+// §B.1's table — it emits ≈0 state, so it is seeded small but non-zero on every
+// axis purely so it too has a non-zero gradient (the optimiser correctly
+// down-weights it once observed). storagerefundtx's storage value is negative
+// by design (SSTORE→0 shrinkage).
 func DefaultReferenceF() *ReferenceF {
 	return &ReferenceF{
 		Verbs: map[string]map[string]float64{
@@ -56,9 +56,6 @@ func DefaultReferenceF() *ReferenceF {
 			"uniswap_swaps":   {"accounts": 8, "storage": 220, "code": 0},
 			"storagerefundtx": {"accounts": 5, "storage": -180, "code": 0},
 			"gasburnertx":     {"accounts": 1, "storage": 1, "code": 1},
-			"evm_fuzz":        {"accounts": 1, "storage": 1, "code": 1},
-			"noop":            {"accounts": 1, "storage": 1, "code": 1},
-			"blob_combined":   {"accounts": 1, "storage": 1, "code": 1},
 		},
 		AvgTxRLP: map[string]float64{},
 	}

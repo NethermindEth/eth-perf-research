@@ -338,6 +338,49 @@ func TestHydrateStateFromTailRejectsCorruptCoefficients(t *testing.T) {
 	}
 }
 
+// TestHydrateStateFromTailSkipsUnknownVerbs guards the live-resume path after
+// dead verbs (noop, evm_fuzz, blob_combined) were removed from the registry.
+// Past journals on the live VM carry Observability cells keyed by those verbs;
+// a resume reading such a tail must skip the unknown-verb cells without error
+// and still reconstruct the known-verb cells. The skip keys on "verb absent
+// from controller State" (state.F[verb] lookup) — not on any literal verb
+// string — so it tolerates any verb later dropped from the registry.
+func TestHydrateStateFromTailSkipsUnknownVerbs(t *testing.T) {
+	state := newColdState([]string{"eoatx", "storagespam"})
+
+	tail := &orchpb.Record{
+		BatchId: 7,
+		Observability: &orchpb.Observability{
+			CoeffsAfter: map[string]float64{
+				"noop.accounts":         1.0,   // removed verb — must be skipped
+				"evm_fuzz.code":         2.0,   // removed verb — must be skipped
+				"blob_combined.storage": 3.0,   // removed verb — must be skipped
+				"eoatx.accounts":        150.0, // known verb — must hydrate
+			},
+			AlphaCurrent: map[string]float64{"noop.storage": 0.5},
+			SigmaInnov:   map[string]float64{"evm_fuzz.accounts": 9.0},
+		},
+	}
+
+	res := hydrateStateFromTail(state, tail)
+
+	if !res.Reconstructed {
+		t.Fatalf("Reconstructed=false; the one known-verb cell must still hydrate")
+	}
+	if res.CoeffCells != 1 {
+		t.Errorf("CoeffCells=%d, want 1 (only eoatx.accounts; the 3 unknown verbs skipped)", res.CoeffCells)
+	}
+	if res.AlphaCells != 0 || res.SigmaCells != 0 {
+		t.Errorf("unknown-verb α/σ cells leaked: alpha=%d sigma=%d, want 0/0", res.AlphaCells, res.SigmaCells)
+	}
+	if got := state.F["eoatx"][controller.AxisAccounts]; got != 150.0 {
+		t.Errorf("F[eoatx][accounts]=%v, want 150 (known cell must hydrate)", got)
+	}
+	if _, exists := state.F["noop"]; exists {
+		t.Errorf("removed verb noop must not appear in controller State")
+	}
+}
+
 func TestEncodeAddr(t *testing.T) {
 	got := encodeAddr(0x0102030405060708)
 	want := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
