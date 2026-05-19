@@ -7,9 +7,10 @@
 //   - journal/payloads/manifest persistence,
 //   - shutdown / termination accounting.
 //
-// The hot loop lives in runLoop, which runs a depth-1 build-ahead pipeline: a
-// planner goroutine Picks/builds/signs batch N+1 while a committer goroutine
-// commits/journals batch N.
+// The hot loop lives in runLoop: a strictly sequential, sensor-paced cycle.
+// Each iteration commits exactly one block, then blocks until the
+// StateComposition trie-diff has folded that block into the sensor, and only
+// then Picks the next batch off that fresh observation.
 package lifecycle
 
 import (
@@ -158,7 +159,6 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 7a. Metrics registry + HTTP server.
 	metricsReg := metrics.New()
-	metricsReg.Epsilon.Set(rc.Control.Epsilon)
 	metricsSrv := &http.Server{
 		Addr:    rc.Run.MetricsAddr,
 		Handler: metricsReg.Handler(),
@@ -427,7 +427,7 @@ func defaultVerbs() []string {
 	return []string{
 		"eoatx", "calltx", "deploytx", "factorydeploytx",
 		"storagespam", "erc20_bloater", "erc20tx", "uniswap_swaps",
-		"storagerefundtx", "gasburnertx",
+		"gasburnertx",
 	}
 }
 
@@ -466,24 +466,18 @@ func buildFacadeContext(t *target.Target, chainID, gasLimit, addressStride uint6
 	return c
 }
 
-// runLoop drives the Pick → build → sign → Commit → Apply → journal pipeline
-// until a termination condition fires. Returns the termination reason and the
-// last committed block (or nil).
+// runLoop drives the Pick → build → sign → Commit → sensor → Apply → journal
+// cycle until a termination condition fires. Returns the termination reason and
+// the last committed block (or nil).
 //
-// Topology: a depth-1 build-ahead pipeline. A planner goroutine Picks, builds
-// and signs batches and sends each prepared batch on a depth-1 buffered
-// channel; a committer goroutine receives them and commits/journals. The buffer
-// lets the planner prepare batch N+1 (the CPU-heavy build+sign of tens of
-// thousands of secp256k1 txs) while the committer commits batch N — overlapping
-// what was strictly serial dead time before.
-//
-// A single planner guarantees batches are produced in strict order, so there
-// is no commit re-ordering, no shared-cursor race, and no min-heap. The only
-// cross-goroutine shared state is the controller State (planner Picks, committer
-// Applies — serialised by State's pickApplyMu) and the latest observation
-// (guarded by pipeline.obsMu). Observation lag of one batch is by design:
-// Pick(N+1) may run before Apply(N), so it sees the controller state as of
-// batch N-1.
+// The loop is strictly sequential and sensor-paced. Each iteration commits one
+// block and then blocks in commitBatch until the StateComposition trie-diff has
+// folded that block into the sensor; only then does the next iteration Pick off
+// that fresh observation. The orchestrator never runs ahead of the sensor — so
+// the per-block trie-diff can never fall behind, and a baseline rescan (which
+// freezes the sensor) automatically pauses bloating until it completes.
+// Throughput is paced by the sensor, by design. There is one goroutine, so the
+// nonce/salt cursor and the controller State need no cross-goroutine guarding.
 func runLoop(
 	ctx context.Context,
 	cfg Config,
@@ -494,47 +488,151 @@ func runLoop(
 	rawTarget *target.Target,
 	mf *manifest.Manifest,
 ) (string, *rpc.BlockHeader) {
-	startBatchID := deps.resumedFrom
-	if startBatchID > 0 {
-		startBatchID++
+	batchID := deps.resumedFrom
+	if batchID > 0 {
+		batchID++
 	}
 
-	// loopCtx is cancelled by either goroutine on a terminal condition; it
-	// also fires on the parent ctx being cancelled. The planner stops
-	// producing and the committer drains its channel and exits.
-	loopCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	obs := currentObs
+	var lastBlock *rpc.BlockHeader
+	reason := terminationSignal
+	consecutiveDispatchSkips := 0
+	consecutiveFullRejections := 0
 
-	p := &pipeline{
-		obs:          currentObs,
-		ready:        make(chan *dispatched, 1),
-		startBatchID: startBatchID,
+loop:
+	for {
+		if ctx.Err() != nil {
+			break loop
+		}
+
+		// Drain target reloads.
+		select {
+		case newT := <-targetCh:
+			_, newCtrl, _ := refreshTarget(newT)
+			*ctrlTarget = newCtrl
+			deps.target = newCtrl
+			deps.targetDigest = targetSha256Bytes(newT.SHA256)
+			mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
+				AppliedAtBatch: int(batchID),
+				AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
+				TargetSHA256:   newT.SHA256,
+				Shares:         cloneShares(newT.Shares),
+				TotalBytes:     newT.TotalBytes,
+			})
+			slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
+		default:
+		}
+
+		// Termination predicates. obs is the post-commit observation of the
+		// previous batch — exact, not lagged, because the loop is sequential.
+		ck := cfg.Run.Control
+		if deps.state.HasInstability(ck.OvershootThreshold, ck.OvershootWindow, ck.OvershootMaxTrips, ck.OvershootGrace) {
+			reason = terminationOvershoot
+			break loop
+		}
+		if reachedTarget(obs, *ctrlTarget) {
+			reason = terminationTargetMet
+			break loop
+		}
+		if cfg.MaxBatches > 0 && batchID >= uint64(cfg.MaxBatches) {
+			reason = terminationBatchLimit
+			break loop
+		}
+
+		// Pick + build + sign off the fresh observation.
+		db, err := dispatchBatch(ctx, deps, batchID, obs)
+		if err != nil {
+			if ctx.Err() != nil {
+				break loop
+			}
+			consecutiveDispatchSkips++
+			slog.Warn("lifecycle: dispatch failed, skipping batch",
+				"batch_id", batchID, "streak", consecutiveDispatchSkips, "err", err)
+			if consecutiveDispatchSkips >= cfg.Run.Run.DispatchSkipStreakHalt {
+				reason = fmt.Sprintf("error: %d consecutive dispatch failures (last: %s)",
+					consecutiveDispatchSkips, err.Error())
+				break loop
+			}
+			batchID++
+			continue
+		}
+		consecutiveDispatchSkips = 0
+		if db == nil {
+			// Pick yielded no plan — back off briefly; retry the same batchID.
+			select {
+			case <-ctx.Done():
+				break loop
+			case <-time.After(time.Duration(cfg.Run.Run.IdleBackoffMS) * time.Millisecond):
+			}
+			continue
+		}
+
+		// Commit + sensor-wait + Apply + journal. commitBatch blocks until the
+		// sensor reflects this committed block, so res.postObs is exact.
+		res, err := commitBatch(ctx, deps, db)
+		if err != nil {
+			if ctx.Err() != nil {
+				break loop
+			}
+			// A transport error means NM is unreachable (restart / redeploy),
+			// not a logical failure. Wait for reconnect; only a reconnect
+			// timeout terminates. The batch is skipped on reconnect.
+			if isTransportError(err) {
+				slog.Warn("lifecycle: commit hit transport error — NM unreachable",
+					"batch_id", db.batchID, "err", err)
+				rcRun := deps.cfg.Run
+				if rerr := awaitReconnect(ctx, deps.rpc,
+					time.Duration(rcRun.ReconnectMaxWaitS)*time.Second,
+					time.Duration(rcRun.ReconnectBackoffInitialMS)*time.Millisecond,
+					time.Duration(rcRun.ReconnectBackoffMaxMS)*time.Millisecond); rerr != nil {
+					if ctx.Err() == nil {
+						reason = terminationNMUnreachable
+					}
+					break loop
+				}
+				batchID++
+				continue
+			}
+			if isPartialAcceptanceErr(err) {
+				expected, included := parsePartialAcceptance(err)
+				slog.Warn("lifecycle: commit partial-acceptance, skipping batch",
+					"batch_id", db.batchID,
+					"expected", expected,
+					"included", included,
+					"verb", db.plan.Verb,
+				)
+				if included == 0 {
+					consecutiveFullRejections++
+					if consecutiveFullRejections >= deps.cfg.Run.RejectionStreakHalt {
+						reason = fmt.Sprintf("error: %d consecutive batches fully rejected (verb=%s); chain state likely missing dependencies",
+							consecutiveFullRejections, db.plan.Verb)
+						break loop
+					}
+				} else {
+					consecutiveFullRejections = 0
+				}
+				batchID++
+				continue
+			}
+			slog.Error("lifecycle: commit failed", "batch_id", db.batchID, "err", err)
+			reason = "error: " + err.Error()
+			break loop
+		}
+		if res != nil && res.committed {
+			obs = res.postObs
+			lastBlock = res.blockHeader
+			consecutiveFullRejections = 0
+		}
+		batchID++
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		p.planner(loopCtx, cancel, cfg, deps, ctrlTarget, targetCh, mf)
-	}()
-	go func() {
-		defer wg.Done()
-		p.committer(loopCtx, cancel, deps)
-	}()
-	wg.Wait()
-
-	// Drain residual pending sidecar in case commit was interrupted mid-flight
-	// (commitBatch normally clears it; on cancel-during-commit we may have left
-	// a stale marker). Best-effort: errors are logged but don't fail the run.
+	// Drain residual pending sidecar in case commit was interrupted mid-flight.
+	// Best-effort: errors are logged but don't fail the run.
 	if err := journal.ClearPending(deps.pendingPath); err != nil {
 		slog.Warn("lifecycle: clear pending on shutdown", "err", err)
 	}
 
-	reason := terminationSignal
-	if r := p.termReason(); r != "" {
-		reason = r
-	}
-	return reason, p.lastBlock()
+	return reason, lastBlock
 }
 
 // refreshTarget reloads the target and returns the controller projection.

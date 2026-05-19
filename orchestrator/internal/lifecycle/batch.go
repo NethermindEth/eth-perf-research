@@ -183,16 +183,16 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched) (*batchResul
 	}
 	db.timing.commit = time.Since(commitStart)
 
-	// Statecomp plugin batches diffs (~30k blocks per baseline rotation), so the
-	// per-batch sensor blockNumber won't advance. Do a single poll — accept
-	// whatever's there, never block. The controller's F-update tolerates stale
-	// observations; new data lands when the plugin rotates.
+	// Sensor-paced: block until the StateComposition trie-diff has folded THIS
+	// committed block into the sensor. The loop must hold fresh sensor data for
+	// block N before it Picks N+1, so the per-block trie-diff can never fall
+	// behind. If a baseline rescan is in progress the sensor stalls;
+	// waitSensorForBlock waits it out rather than racing ahead.
 	sensorStart := time.Now()
-	snap, err := waitForValidSensor(ctx, d.sensor,
-		time.Duration(d.cfg.Run.SensorPollGapMS)*time.Millisecond,
+	snap, err := waitSensorForBlock(ctx, d.sensor, block.Number,
 		time.Duration(d.cfg.Run.SensorLogIntervalS)*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("lifecycle: sensor poll: %w", err)
+		return nil, fmt.Errorf("lifecycle: sensor wait: %w", err)
 	}
 	db.timing.sensor = time.Since(sensorStart)
 	post := &controller.Observation{
@@ -319,7 +319,6 @@ func buildRecord(
 			AlphaCurrent:       flatFromAxisMap(d.state.Alpha),
 			SigmaInnov:         flatFromAxisMap(d.state.Sigma),
 			MixSimplex:         mix,
-			Epsilon:            d.state.Epsilon,
 			TxCount:            uint32(res.TxCount),
 			DispatchedRlpBytes: res.RLPBytes,
 		},

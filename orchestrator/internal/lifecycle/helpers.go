@@ -196,3 +196,35 @@ func waitForValidSensor(ctx context.Context, sens *sensor.Sensor, pollGap, logEv
 		}
 	}
 }
+
+// waitSensorForBlock blocks until statecomp_get's blockNumber reaches target —
+// i.e. the StateComposition trie-diff has folded the just-committed block into
+// the sensor. It is the gate that makes the bloating loop strictly sensor-
+// paced: the orchestrator never commits block N+1 until it holds fresh sensor
+// data for block N. A baseline rescan freezes the sensor; this waits it out,
+// logging every logEvery, rather than letting the loop race ahead. Returns a
+// non-nil error only on ctx cancellation.
+func waitSensorForBlock(ctx context.Context, sens *sensor.Sensor, target uint64, logEvery time.Duration) (*sensor.Snapshot, error) {
+	lastLog := time.Now()
+	for {
+		// sens.Read polls statecomp_get until blockNumber >= target or its own
+		// deadline; on timeout it returns ErrSensorTimeout with the last
+		// snapshot. Retry across timeouts so the wait is unbounded.
+		snap, err := sens.Read(ctx, target)
+		if err == nil && snap != nil && snap.BlockNumber >= target {
+			return snap, nil
+		}
+		if ctx.Err() != nil {
+			return snap, ctx.Err()
+		}
+		if time.Since(lastLog) >= logEvery {
+			var seen uint64
+			if snap != nil {
+				seen = snap.BlockNumber
+			}
+			slog.Warn("lifecycle: waiting for sensor to fold in committed block — trie-diff lagging or rescan in progress",
+				"target_block", target, "sensor_block", seen)
+			lastLog = time.Now()
+		}
+	}
+}
