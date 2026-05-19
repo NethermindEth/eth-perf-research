@@ -1,22 +1,14 @@
 package controller
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"math"
-	"math/rand/v2"
 	"strings"
-
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/mathx"
 )
 
-// The projected-gradient step size, tolerance floor, gas-fill / gas-cap
-// fractions and the nMax hard ceiling were package-level constants here; they
-// now live in config.RunConfig.Control and are read off the State's cfg.
-// config.Defaults() carries the historical values, so Pick's behaviour is
-// unchanged.
+// The gas-fill / gas-cap fractions and the nMax hard ceiling live in
+// config.RunConfig.Control and are read off the State's cfg.
 //
 // computeGasBasedMax returns the number of txs of `verb` that fill
 // `GasFillFraction × blockGasLimit`. This is the primary batch-size bound;
@@ -91,6 +83,13 @@ func (s *State) gasPerTxEstimate(verb string) float64 {
 // Pick computes the next batch plan from the current observation and target.
 // totalBatchBytes is the hard byte cap for deadline_bytes. blockGasLimit is
 // the current head-block gas limit (0 = no gas cap applied).
+//
+// Selection is one deterministic step (design-v4 §3.1): the verb whose learned
+// F-row, dotted with the endgame-clipped trajectory residual vector, yields the
+// highest score is chosen. score(v) = Σ_a F[v][a]·r'[a] is design-v3's
+// gradient direction Fᵀr evaluated once; since dispatch is single-verb-per-batch
+// the projected-gradient descent + its re-lift floors are unnecessary scaffolding
+// and have been removed. No RNG, no ε-greedy: the picker is fully deterministic.
 func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGasLimit uint64) *BatchPlan {
 	verbs := s.Verbs
 	n := len(verbs)
@@ -112,133 +111,40 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		desired[2] - current[2],
 	}
 
-	// Build F matrix: fMat[axIdx][verbIdx].
-	fMat := s.buildFMatrix(verbs)
-
-	// Initial uniform x.
-	x := make([]float64, n)
-	for i := range x {
-		x[i] = 1.0 / float64(n)
-	}
-
-	// Endgame clip: cum >= target_total and any axis still under-served.
+	// endgame is retained only as a debug/termination signal; the per-term clip
+	// in the score loop below is what neutralises over-served axes for scoring.
 	targetFull := [3]float64{
 		tgt.ByteTarget(AxisAccounts),
 		tgt.ByteTarget(AxisStorage),
 		tgt.ByteTarget(AxisCode),
 	}
 	endgame := cum >= targetTotal && (current[0] < targetFull[0] || current[1] < targetFull[1] || current[2] < targetFull[2])
-	residualForGrad := residual
-	if endgame {
-		for i := range residualForGrad {
-			if residualForGrad[i] < 0 {
-				residualForGrad[i] = 0
-			}
-		}
-	}
 
-	// Gradient: 2 * F^T * (F*x - residualForGrad).
-	fx := matVecMul3(fMat, x) // shape [3]
-	diff := [3]float64{fx[0] - residualForGrad[0], fx[1] - residualForGrad[1], fx[2] - residualForGrad[2]}
-
-	// R2 — per-axis anti-windup. An axis with residual <= 0 is at or above its
-	// target; its diff term is positive and integrates a gradient component
-	// that pushes the simplex away from every verb touching that axis. Once an
-	// axis is satisfied that pressure only causes overshoot oscillation, so
-	// clamp the per-axis contribution to zero — standard anti-windup: stop
-	// integrating error on a saturated axis. Under-target axes are untouched.
-	overTarget := [3]bool{}
-	if s.cfg.Control.AntiWindupEnabled {
-		for axIdx := 0; axIdx < 3; axIdx++ {
-			if residual[axIdx] <= 0 {
-				overTarget[axIdx] = true
-			}
-		}
-	}
-
-	// A verb whose contract dependency is not deployed on this chain is
-	// structurally dead — every batch of it is 100%-rejected on commit. Such a
-	// verb is excluded from the candidate set entirely: zero gradient here,
-	// skipped by the R1 floor, and zeroed in xProj below so it can never be
-	// selected.
-	grad := make([]float64, n)
+	// Per-verb score: F-row dotted with the residual, with one monotone-bloating
+	// rule applied per (verb, axis) term. On an over-served axis (residual < 0)
+	// an additive verb (F > 0) cannot shrink the axis and cannot avoid touching
+	// it — penalising it there only hands the argmax to a do-nothing verb and
+	// stalls the run, so that term is clipped to zero. A shrinkage verb (F < 0)
+	// on an over-served axis keeps its positive (negative·negative) term, since
+	// shrinkage is exactly what is wanted there. Under-served axes (residual >=
+	// 0) score normally on every verb.
+	fMat := s.buildFMatrix(verbs)
+	score := make([]float64, n)
 	for j := 0; j < n; j++ {
-		if !s.isContractEligible(verbs[j]) {
-			continue
-		}
-		for axIdx := 0; axIdx < 3; axIdx++ {
-			if overTarget[axIdx] {
+		var sc float64
+		for a := 0; a < 3; a++ {
+			f, r := fMat[a][j], residual[a]
+			if r < 0 && f > 0 {
 				continue
 			}
-			grad[j] += 2.0 * fMat[axIdx][j] * diff[axIdx]
+			sc += f * r
 		}
-	}
-	gn := l2NormSlice(grad)
-	if gn > 1e-12 {
-		for i := range grad {
-			grad[i] /= gn
-		}
+		score[j] = sc
 	}
 
-	// Projected gradient step onto simplex.
-	step := make([]float64, n)
-	for i := range step {
-		step[i] = x[i] - s.cfg.Control.ProjectionEta*grad[i]
-	}
-	xProj := mathx.ProjectSimplex(step)
-
-	// Contract-eligibility clamp. The simplex projection works on the uniform
-	// 1/n seed and can leave a contract-ineligible verb with positive weight;
-	// zero it before R1 so the verb is excluded from the entropy floor and is
-	// unreachable in selectVerbIndex. Renormalise so the remaining weights
-	// still form a simplex.
-	if s.contractEligible != nil {
-		zeroed := false
-		for i, v := range verbs {
-			if !s.isContractEligible(v) {
-				xProj[i] = 0
-				zeroed = true
-			}
-		}
-		if zeroed {
-			if total := sumFloats(xProj); total > 0 {
-				for i := range xProj {
-					xProj[i] /= total
-				}
-			}
-		}
-	}
-
-	// R1 — entropy floor. The Michelot projection routinely drives the weight
-	// of a momentarily-unfavoured verb to exactly zero; a zero-weight verb is
-	// unreachable in selectVerbIndex, so a verb that is the sole grower of an
-	// under-target axis becomes permanently unselectable and that axis can
-	// never converge. Clamp every eligible verb up to EntropyFloor, then
-	// renormalize. A verb is eligible for the floor iff it has a non-degenerate
-	// F-row (capable of moving at least one axis) AND its contract dependency
-	// is deployed on this chain. Degenerate verbs (all-zero F-row) and
-	// contract-ineligible verbs are exempt and stay at zero.
-	if floor := s.cfg.Control.EntropyFloor; floor > 0 && n > 0 {
-		for i, v := range verbs {
-			if !s.isContractEligible(v) {
-				continue // contract-ineligible verb — exempt
-			}
-			fRow := s.axisVec(v)
-			if fRow[0]+fRow[1]+fRow[2] == 0 {
-				continue // degenerate verb — exempt
-			}
-			if xProj[i] < floor {
-				xProj[i] = floor
-			}
-		}
-		if total := sumFloats(xProj); total > 0 {
-			for i := range xProj {
-				xProj[i] /= total
-			}
-		}
-	}
-
-	// Per-axis shares and tolerance.
+	// Per-axis trajectory cap (design-v4 §2.6): max_n_txs[i] = min over the
+	// over-serving axes of headroom/excess. Used both to size the batch and to
+	// exclude a verb that cannot emit even one tx (cap < 1).
 	p := [3]float64{
 		tgt.Shares[AxisAccounts],
 		tgt.Shares[AxisStorage],
@@ -250,8 +156,6 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		tol := math.Max(p[axIdx], s.cfg.Control.ToleranceFloor) * float64(totalBatchBytes)
 		tolerance[axIdx] = headroom + tol
 	}
-
-	// Per-verb cap: max_n_txs[i] = min over over-serving axes of headroom/excess.
 	maxNTxs := make([]float64, n)
 	for i := range maxNTxs {
 		maxNTxs[i] = math.Inf(1)
@@ -279,76 +183,43 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 	}
 
-	// Feasibility filter: zero verbs whose cap < 1 tx.
-	selectFrom := make([]float64, n)
-	anyFeasible := false
-	for i, cap := range maxNTxs {
-		if cap >= 1.0 {
-			selectFrom[i] = xProj[i]
-			anyFeasible = true
+	// argmax over eligible, feasible verbs. A verb is eligible when its contract
+	// dependency is deployed (structurally dead verbs are 100%-rejected on
+	// commit) and feasible when its per-axis cap permits at least one tx. The
+	// first such verb seeds the argmax; ties break on the lower verb index
+	// (deterministic). If no verb is both eligible and feasible the eligibility
+	// constraint is relaxed to feasibility-only so the run is not wedged; if
+	// still none, every verb is a candidate.
+	topIndex := -1
+	for i, v := range verbs {
+		if !s.isContractEligible(v) || maxNTxs[i] < 1.0 {
+			continue
+		}
+		if topIndex < 0 || score[i] > score[topIndex] {
+			topIndex = i
 		}
 	}
-	if !anyFeasible {
-		copy(selectFrom, xProj)
-	}
-
-	// Unlearned-verb exploration floor (cold-start trap escape).
-	//
-	// WHY: a verb that has never run has an all-zero F-row, so its gradient is
-	// 0; the projected-gradient step leaves it at the baseline 1/n while
-	// productive verbs get pushed, and ProjectSimplex then clamps the
-	// untouched weight to exactly 0. A 0-weight verb is unreachable in
-	// selectVerbIndex (both the argmax and the ε-greedy weighted-sample branch
-	// skip it), so it can never get its first run — and so its F-row never
-	// gets learned: a self-perpetuating dead state.
-	//
-	// Force any feasible, never-learned verb to at least Epsilon/n here so the
-	// ε-greedy branch can sample it, get its first Apply, and populate its
-	// F-row. Once learned (F-row non-zero) the floor no longer applies and the
-	// verb competes purely on its gradient merit — this protects the
-	// exploration branch the design already has without biasing the verb mix.
-	//
-	// The floor is gated on the over-paced-axis exclusion: a never-learned
-	// verb whose gradient was deliberately zeroed because every axis it grows
-	// is already over its progress-scaled target must STAY zeroed. "Verb never
-	// tried because the gradient is flat" (legitimate cold-start trap — rescue
-	// it) and "verb zeroed because its axis is over-paced" (respect it) are
-	// distinguished via the verb's reference-F seed: the floor lifts verb i
-	// only when at least one axis it is seeded to grow is still under-paced
-	// (pre-clip residual desired−current > 0).
-	if anyFeasible && s.Epsilon > 0 && n > 0 {
-		epsilonFloor := s.Epsilon / float64(n)
-		for i, v := range verbs {
+	if topIndex < 0 {
+		for i := range verbs {
 			if maxNTxs[i] < 1.0 {
-				continue // infeasible — skip
+				continue
 			}
-			if !s.isContractEligible(v) {
-				continue // contract-ineligible — never explore a structurally dead verb
+			if topIndex < 0 || score[i] > score[topIndex] {
+				topIndex = i
 			}
-			fRow := s.axisVec(v)
-			if fRow[0]+fRow[1]+fRow[2] != 0 || selectFrom[i] >= epsilonFloor {
-				continue // already learned, or already at/above the floor
-			}
-			if !floorHelpsUnderPacedAxis(s.referenceAxisVec(v), residual) {
-				continue // every axis this verb grows is over-paced — respect the gradient's exclusion
-			}
-			selectFrom[i] = epsilonFloor
 		}
 	}
-
-	total := sumFloats(selectFrom)
-	if total > 0 {
-		for i := range selectFrom {
-			selectFrom[i] /= total
+	if topIndex < 0 {
+		for i := range verbs {
+			if topIndex < 0 || score[i] > score[topIndex] {
+				topIndex = i
+			}
 		}
 	}
-
-	topIndex := s.selectVerbIndex(verbs, selectFrom)
 	topVerb := verbs[topIndex]
 
 	if s.debugPick {
-		s.logPickDebug(verbs, fMat, grad, xProj, maxNTxs, selectFrom,
-			residual, endgame, cum, progress, topVerb)
+		s.logPickDebug(verbs, fMat, score, maxNTxs, residual, endgame, cum, progress, topVerb)
 	}
 
 	avg := s.AvgTxRLP[topVerb]
@@ -365,9 +236,12 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		deadlineBytes = clampMin(clampMax(safe, totalBatchBytes), 1)
 	}
 
+	// Mix carries the per-verb score, exposed for the Prometheus MixSimplex
+	// gauge and the journal record. It is observational only — selection is the
+	// argmax above, not a sampled mix.
 	mix := make(map[string]float64, n)
 	for i, v := range verbs {
-		mix[v] = xProj[i]
+		mix[v] = score[i]
 	}
 
 	// nMax is the MINIMUM of three bounds plus a hard ceiling:
@@ -382,9 +256,6 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	//      binding constraint — that is physics, not a bug.
 	//   3. axis-headroom cap (capN) — when an over-served axis limits the verb.
 	//   4. nMaxHardCeil — caps batch size for Nethermind commit efficiency.
-	//      Measured: ~65 k-tx blocks commit at ~47 µs/tx, ~7-12 k-tx blocks at
-	//      ~25-30 µs/tx — large blocks are ~1.7x worse per tx, so a smaller cap
-	//      raises sustained throughput. 12 k matches the Python reference orch.
 	nMaxHardCeil := s.cfg.Control.NMaxHardCeil
 	byteBasedMax := nMaxHardCeil
 	if avg > 0 && deadlineBytes > 0 {
@@ -419,19 +290,14 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 }
 
 // logPickDebug emits one structured slog line per batch capturing, for every
-// verb, the inputs and intermediate weights that drive verb selection. It is
+// verb, the score and per-verb cap that drive the deterministic argmax. It is
 // called only when ORCH_DEBUG_PICK is truthy ($ORCH_DEBUG_PICK gate, read once
 // at construction). It is purely observational — it reads already-computed
 // values and changes no control state.
-//
-// fMat is the [3][n] F-matrix; grad/xProj/maxNTxs/selectFrom are the
-// per-verb intermediate slices (selectFrom is the final, normalised selection
-// weight). The per-verb data is packed into one compact string field so the
-// whole batch stays on a single grep-able line: msg="pick debug".
 func (s *State) logPickDebug(
 	verbs []string,
 	fMat [3][]float64,
-	grad, xProj, maxNTxs, selectFrom []float64,
+	score, maxNTxs []float64,
 	residual [3]float64,
 	endgame bool,
 	cum, progress float64,
@@ -439,33 +305,17 @@ func (s *State) logPickDebug(
 ) {
 	var sb strings.Builder
 	for j, v := range verbs {
-		fRow := s.axisVec(v)
-		fSum := fRow[0] + fRow[1] + fRow[2]
+		fSum := fMat[0][j] + fMat[1][j] + fMat[2][j]
 
-		// Classify why (if at all) this verb's final selection weight is zero.
-		// Stages, checked in pipeline order:
-		//   projection-clamped     — ProjectSimplex zeroed xProj[j].
-		//   cap-zeroed             — per-verb cap < 1 tx (over-served axis).
-		//   floor-gated-overpaced  — a never-learned verb the exploration floor
-		//                            would lift, but every axis it is seeded to
-		//                            grow is over-paced, so the floor's
-		//                            over-paced-axis gate kept it zeroed.
-		//   feasibility-filtered   — selectFrom[j] still 0 after the feasibility
-		//                            filter and exploration floor.
-		zeroed := selectFrom[j] <= 0
-		stage := "none"
-		if zeroed {
-			neverLearned := fSum == 0
-			switch {
-			case xProj[j] <= 0:
-				stage = "projection-clamped"
-			case maxNTxs[j] < 1.0:
-				stage = "cap-zeroed"
-			case neverLearned && !floorHelpsUnderPacedAxis(s.referenceAxisVec(v), residual):
-				stage = "floor-gated-overpaced"
-			default:
-				stage = "feasibility-filtered"
-			}
+		// Classify why (if at all) this verb could not be selected.
+		//   contract-ineligible — undeployed contract dependency.
+		//   cap-zeroed           — per-verb cap < 1 tx (over-served axis).
+		reason := "candidate"
+		switch {
+		case !s.isContractEligible(v):
+			reason = "contract-ineligible"
+		case maxNTxs[j] < 1.0:
+			reason = "cap-zeroed"
 		}
 
 		capStr := "inf"
@@ -476,11 +326,11 @@ func (s *State) logPickDebug(
 		if j > 0 {
 			sb.WriteByte(' ')
 		}
-		// verb|F=[acc,sto,code]|fSum|grad|xProj|cap|selectFrom|zeroed|stage
+		// verb|F=[acc,sto,code]|fSum|score|cap|reason
 		fmt.Fprintf(&sb,
-			"{verb=%s F=[%.6g,%.6g,%.6g] fSum=%.6g grad=%.6g xProj=%.6g cap=%s selectFrom=%.6g zeroed=%t stage=%s}",
+			"{verb=%s F=[%.6g,%.6g,%.6g] fSum=%.6g score=%.6g cap=%s reason=%s}",
 			v, fMat[0][j], fMat[1][j], fMat[2][j], fSum,
-			grad[j], xProj[j], capStr, selectFrom[j], zeroed, stage)
+			score[j], capStr, reason)
 	}
 
 	slog.Info("pick debug",
@@ -494,90 +344,6 @@ func (s *State) logPickDebug(
 		"selected_verb", selectedVerb,
 		"verbs", sb.String(),
 	)
-}
-
-// selectVerbIndex implements ε-greedy with deterministic RNG.
-// Seed: sha256(chainIdentity || batchID_big_endian).
-// Python: seed_input = f"{chain_identity_hash}:{target_sha256}:{batch_id}"
-// We encode the same components in binary for determinism.
-//
-// The exploit (argmax) branch is tie-broken by BytesPerGas (Change 4); the
-// stochastic explore branch is left untouched so exploration stays unbiased.
-func (s *State) selectVerbIndex(verbs []string, weights []float64) int {
-	if s.Epsilon <= 0 {
-		return s.argmaxTieBroken(verbs, weights)
-	}
-	tot := sumFloats(weights)
-	if tot <= 0 || math.IsInf(tot, 0) || math.IsNaN(tot) {
-		return s.argmaxTieBroken(verbs, weights)
-	}
-
-	h := sha256.New()
-	h.Write(s.ChainIdentity[:])
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], s.BatchID)
-	h.Write(buf[:])
-	digest := h.Sum(nil)
-
-	seed0 := binary.BigEndian.Uint64(digest[:8])
-	seed1 := binary.BigEndian.Uint64(digest[8:16])
-	rng := rand.New(rand.NewPCG(seed0, seed1))
-
-	if rng.Float64() >= s.Epsilon {
-		return s.argmaxTieBroken(verbs, weights)
-	}
-	// Weighted sample without normalising (weights already sum to ~1).
-	r := rng.Float64() * tot
-	cum := 0.0
-	for i, w := range weights {
-		cum += w
-		if r <= cum {
-			return i
-		}
-	}
-	return len(weights) - 1
-}
-
-// argmaxTieBroken picks the highest-weight verb, breaking ties by BytesPerGas
-// (Change 4 / design-v3 §B). Verbs whose selection weight is within
-// ToleranceFloor of the maximum are deemed gradient-equivalent; among them the
-// verb with the higher measured BytesPerGas is preferred — more state growth
-// per gas spent is cheaper bloating. This NEVER overrides the gradient ranking:
-// a verb outside the equivalence band can never be chosen over the argmax. With
-// the tie-break gated off it degrades to a plain argmax.
-func (s *State) argmaxTieBroken(verbs []string, weights []float64) int {
-	best := argmaxFloats(weights)
-	if !s.cfg.Control.BytesPerGasTieBreak || len(verbs) != len(weights) {
-		return best
-	}
-	band := s.cfg.Control.ToleranceFloor
-	pick := best
-	bestBPG := s.bytesPerGasFor(verbs[best])
-	for i, w := range weights {
-		if i == best {
-			continue
-		}
-		if weights[best]-w > band {
-			continue // outside the equivalence band — gradient ranks it strictly lower
-		}
-		if bpg := s.bytesPerGasFor(verbs[i]); bpg > bestBPG {
-			bestBPG = bpg
-			pick = i
-		}
-	}
-	return pick
-}
-
-// bytesPerGasFor returns the learned BytesPerGas EWMA for verb, or 0 when the
-// verb has no warm stats yet. A cold verb's 0 means it cannot win a tie-break
-// over a verb with a measured value — correct, since an unmeasured verb has no
-// efficiency evidence.
-func (s *State) bytesPerGasFor(verb string) float64 {
-	vs := s.GetVerbStats(verb)
-	if vs == nil || vs.BytesPerGas == nil {
-		return 0
-	}
-	return vs.BytesPerGas.Value()
 }
 
 // buildFMatrix builds a [3][n] matrix: rows = axes, cols = verbs.
@@ -604,26 +370,6 @@ func (s *State) axisVec(verb string) [3]float64 {
 	return out
 }
 
-// referenceAxisVec returns the [3]float64 reference-F seed row for a verb,
-// ordered by Axes. Unlike axisVec it reads the immutable seed (refF), not the
-// live F matrix that online learning overwrites — so for a never-learned verb
-// it still reports the verb's expected per-axis effect. Returns all-zero when
-// no seed is available (refF nil, or the verb missing from it).
-func (s *State) referenceAxisVec(verb string) [3]float64 {
-	var out [3]float64
-	if s.refF == nil {
-		return out
-	}
-	row, ok := s.refF.Verbs[verb]
-	if !ok {
-		return out
-	}
-	for i, ax := range Axes {
-		out[i] = row[string(ax)]
-	}
-	return out
-}
-
 // obsToVec converts an Observation to an axis-ordered float64 triple.
 func obsToVec(obs *Observation) [3]float64 {
 	return [3]float64{
@@ -633,62 +379,8 @@ func obsToVec(obs *Observation) [3]float64 {
 	}
 }
 
-// matVecMul3 multiplies a [3][n] matrix by an n-vec, returning a [3] result.
-func matVecMul3(mat [3][]float64, v []float64) [3]float64 {
-	var out [3]float64
-	for i := 0; i < 3; i++ {
-		for j, x := range v {
-			out[i] += mat[i][j] * x
-		}
-	}
-	return out
-}
-
-func l2NormSlice(v []float64) float64 {
-	s := 0.0
-	for _, x := range v {
-		s += x * x
-	}
-	return math.Sqrt(s)
-}
-
 func l2Norm3(v [3]float64) float64 {
 	return math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
-}
-
-// floorHelpsUnderPacedAxis reports whether lifting a never-learned verb by the
-// exploration floor can serve an under-paced axis. refRow is the verb's
-// reference-F seed effect [accounts, storage, code]; residual is the pre-clip
-// per-axis residual (desired − current) — an axis is under-paced iff its
-// residual is > 0. Returns true iff at least one axis the verb is seeded to
-// grow (refRow[ax] > 0) is under-paced. When the seed row is all-zero this
-// returns false, which is correct: a verb with no expected effect cannot help
-// any axis and there is nothing to explore toward.
-func floorHelpsUnderPacedAxis(refRow, residual [3]float64) bool {
-	for ax := 0; ax < 3; ax++ {
-		if refRow[ax] > 0 && residual[ax] > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func sumFloats(v []float64) float64 {
-	s := 0.0
-	for _, x := range v {
-		s += x
-	}
-	return s
-}
-
-func argmaxFloats(v []float64) int {
-	best := 0
-	for i := 1; i < len(v); i++ {
-		if v[i] > v[best] {
-			best = i
-		}
-	}
-	return best
 }
 
 func clampMin(v, lo int) int {
