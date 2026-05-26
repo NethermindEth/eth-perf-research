@@ -76,23 +76,22 @@ func (s *State) gasPerTxEstimate(verb string) float64 {
 	return estimate
 }
 
-// Pick is goroutine-safe for concurrent readers. State fields are written only
-// by Apply (commit goroutine); the read-write race on F/Sigma/Alpha is benign
-// — readers see either pre-Apply or post-Apply state, both valid plan inputs.
+// Pick selects the next batch's verb. Must be called under LockState; Pick
+// and Apply share that mutex so Rows reads and writes are coherent.
+// Verb score = Σ_a F[v][a] · residual[a] (or deficit-share when ratio-scoring
+// is enabled). Greedy argmax with ε-greedy exploration via Control.Epsilon.
+// totalBatchBytes caps deadline_bytes; blockGasLimit=0 disables gas capping.
 //
-// Pick computes the next batch plan from the current observation and target.
-// totalBatchBytes is the hard byte cap for deadline_bytes. blockGasLimit is
-// the current head-block gas limit (0 = no gas cap applied).
-//
-// Selection is one deterministic step (design-v4 §3.1): the verb whose learned
-// F-row, dotted with the endgame-clipped trajectory residual vector, yields the
-// highest score is chosen. score(v) = Σ_a F[v][a]·r'[a] is design-v3's
-// gradient direction Fᵀr evaluated once; since dispatch is single-verb-per-batch
-// the projected-gradient descent + its re-lift floors are unnecessary scaffolding
-// and have been removed. No RNG, no ε-greedy: the picker is fully deterministic.
+// Pick is index-driven: every per-axis or per-verb read is `s.Rows[i].F[ax]`
+// or s.pick.<buffer>[i] — no string-keyed map lookup on the hot path, and no
+// allocation on a steady-state call. The Mix map IS allocated fresh per call
+// because BatchPlan escapes to the committer goroutine; the scratch `mix` on
+// State is left ready for the next Pick.
 func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGasLimit uint64) *BatchPlan {
 	verbs := s.Verbs
 	n := len(verbs)
+	scratch := s.pick
+	scratch.reset(s.Rows)
 
 	current := obsToVec(obs)
 	cum := current[0] + current[1] + current[2]
@@ -120,26 +119,73 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	endgame := cum >= targetTotal && (current[0] < targetFull[0] || current[1] < targetFull[1] || current[2] < targetFull[2])
 
-	// Per-verb score: F-row dotted with the residual, with one monotone-bloating
-	// rule applied per (verb, axis) term. On an over-served axis (residual < 0)
-	// an additive verb (F > 0) cannot shrink the axis and cannot avoid touching
-	// it — penalising it there only hands the argmax to a do-nothing verb and
-	// stalls the run, so that term is clipped to zero. A shrinkage verb (F < 0)
-	// on an over-served axis keeps its positive (negative·negative) term, since
-	// shrinkage is exactly what is wanted there. Under-served axes (residual >=
-	// 0) score normally on every verb.
-	fMat := s.buildFMatrix(verbs)
-	score := make([]float64, n)
-	for j := 0; j < n; j++ {
-		var sc float64
-		for a := 0; a < 3; a++ {
-			f, r := fMat[a][j], residual[a]
-			if r < 0 && f > 0 {
-				continue
-			}
-			sc += f * r
+	// Per-verb score: F-row dotted with the relative-gap residual, with one
+	// monotone-bloating rule applied per (verb, axis) term. See historical
+	// docstring in apply.go; the scoring math itself is unchanged from the
+	// pre-A8 version, only the data source is now position-indexed.
+	fMat := scratch.fMat
+	score := scratch.score
+
+	// deficit / weight expose the ratio-on-trajectory scoring inputs for the
+	// debug logger. They are populated only when UseRatioScoring is on and
+	// the trajectory fallback to the legacy formula is not taken; when the
+	// legacy formula runs they stay zero.
+	var deficit, ratioWeight [3]float64
+	useRatio := s.UseRatioScoring
+	ratioFellBack := false
+	if useRatio {
+		targetShares := [3]float64{
+			tgt.Shares[AxisAccounts],
+			tgt.Shares[AxisStorage],
+			tgt.Shares[AxisCode],
 		}
-		score[j] = sc
+		for a := 0; a < 3; a++ {
+			expected := targetShares[a] * cum
+			if expected > targetFull[a] {
+				expected = targetFull[a]
+			}
+			d := expected - current[a]
+			if d < 0 {
+				d = 0
+			}
+			deficit[a] = d
+		}
+		sumDeficit := deficit[0] + deficit[1] + deficit[2]
+		if sumDeficit > 0 {
+			for a := 0; a < 3; a++ {
+				ratioWeight[a] = deficit[a] / sumDeficit
+			}
+			for j := 0; j < n; j++ {
+				var sc float64
+				for a := 0; a < 3; a++ {
+					f, w := fMat[a][j], ratioWeight[a]
+					if f > 0 && w > 0 {
+						sc += f * w
+					}
+				}
+				score[j] = sc
+			}
+		} else {
+			ratioFellBack = true
+		}
+	}
+	if !useRatio || ratioFellBack {
+		for j := 0; j < n; j++ {
+			var sc float64
+			for a := 0; a < 3; a++ {
+				f, r := fMat[a][j], residual[a]
+				if r < 0 && f > 0 {
+					continue
+				}
+				tgtAxis := targetFull[a]
+				if tgtAxis > 0 {
+					sc += f * r / tgtAxis
+				} else {
+					sc += f * r
+				}
+			}
+			score[j] = sc
+		}
 	}
 
 	// Per-axis trajectory cap (design-v4 §2.6): max_n_txs[i] = min over the
@@ -156,12 +202,12 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		tol := math.Max(p[axIdx], s.cfg.Control.ToleranceFloor) * float64(totalBatchBytes)
 		tolerance[axIdx] = headroom + tol
 	}
-	maxNTxs := make([]float64, n)
-	for i := range maxNTxs {
+	maxNTxs := scratch.maxNTxs
+	for i := 0; i < n; i++ {
 		maxNTxs[i] = math.Inf(1)
 	}
-	for i, v := range verbs {
-		fRow := s.axisVec(v)
+	for i := 0; i < n; i++ {
+		fRow := s.Rows[i].F
 		fSum := fRow[0] + fRow[1] + fRow[2]
 		if fSum <= 0 {
 			continue
@@ -183,43 +229,48 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 	}
 
-	// argmax over eligible, feasible verbs. A verb is eligible when its contract
-	// dependency is deployed (structurally dead verbs are 100%-rejected on
-	// commit) and feasible when its per-axis cap permits at least one tx. The
-	// first such verb seeds the argmax; ties break on the lower verb index
-	// (deterministic). If no verb is both eligible and feasible the eligibility
-	// constraint is relaxed to feasibility-only so the run is not wedged; if
-	// still none, every verb is a candidate.
-	topIndex := -1
+	// Candidate set: eligible (contract deployed) and feasible (per-axis cap
+	// permits >= 1 tx). Relax to feasibility-only, then to all verbs, so the
+	// run is never wedged.
+	candidates := scratch.candidates
 	for i, v := range verbs {
-		if !s.isContractEligible(v) || maxNTxs[i] < 1.0 {
-			continue
+		if s.isContractEligible(v) && maxNTxs[i] >= 1.0 {
+			candidates = append(candidates, i)
 		}
-		if topIndex < 0 || score[i] > score[topIndex] {
+	}
+	if len(candidates) == 0 {
+		for i := range verbs {
+			if maxNTxs[i] >= 1.0 {
+				candidates = append(candidates, i)
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		for i := range verbs {
+			candidates = append(candidates, i)
+		}
+	}
+	scratch.candidates = candidates
+
+	// Greedy: argmax score over the candidate set; ties break on lower index.
+	topIndex := candidates[0]
+	for _, i := range candidates {
+		if score[i] > score[topIndex] {
 			topIndex = i
 		}
 	}
-	if topIndex < 0 {
-		for i := range verbs {
-			if maxNTxs[i] < 1.0 {
-				continue
-			}
-			if topIndex < 0 || score[i] > score[topIndex] {
-				topIndex = i
-			}
-		}
-	}
-	if topIndex < 0 {
-		for i := range verbs {
-			if topIndex < 0 || score[i] > score[topIndex] {
-				topIndex = i
-			}
-		}
+
+	// ε-greedy: with probability Epsilon, explore — replace the greedy verb
+	// with a uniformly-random candidate.
+	explored := false
+	if eps := s.cfg.Control.Epsilon; eps > 0 && len(candidates) > 1 && s.rng.Float64() < eps {
+		topIndex = candidates[s.rng.Intn(len(candidates))]
+		explored = true
 	}
 	topVerb := verbs[topIndex]
 
 	if s.debugPick {
-		s.logPickDebug(verbs, fMat, score, maxNTxs, residual, endgame, cum, progress, topVerb)
+		s.logPickDebug(verbs, fMat, score, maxNTxs, residual, deficit, ratioWeight, useRatio, ratioFellBack, endgame, cum, progress, topVerb, explored)
 	}
 
 	avg := s.AvgTxRLP[topVerb]
@@ -237,26 +288,20 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 
 	// Mix carries the per-verb score, exposed for the Prometheus MixSimplex
-	// gauge and the journal record. It is observational only — selection is the
-	// argmax above, not a sampled mix.
+	// gauge and the journal record. Allocated fresh because BatchPlan escapes
+	// to the committer goroutine; the scratch.mix on State is reserved for
+	// internal use only.
 	mix := make(map[string]float64, n)
 	for i, v := range verbs {
 		mix[v] = score[i]
 	}
 
-	// nMax is the MINIMUM of three bounds plus a hard ceiling:
-	//
-	//   1. gasBasedMax  — PRIMARY. floor(0.90 × blockGasLimit / gasPerTx(verb)).
-	//      Drives the batch to ~90% gas fill. Always finite & binding for a
-	//      non-zero blockGasLimit; only a zero gas limit (fresh client) leaves
-	//      it unbounded so the first batch is not wedged.
-	//   2. byteBasedMax — SECONDARY clamp. floor(deadlineBytes / avgTxRLP).
-	//      Nethermind rejects blocks above BlockProductionMaxTxKilobytes, so
-	//      this stays a real cap; for ultra-cheap verbs (eoatx) it is still the
-	//      binding constraint — that is physics, not a bug.
-	//   3. axis-headroom cap (capN) — when an over-served axis limits the verb.
-	//   4. nMaxHardCeil — caps batch size for Nethermind commit efficiency.
+	// nMax is the MINIMUM of three bounds plus a hard ceiling — see legacy
+	// docstring; logic unchanged.
 	nMaxHardCeil := s.cfg.Control.NMaxHardCeil
+	if perVerb, ok := s.cfg.Control.NMaxHardCeilPerVerb[topVerb]; ok {
+		nMaxHardCeil = perVerb
+	}
 	byteBasedMax := nMaxHardCeil
 	if avg > 0 && deadlineBytes > 0 {
 		byteBasedMax = clampMin(deadlineBytes/int(avg), 1)
@@ -298,18 +343,17 @@ func (s *State) logPickDebug(
 	verbs []string,
 	fMat [3][]float64,
 	score, maxNTxs []float64,
-	residual [3]float64,
+	residual, deficit, ratioWeight [3]float64,
+	useRatio, ratioFellBack bool,
 	endgame bool,
 	cum, progress float64,
 	selectedVerb string,
+	explored bool,
 ) {
 	var sb strings.Builder
 	for j, v := range verbs {
 		fSum := fMat[0][j] + fMat[1][j] + fMat[2][j]
 
-		// Classify why (if at all) this verb could not be selected.
-		//   contract-ineligible — undeployed contract dependency.
-		//   cap-zeroed           — per-verb cap < 1 tx (over-served axis).
 		reason := "candidate"
 		switch {
 		case !s.isContractEligible(v):
@@ -326,7 +370,6 @@ func (s *State) logPickDebug(
 		if j > 0 {
 			sb.WriteByte(' ')
 		}
-		// verb|F=[acc,sto,code]|fSum|score|cap|reason
 		fmt.Fprintf(&sb,
 			"{verb=%s F=[%.6g,%.6g,%.6g] fSum=%.6g score=%.6g cap=%s reason=%s}",
 			v, fMat[0][j], fMat[1][j], fMat[2][j], fSum,
@@ -338,36 +381,21 @@ func (s *State) logPickDebug(
 		"residual_accounts", residual[0],
 		"residual_storage", residual[1],
 		"residual_code", residual[2],
+		"deficit_accounts", deficit[0],
+		"deficit_storage", deficit[1],
+		"deficit_code", deficit[2],
+		"weight_accounts", ratioWeight[0],
+		"weight_storage", ratioWeight[1],
+		"weight_code", ratioWeight[2],
+		"use_ratio_scoring", useRatio,
+		"ratio_fell_back", ratioFellBack,
 		"endgame", endgame,
 		"cum", cum,
 		"progress", progress,
 		"selected_verb", selectedVerb,
+		"explored", explored,
 		"verbs", sb.String(),
 	)
-}
-
-// buildFMatrix builds a [3][n] matrix: rows = axes, cols = verbs.
-func (s *State) buildFMatrix(verbs []string) [3][]float64 {
-	n := len(verbs)
-	var mat [3][]float64
-	for i := range mat {
-		mat[i] = make([]float64, n)
-	}
-	for j, v := range verbs {
-		for axIdx, ax := range Axes {
-			mat[axIdx][j] = s.F[v][ax]
-		}
-	}
-	return mat
-}
-
-// axisVec returns the [3]float64 F-row for a verb, ordered by Axes.
-func (s *State) axisVec(verb string) [3]float64 {
-	var out [3]float64
-	for i, ax := range Axes {
-		out[i] = s.F[verb][ax]
-	}
-	return out
 }
 
 // obsToVec converts an Observation to an axis-ordered float64 triple.

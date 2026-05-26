@@ -1,5 +1,8 @@
 /bin/
 /dist/
+lifecycle_worker
+/orchestrator
+/sidecar
 *.test
 *.out
 *.prof

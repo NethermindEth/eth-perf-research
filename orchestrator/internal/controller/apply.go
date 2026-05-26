@@ -51,6 +51,16 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	coeffBound := s.cfg.Control.CoeffBound
 	sigmaFloor := s.cfg.Control.SigmaFloor
 
+	// Index the verb's row once. A verb absent from the registry is a
+	// pre-condition violation by the caller (Pick selects from s.Verbs); guard
+	// it defensively rather than panic so a misconfigured test caller doesn't
+	// crash the controller.
+	rowIdx, known := s.verbIdx[verb]
+	if !known {
+		return nil, fmt.Errorf("controller: Apply on unknown verb %q", verb)
+	}
+	row := &s.Rows[rowIdx]
+
 	// Update F, Sigma, Alpha via adaptive-α.
 	//
 	// Each axis update is guarded so one pathological batch cannot corrupt F:
@@ -61,21 +71,25 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	//      even an in-range-but-large observation cannot ratchet the matrix
 	//      toward the divergent 6.48e13 / 4.15e14 state seen in production.
 	// The adaptive-α/Huber math itself (UpdateCoeff) is unchanged.
-	for axIdx, ax := range Axes {
+	for axIdx := 0; axIdx < 3; axIdx++ {
 		if !mathx.IsFiniteInRange(observed[axIdx], coeffBound) {
 			// Pathological observation — skip this axis's update entirely.
 			continue
 		}
 		result := mathx.UpdateCoeff(
-			s.F[verb][ax],
+			row.F[axIdx],
 			observed[axIdx],
-			s.Sigma[verb][ax],
-			s.Alpha[verb][ax],
+			row.Sigma[axIdx],
+			row.Alpha[axIdx],
 			tuning,
 		)
-		s.F[verb][ax] = mathx.ClampCoeff(result.F, coeffBound)
-		s.Sigma[verb][ax] = mathx.ClampSigma(result.Sigma, sigmaFloor, coeffBound)
-		s.Alpha[verb][ax] = result.Alpha
+		// Writes go through atomicStoreFloat so the lock-free snapshot readers
+		// (FSnapshot / AlphaSnapshot / SigmaSnapshot) see clean, race-detector
+		// safe values. Pick reads plain slots under pickApplyMu — the same mu
+		// this Apply call holds — so the writes are still ordered wrt Pick.
+		atomicStoreFloat(&row.F[axIdx], mathx.ClampCoeff(result.F, coeffBound))
+		atomicStoreFloat(&row.Sigma[axIdx], mathx.ClampSigma(result.Sigma, sigmaFloor, coeffBound))
+		atomicStoreFloat(&row.Alpha[axIdx], result.Alpha)
 	}
 
 	// Residual: obs_vec - commanded_vec (commanded = F[verb][ax] * txCount after update).
@@ -84,8 +98,8 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	// been updated in the loop above. We match that.
 	commanded := [3]float64{}
 	obsVec := [3]float64{}
-	for axIdx, ax := range Axes {
-		commanded[axIdx] = s.F[verb][ax] * float64(txCount)
+	for axIdx := 0; axIdx < 3; axIdx++ {
+		commanded[axIdx] = row.F[axIdx] * float64(txCount)
 		obsVec[axIdx] = observed[axIdx] * float64(txCount)
 	}
 	diff := [3]float64{obsVec[0] - commanded[0], obsVec[1] - commanded[1], obsVec[2] - commanded[2]}

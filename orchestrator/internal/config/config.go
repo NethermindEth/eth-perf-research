@@ -14,24 +14,17 @@ package config
 
 // Control groups the controller-tuning parameters.
 type Control struct {
-	// Epsilon is the ε-greedy verb-exploration rate. Historical: defaultEpsilon.
+	// Epsilon is the ε-greedy verb-exploration rate: the probability that Pick
+	// selects a uniformly-random eligible verb instead of the score argmax.
+	// 0 disables exploration (pure argmax); 1 is fully random. Exploration
+	// stops the picker fixating on the verb that maximises the dominant axis
+	// and starving the others (e.g. code growth).
 	Epsilon float64 `json:"epsilon"`
-	// ProjectionEta is the projected-gradient step size in Pick.
-	ProjectionEta float64 `json:"projection_eta"`
 	// ToleranceFloor is the minimum per-axis tolerance fraction. It also
 	// defines the gradient-equivalence band for the BytesPerGas tie-breaker:
 	// verbs whose gradient scores are within ToleranceFloor of the best are
 	// treated as equivalent.
 	ToleranceFloor float64 `json:"tolerance_floor"`
-	// EntropyFloor (R1) is the minimum simplex weight every eligible verb (one
-	// with a non-degenerate F-row) keeps after the Michelot projection, so a
-	// verb that is the sole grower of an under-target axis can never be zeroed
-	// out of selection.
-	EntropyFloor float64 `json:"entropy_floor"`
-	// AntiWindupEnabled (R2) gates the per-axis anti-windup clamp: when an axis
-	// is at or above target, its away-pushing gradient contribution is clamped
-	// to zero so the controller stops integrating error on a satisfied axis.
-	AntiWindupEnabled bool `json:"anti_windup_enabled"`
 	// BytesPerGasTieBreak gates the BytesPerGas tie-breaker among
 	// gradient-equivalent verbs (Change 4 / design-v3 §B).
 	BytesPerGasTieBreak bool `json:"bytes_per_gas_tie_break"`
@@ -39,8 +32,15 @@ type Control struct {
 	GasFillFraction float64 `json:"gas_fill_fraction"`
 	// GasCapFraction is the dispatcher's hard gas ceiling fraction.
 	GasCapFraction float64 `json:"gas_cap_fraction"`
-	// NMaxHardCeil caps batch size for commit efficiency.
+	// NMaxHardCeil caps batch size. NM commits sub-linearly, so a large block
+	// is cheaper per tx than several small ones; the ceiling exists only to
+	// bound per-batch memory, not because big blocks are slower.
 	NMaxHardCeil int `json:"nmax_hard_ceil"`
+	// NMaxHardCeilPerVerb overrides NMaxHardCeil for specific verbs. A verb absent
+	// from the map uses NMaxHardCeil. Storage-spam-class verbs need a much lower
+	// cap so a single block's trie delta stays small enough for NM's incremental
+	// diff to compute without OOM.
+	NMaxHardCeilPerVerb map[string]int `json:"nmax_hard_ceil_per_verb"`
 
 	// AlphaMin/AlphaMax bound the adaptive learning rate.
 	AlphaMin float64 `json:"alpha_min"`
@@ -84,6 +84,18 @@ type Control struct {
 	DefaultBaseGasPerVerb uint64 `json:"default_base_gas_per_verb"`
 	// BaseGasPerVerb is the cold-start per-tx gas table (verb -> gas).
 	BaseGasPerVerb map[string]uint64 `json:"base_gas_per_verb"`
+
+	// UseRatioScoring switches Pick's verb-scoring weights from the legacy
+	// residual-to-end-target formula to ratio-on-trajectory weights derived
+	// from each axis's deficit at the CURRENT cumulative size. The deficit-
+	// based form holds the configured per-axis shares at every total size
+	// rather than only at the end of the run; default false leaves the
+	// legacy formula in place so production behaviour is unchanged until
+	// explicitly opted in.
+	UseRatioScoring bool `json:"use_ratio_scoring"`
+
+	// DebugPick emits per-batch per-verb controller debug logs.
+	DebugPick bool `json:"debug_pick"`
 }
 
 // Cost groups the fee-policy parameters.
@@ -92,7 +104,8 @@ type Cost struct {
 	PriorityTipWei int64 `json:"priority_tip_wei"`
 	// FeePolicyIntervalMS is the fee-policy refresh interval, in milliseconds.
 	FeePolicyIntervalMS int64 `json:"fee_policy_interval_ms"`
-	// EthPerGasTarget is reserved for a later step; nothing reads it yet.
+	// EthPerGasTarget is the fixed max-fee-per-gas (wei) the fee policy sets on
+	// every signed tx; refreshFeePolicy writes it into the facade context.
 	EthPerGasTarget int64 `json:"eth_per_gas_target"`
 }
 
@@ -111,6 +124,10 @@ type Run struct {
 	DispatchSkipStreakHalt int   `json:"dispatch_skip_streak_halt"`
 	RejectionStreakHalt    int   `json:"rejection_streak_halt"`
 	IdleBackoffMS          int64 `json:"idle_backoff_ms"`
+
+	// LookaheadDepth is the max number of blocks the committer goroutine may
+	// run ahead of the sensor-confirming goroutine; 1 = strictly serial.
+	LookaheadDepth int `json:"lookahead_depth"`
 
 	// ResumeReorgTolerance bounds the head/journal-tail gap a resume tolerates
 	// (env ORCH_RESUME_REORG_TOLERANCE).
@@ -175,14 +192,11 @@ func Defaults() RunConfig {
 	return RunConfig{
 		Control: Control{
 			Epsilon:               0.5,
-			ProjectionEta:         0.1,
 			ToleranceFloor:        0.005,
-			EntropyFloor:          0.02,
-			AntiWindupEnabled:     true,
 			BytesPerGasTieBreak:   true,
 			GasFillFraction:       0.90,
 			GasCapFraction:        0.95,
-			NMaxHardCeil:          12000,
+			NMaxHardCeil:          64000,
 			AlphaMin:              0.02,
 			AlphaMax:              0.30,
 			SigmoidCenter:         0.08,
@@ -204,6 +218,13 @@ func Defaults() RunConfig {
 			AvgTxRLPDecayNew:      0.3,
 			DefaultBaseGasPerVerb: 1_000_000,
 			BaseGasPerVerb:        defaultBaseGasPerVerb(),
+			NMaxHardCeilPerVerb: map[string]int{
+				"storagespam":   400,
+				"erc20_bloater": 400,
+				"erc20tx":       800,
+				"uniswap_swaps": 400,
+			},
+			UseRatioScoring: false,
 		},
 		Cost: Cost{
 			PriorityTipWei:      1_000_000_000,
@@ -217,6 +238,7 @@ func Defaults() RunConfig {
 			DispatchSkipStreakHalt: 20,
 			RejectionStreakHalt:    5,
 			IdleBackoffMS:          50,
+			LookaheadDepth:         4,
 			ResumeReorgTolerance:   256,
 			RPCTimeoutS:            120,
 			SensorPollIntervalMS:   100,

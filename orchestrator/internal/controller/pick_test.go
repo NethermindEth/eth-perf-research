@@ -52,6 +52,8 @@ func TestPickGasburnertxRespectsBlockGasLimit(t *testing.T) {
 // gas-fill fix: gas is now the PRIMARY batch sizer. For a mid-cost verb that
 // is gas-bound (not byte-bound), Pick must size NMaxTxs so the batch targets
 // ≥85% of the block gas limit while never exceeding the 0.95 hard ceiling.
+// The per-verb ceiling is cleared so this test exercises only the gas-fill
+// path without the storage-spam OOM ceiling interfering.
 func TestPickGasPrimarySizerTargetsBlockFill(t *testing.T) {
 	const blockGasLimit uint64 = 8_000_000_000
 
@@ -61,7 +63,9 @@ func TestPickGasPrimarySizerTargetsBlockFill(t *testing.T) {
 		AvgTxRLP: map[string]float64{"storagespam": 1500.0},
 	}
 	var identity [32]byte
-	s := newTestState(verbs, rf, identity)
+	cfg := testCfg()
+	cfg.Control.NMaxHardCeilPerVerb = nil
+	s := NewState(cfg, verbs, rf, identity)
 
 	tgt := makeTarget(10 * 1024 * 1024 * 1024)
 	plan := s.Pick(zeroObs(), tgt, 8*1024*1024, blockGasLimit)
@@ -281,8 +285,8 @@ func TestPickShrinkageVerbScoresHighOnOverPacedAxis(t *testing.T) {
 	}
 }
 
-// TestPickDeterministic: with identical inputs the picker always returns the
-// same verb. The picker has no RNG path — selection is a pure argmax.
+// TestPickDeterministic: with ε=0 and identical inputs the picker always
+// returns the same verb — selection is a pure argmax.
 func TestPickDeterministic(t *testing.T) {
 	verbs := []string{"verb_a", "verb_b", "verb_c"}
 	rf := &referencef.ReferenceF{
@@ -294,7 +298,7 @@ func TestPickDeterministic(t *testing.T) {
 		AvgTxRLP: map[string]float64{"verb_a": 1500, "verb_b": 1500, "verb_c": 1500},
 	}
 	var identity [32]byte
-	s := newTestState(verbs, rf, identity)
+	s := newTestStateEps(verbs, rf, identity, 0)
 
 	tgt := makeTarget(10_000_000)
 	obs := zeroObs()
@@ -308,6 +312,34 @@ func TestPickDeterministic(t *testing.T) {
 		if got != first {
 			t.Fatalf("non-deterministic: got %s on iteration %d, want %s", got, i, first)
 		}
+	}
+}
+
+// TestPickEpsilonGreedyExplores: with ε=1 every Pick explores, so over many
+// calls the picker selects verbs beyond the greedy argmax — the property that
+// keeps a minor under-target axis from being starved.
+func TestPickEpsilonGreedyExplores(t *testing.T) {
+	verbs := []string{"verb_a", "verb_b", "verb_c"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_a": {"accounts": 200.0, "storage": 10.0, "code": 5.0},
+			"verb_b": {"accounts": 10.0, "storage": 200.0, "code": 5.0},
+			"verb_c": {"accounts": 5.0, "storage": 5.0, "code": 200.0},
+		},
+		AvgTxRLP: map[string]float64{"verb_a": 1500, "verb_b": 1500, "verb_c": 1500},
+	}
+	var identity [32]byte
+	s := newTestStateEps(verbs, rf, identity, 1.0)
+
+	tgt := makeTarget(10_000_000)
+	obs := zeroObs()
+
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		seen[s.Pick(obs, tgt, 4_000_000, 0).Verb] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("ε=1 exploration selected only %d distinct verb(s) %v; want >= 2", len(seen), seen)
 	}
 }
 
@@ -539,5 +571,390 @@ func TestComputeGasBasedMaxIgnoresMislearnedLowEWMA(t *testing.T) {
 	if totalGas > hardCeiling {
 		t.Errorf("cap=%d * baselineGas=%d = %d > hard ceiling=%d — batch would be rejected",
 			got, s.baselineGasPerVerb(verb), totalGas, hardCeiling)
+	}
+}
+
+// TestPickRelativeGapPrioritizesUnderTargetAxis is the regression test for the
+// relative-gap scoring switch. The controller now normalises each axis residual
+// by the axis's full target so each axis contributes proportionally to its
+// share-of-target — a smaller axis (e.g. code) can no longer be drowned out by
+// a larger one (e.g. accounts) just because the absolute residual on accounts
+// is bigger.
+//
+// Setup: roughly mainnet-like target shares (accounts 0.27, storage 0.67, code
+// 0.06) on a 100M-byte budget. Observation: storage over-paced (negative-clip
+// for F>0 verbs); accounts at 40% of its target (well-served absolutely but
+// still under); code at 10% of its target (FAR behind relatively).
+//
+// Under absolute-gap scoring the accounts residual (~5.78M) towers over the
+// code residual (~3.08M) and verb_acc would win. Under relative-gap scoring
+// 5.78M/27M ≈ 214 vs 3.08M/6M ≈ 514, so verb_code wins.
+func TestPickRelativeGapPrioritizesUnderTargetAxis(t *testing.T) {
+	verbs := []string{"verb_acc", "verb_storage", "verb_code"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_acc":     {"accounts": 1000, "storage": 0, "code": 0},
+			"verb_storage": {"accounts": 0, "storage": 1000, "code": 0},
+			"verb_code":    {"accounts": 0, "storage": 0, "code": 1000},
+		},
+		AvgTxRLP: map[string]float64{"verb_acc": 1500, "verb_storage": 1500, "verb_code": 1500},
+	}
+	var identity [32]byte
+	// ε=0 so the result is the deterministic argmax — no exploration noise.
+	s := newTestStateEps(verbs, rf, identity, 0)
+
+	const totalBytes int64 = 100_000_000
+	tgt := &Target{
+		Shares: map[Axis]float64{
+			AxisAccounts: 0.27,
+			AxisStorage:  0.67,
+			AxisCode:     0.06,
+		},
+		TotalBytes: totalBytes,
+	}
+	// accounts at 40% of its 27M target; storage over-paced at 75% of its 67M
+	// target (so its residual is clipped for F>0 verbs); code at 10% of its 6M
+	// target — far behind in RELATIVE terms.
+	obs := &Observation{
+		AccountTrieBytes: 10_800_000,
+		StorageTrieBytes: 50_000_000,
+		CodeBytesTotal:   600_000,
+	}
+
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan == nil {
+		t.Fatal("Pick returned nil plan")
+	}
+	if plan.Verb != "verb_code" {
+		t.Fatalf("verb = %q, want verb_code (relative-gap must prioritise the axis with the largest relative shortfall)", plan.Verb)
+	}
+	// Sanity: under relative-gap, verb_code's score must exceed verb_acc's even
+	// though verb_acc has the larger absolute residual.
+	if plan.Mix["verb_code"] <= plan.Mix["verb_acc"] {
+		t.Errorf("verb_code score=%.6g must exceed verb_acc score=%.6g under relative-gap",
+			plan.Mix["verb_code"], plan.Mix["verb_acc"])
+	}
+	// Sanity: storage is over-paced, so the F>0 clip zeroes its term; verb_storage
+	// scores 0 here while verb_code is positive.
+	if plan.Mix["verb_storage"] >= plan.Mix["verb_code"] {
+		t.Errorf("verb_storage score=%.6g must be below verb_code score=%.6g (over-paced clip)",
+			plan.Mix["verb_storage"], plan.Mix["verb_code"])
+	}
+}
+
+// TestPickRelativeGapZeroTargetAxisDoesNotPanic: if a target axis has zero
+// bytes (an unusual but valid configuration — e.g. shares set to 0 for one
+// axis), the relative-gap normalisation must not divide by zero. The fallback
+// is absolute-gap on that axis only.
+func TestPickRelativeGapZeroTargetAxisDoesNotPanic(t *testing.T) {
+	verbs := []string{"verb_acc", "verb_storage"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_acc":     {"accounts": 100, "storage": 0, "code": 0},
+			"verb_storage": {"accounts": 0, "storage": 100, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"verb_acc": 1500, "verb_storage": 1500},
+	}
+	var identity [32]byte
+	s := newTestStateEps(verbs, rf, identity, 0)
+
+	// Code share=0 -> targetFull[code]=0; ensure no panic.
+	tgt := &Target{
+		Shares: map[Axis]float64{
+			AxisAccounts: 0.5,
+			AxisStorage:  0.5,
+			AxisCode:     0.0,
+		},
+		TotalBytes: 1_000_000,
+	}
+	obs := &Observation{AccountTrieBytes: 100_000, StorageTrieBytes: 100_000}
+	plan := s.Pick(obs, tgt, 4_000_000, 8_000_000_000)
+	if plan == nil {
+		t.Fatal("Pick returned nil plan")
+	}
+}
+
+// TestPickPerVerbNMaxHardCeilApplied: when NMaxHardCeilPerVerb contains an
+// entry for the picked verb, Pick must cap NMaxTxs at that per-verb ceiling
+// rather than the global NMaxHardCeil. storagespam is given a dominant F-row
+// so it always wins the argmax; with Epsilon=0 the result is deterministic.
+func TestPickPerVerbNMaxHardCeilApplied(t *testing.T) {
+	const verbCeil = 400
+
+	verbs := []string{"storagespam", "eoatx"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"storagespam": {"accounts": 100, "storage": 10000, "code": 100},
+			"eoatx":       {"accounts": 1, "storage": 1, "code": 1},
+		},
+		AvgTxRLP: map[string]float64{"storagespam": 1500.0, "eoatx": 1500.0},
+	}
+	var identity [32]byte
+	cfg := testCfg()
+	cfg.Control.NMaxHardCeilPerVerb = map[string]int{"storagespam": verbCeil}
+	cfg.Control.Epsilon = 0
+	s := NewState(cfg, verbs, rf, identity)
+
+	// storage massively under-paced so storagespam wins the argmax.
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.1, AxisStorage: 0.9, AxisCode: 0.0},
+		TotalBytes: 10 * 1024 * 1024 * 1024,
+	}
+	obs := &Observation{AccountTrieBytes: 400_000_000}
+
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan.Verb != "storagespam" {
+		t.Fatalf("verb = %q, want storagespam", plan.Verb)
+	}
+	if plan.NMaxTxs > verbCeil {
+		t.Fatalf("NMaxTxs = %d, want <= %d (per-verb ceiling)", plan.NMaxTxs, verbCeil)
+	}
+}
+
+// TestRatioScoring_WeightsByDeficit: ratio scoring weights each axis by its
+// deficit at the current cumulative size. With actual=(200,700,60) the
+// accounts axis is under its on-ratio share (storage and code are at/above
+// theirs), so only accounts carries a positive deficit. The picker must
+// favour the accounts-heavy verb.
+func TestRatioScoring_WeightsByDeficit(t *testing.T) {
+	verbs := []string{"verb_acc", "verb_storage", "verb_code"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_acc":     {"accounts": 1000, "storage": 0, "code": 0},
+			"verb_storage": {"accounts": 0, "storage": 1000, "code": 0},
+			"verb_code":    {"accounts": 0, "storage": 0, "code": 1000},
+		},
+		AvgTxRLP: map[string]float64{"verb_acc": 1500, "verb_storage": 1500, "verb_code": 1500},
+	}
+	var identity [32]byte
+	s := newTestStateEps(verbs, rf, identity, 0)
+	s.UseRatioScoring = true
+
+	tgt := &Target{
+		Shares: map[Axis]float64{
+			AxisAccounts: 0.273,
+			AxisStorage:  0.667,
+			AxisCode:     0.060,
+		},
+		TotalBytes: 10_000_000_000,
+	}
+	obs := &Observation{
+		AccountTrieBytes: 200,
+		StorageTrieBytes: 700,
+		CodeBytesTotal:   60,
+	}
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan == nil {
+		t.Fatal("Pick returned nil plan")
+	}
+	if plan.Verb != "verb_acc" {
+		t.Fatalf("verb = %q, want verb_acc (only axis with positive deficit must win)", plan.Verb)
+	}
+	if plan.Mix["verb_acc"] <= plan.Mix["verb_storage"] {
+		t.Errorf("verb_acc score=%.6g must exceed verb_storage score=%.6g (storage over-share gets weight 0)",
+			plan.Mix["verb_acc"], plan.Mix["verb_storage"])
+	}
+	if plan.Mix["verb_acc"] <= plan.Mix["verb_code"] {
+		t.Errorf("verb_acc score=%.6g must exceed verb_code score=%.6g (code at-share gets weight 0)",
+			plan.Mix["verb_acc"], plan.Mix["verb_code"])
+	}
+	if plan.Mix["verb_storage"] != 0 {
+		t.Errorf("verb_storage score=%.6g, want 0 (storage axis weight must be 0)", plan.Mix["verb_storage"])
+	}
+}
+
+// TestRatioScoring_OverShareGetsZeroWeight: a verb whose F-row touches only
+// an over-share axis gets a zero score under ratio scoring because that
+// axis's deficit is clamped to zero. The under-share axis owns the entire
+// weight mass.
+func TestRatioScoring_OverShareGetsZeroWeight(t *testing.T) {
+	verbs := []string{"verb_acc", "verb_storage_only"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_acc":          {"accounts": 1000, "storage": 0, "code": 0},
+			"verb_storage_only": {"accounts": 0, "storage": 1000, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"verb_acc": 1500, "verb_storage_only": 1500},
+	}
+	var identity [32]byte
+	s := newTestStateEps(verbs, rf, identity, 0)
+	s.UseRatioScoring = true
+
+	// Storage is heavily over its on-ratio share; accounts is under.
+	tgt := &Target{
+		Shares: map[Axis]float64{
+			AxisAccounts: 0.273,
+			AxisStorage:  0.667,
+			AxisCode:     0.060,
+		},
+		TotalBytes: 10_000_000_000,
+	}
+	obs := &Observation{
+		AccountTrieBytes: 150,
+		StorageTrieBytes: 800,
+		CodeBytesTotal:   60,
+	}
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan == nil {
+		t.Fatal("Pick returned nil plan")
+	}
+	if plan.Mix["verb_storage_only"] != 0 {
+		t.Errorf("verb_storage_only score=%.6g, want 0 (storage axis is over-share, weight must be 0)",
+			plan.Mix["verb_storage_only"])
+	}
+	if plan.Verb != "verb_acc" {
+		t.Fatalf("verb = %q, want verb_acc (storage-only verb scores 0 on over-share axis)", plan.Verb)
+	}
+}
+
+// TestRatioScoring_EndgameFallback: when every axis is at or above its full
+// target the sum of deficits is zero and ratio scoring falls back to the
+// legacy residual-normalised formula. The score row must therefore match
+// what the legacy formula would produce on the same inputs.
+func TestRatioScoring_EndgameFallback(t *testing.T) {
+	verbs := []string{"verb_acc", "verb_storage"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_acc":     {"accounts": 1000, "storage": 0, "code": 0},
+			"verb_storage": {"accounts": 0, "storage": 1000, "code": 0},
+		},
+		AvgTxRLP: map[string]float64{"verb_acc": 1500, "verb_storage": 1500},
+	}
+	var identity [32]byte
+	sRatio := newTestStateEps(verbs, rf, identity, 0)
+	sRatio.UseRatioScoring = true
+	sLegacy := newTestStateEps(verbs, rf, identity, 0)
+
+	// Both axes are at full target; sumDeficit == 0 -> fallback.
+	tgt := &Target{
+		Shares: map[Axis]float64{
+			AxisAccounts: 0.5,
+			AxisStorage:  0.5,
+			AxisCode:     0.0,
+		},
+		TotalBytes: 1_000_000,
+	}
+	obs := &Observation{
+		AccountTrieBytes: 500_000,
+		StorageTrieBytes: 500_000,
+	}
+	planRatio := sRatio.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	planLegacy := sLegacy.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if planRatio == nil || planLegacy == nil {
+		t.Fatal("Pick returned nil plan")
+	}
+	for _, v := range verbs {
+		if planRatio.Mix[v] != planLegacy.Mix[v] {
+			t.Errorf("verb=%s: ratio score=%.6g != legacy score=%.6g (fallback must produce identical scores)",
+				v, planRatio.Mix[v], planLegacy.Mix[v])
+		}
+	}
+}
+
+// TestRatioScoring_OffByDefault_LegacyBehavior: with UseRatioScoring=false
+// every score must match the legacy residual-normalised formula. This pins
+// down that the new code path is gated behind the flag and the default
+// production behaviour is unchanged.
+func TestRatioScoring_OffByDefault_LegacyBehavior(t *testing.T) {
+	verbs := []string{"verb_acc", "verb_storage", "verb_code"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_acc":     {"accounts": 1000, "storage": 0, "code": 0},
+			"verb_storage": {"accounts": 0, "storage": 1000, "code": 0},
+			"verb_code":    {"accounts": 0, "storage": 0, "code": 1000},
+		},
+		AvgTxRLP: map[string]float64{"verb_acc": 1500, "verb_storage": 1500, "verb_code": 1500},
+	}
+	var identity [32]byte
+	s := newTestStateEps(verbs, rf, identity, 0)
+	if s.UseRatioScoring {
+		t.Fatalf("UseRatioScoring=%v, want false (must be off by default)", s.UseRatioScoring)
+	}
+	if cfg := testCfg(); cfg.Control.UseRatioScoring {
+		t.Fatalf("Defaults().Control.UseRatioScoring=%v, want false", cfg.Control.UseRatioScoring)
+	}
+
+	tgt := &Target{
+		Shares: map[Axis]float64{
+			AxisAccounts: 0.27,
+			AxisStorage:  0.67,
+			AxisCode:     0.06,
+		},
+		TotalBytes: 100_000_000,
+	}
+	obs := &Observation{
+		AccountTrieBytes: 10_800_000,
+		StorageTrieBytes: 50_000_000,
+		CodeBytesTotal:   600_000,
+	}
+	plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+	if plan == nil {
+		t.Fatal("Pick returned nil plan")
+	}
+	// Legacy relative-gap formula (TestPickRelativeGapPrioritizesUnderTargetAxis
+	// already pins this exact scenario): verb_code wins because code has the
+	// largest relative shortfall.
+	if plan.Verb != "verb_code" {
+		t.Fatalf("verb = %q, want verb_code (legacy relative-gap formula must run when flag is off)", plan.Verb)
+	}
+}
+
+// TestRatioScoring_PreservesEpsilonGreedy: ratio scoring does not change the
+// ε-greedy exploration plumbing. With ε=0.5 over many picks the controller
+// must still explore — i.e. some picks select a verb other than the greedy
+// argmax. A run of 1000 picks at ε=0.5 expects roughly 50% exploration; we
+// only assert that exploration happens often enough to be statistically
+// indistinguishable from the legacy behaviour.
+func TestRatioScoring_PreservesEpsilonGreedy(t *testing.T) {
+	verbs := []string{"verb_acc", "verb_storage", "verb_code"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"verb_acc":     {"accounts": 1000, "storage": 0, "code": 0},
+			"verb_storage": {"accounts": 0, "storage": 1000, "code": 0},
+			"verb_code":    {"accounts": 0, "storage": 0, "code": 1000},
+		},
+		AvgTxRLP: map[string]float64{"verb_acc": 1500, "verb_storage": 1500, "verb_code": 1500},
+	}
+	var identity [32]byte
+	s := newTestStateEps(verbs, rf, identity, 0.5)
+	s.UseRatioScoring = true
+
+	// Set up: accounts has the only positive deficit -> greedy argmax is
+	// verb_acc. Any pick that lands on verb_storage or verb_code must have
+	// taken the exploration branch.
+	tgt := &Target{
+		Shares: map[Axis]float64{
+			AxisAccounts: 0.273,
+			AxisStorage:  0.667,
+			AxisCode:     0.060,
+		},
+		TotalBytes: 10_000_000_000,
+	}
+	obs := &Observation{
+		AccountTrieBytes: 200,
+		StorageTrieBytes: 700,
+		CodeBytesTotal:   60,
+	}
+
+	const N = 1000
+	explored := 0
+	seen := map[string]int{}
+	for i := 0; i < N; i++ {
+		plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+		seen[plan.Verb]++
+		if plan.Verb != "verb_acc" {
+			explored++
+		}
+	}
+	// ε=0.5 with 3 candidates: greedy picks verb_acc with p=0.5+0.5/3≈0.667;
+	// exploration to a non-greedy verb has p≈0.333. Allow a generous band so
+	// the test is not flaky under RNG variance.
+	if explored < N/8 {
+		t.Errorf("explored=%d/%d (%.1f%%), want > %d (~12.5%%) — ε-greedy exploration not preserved",
+			explored, N, 100*float64(explored)/float64(N), N/8)
+	}
+	if len(seen) < 2 {
+		t.Errorf("seen %d distinct verbs %v, want >= 2 (ε-greedy must pick beyond the argmax)",
+			len(seen), seen)
 	}
 }

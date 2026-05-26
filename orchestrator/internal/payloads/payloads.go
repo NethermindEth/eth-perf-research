@@ -150,6 +150,14 @@ func (w *Writer) Append(p *ExecutionPayloadV3) error {
 	return nil
 }
 
+// Sync fsyncs the underlying file, durably persisting any buffered Appends.
+func (w *Writer) Sync() error {
+	if err := w.f.Sync(); err != nil {
+		return fmt.Errorf("payloads: fsync: %w", err)
+	}
+	return nil
+}
+
 // Close fsyncs and closes the underlying file.
 func (w *Writer) Close() error {
 	if err := w.f.Sync(); err != nil {

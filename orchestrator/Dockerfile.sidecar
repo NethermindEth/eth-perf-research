@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage build for the v19 sidecar.
+#
+# grocksdb v1.10.8 needs RocksDB 10+ symbols (rocksdb_slice_t,
+# rocksdb_import_column_family_options_*, rocksdb_checkpoint_export_column_family).
+# Debian Trixie ships librocksdb 9.10, so we build RocksDB 10.4.2 from source
+# in the first stage and link the sidecar against it. NM itself uses 10.4.2
+# (via the .NET wrapper), so we match exactly.
+
+FROM debian:trixie AS rocksdb-build
+# grocksdb v1.10.8 requires symbols added in rocksdb 10.9 (rocksdb_slice_t,
+# rocksdb_import_column_family_options_*, rocksdb_checkpoint_export_column_family).
+# We use 10.10.1 — the latest stable in the 10.x line. The sidecar runs in a
+# different process from NM so the two RocksDB versions don't need to match.
+ARG ROCKSDB_VERSION=10.10.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake libsnappy-dev libzstd-dev liblz4-dev libbz2-dev \
+        zlib1g-dev libgflags-dev pkg-config ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN wget -q https://github.com/facebook/rocksdb/archive/refs/tags/v${ROCKSDB_VERSION}.tar.gz \
+    && tar xzf v${ROCKSDB_VERSION}.tar.gz \
+    && cd rocksdb-${ROCKSDB_VERSION} \
+    && mkdir build && cd build \
+    && cmake -DCMAKE_BUILD_TYPE=Release \
+             -DWITH_TESTS=OFF -DWITH_BENCHMARK_TOOLS=OFF -DWITH_TOOLS=OFF \
+             -DWITH_CORE_TOOLS=OFF -DWITH_GFLAGS=ON \
+             -DWITH_SNAPPY=ON -DWITH_ZSTD=ON -DWITH_LZ4=ON -DWITH_BZ2=ON -DWITH_ZLIB=ON \
+             -DCMAKE_INSTALL_PREFIX=/usr/local \
+             -DROCKSDB_BUILD_SHARED=ON \
+             .. \
+    && make -j$(nproc) rocksdb-shared \
+    && cp librocksdb.so* /usr/local/lib/ \
+    && cp -r ../include/rocksdb /usr/local/include/ \
+    && ldconfig
+
+FROM golang:1.26-trixie AS build
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsnappy-dev libzstd-dev liblz4-dev libbz2-dev zlib1g-dev libgflags-dev \
+        build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rocksdb-build /usr/local/lib/librocksdb.so* /usr/local/lib/
+COPY --from=rocksdb-build /usr/local/include/rocksdb /usr/local/include/rocksdb
+RUN ldconfig
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH:-amd64} \
+    CGO_CFLAGS="-I/usr/local/include" \
+    CGO_LDFLAGS="-L/usr/local/lib -lrocksdb -lstdc++ -lm -lpthread -lsnappy -lzstd -llz4 -lbz2 -lz" \
+    go build -ldflags="-s -w" -o /out/sidecar ./cmd/sidecar
+
+# ----------------------------------------------------------------------------
+
+FROM debian:trixie-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsnappy1v5 libzstd1 liblz4-1 libbz2-1.0 zlib1g libgflags2.2 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rocksdb-build /usr/local/lib/librocksdb.so* /usr/local/lib/
+RUN ldconfig
+
+COPY --from=build /out/sidecar /usr/local/bin/sidecar
+
+# Pin the runtime UID/GID to 1000 so bind-mounted host directories work
+# predictably without case-by-case `chown` gymnastics. Hosts deploying the
+# sidecar with a bind-mounted `/var/lib/sidecar` must ensure the directory
+# is owned by uid 1000 (or world-writable / setgid-shared with gid 1000):
+#
+#   sudo mkdir -p /var/lib/sidecar
+#   sudo chown 1000:1000 /var/lib/sidecar
+#   sudo chmod 0775 /var/lib/sidecar
+#
+# Named-volume deployments (`docker volume create`) inherit ownership from
+# the container's USER, so no host-side action is needed in that case.
+RUN groupadd --system --gid 1000 sidecar \
+ && useradd --system --no-create-home --uid 1000 --gid 1000 sidecar \
+ && mkdir -p /var/lib/sidecar \
+ && chown sidecar:sidecar /var/lib/sidecar
+
+USER sidecar
+VOLUME ["/var/lib/sidecar"]
+EXPOSE 9001 9090
+
+ENTRYPOINT ["/usr/local/bin/sidecar"]
+CMD ["--mode=all", "--snapshot-dir=/var/lib/sidecar"]

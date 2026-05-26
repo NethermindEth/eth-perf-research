@@ -32,7 +32,6 @@ type Registry struct {
 	BatchGasUsed     prometheus.Gauge
 	BlockNumber      prometheus.Gauge
 	DeadlineBytes    prometheus.Gauge
-	Epsilon          prometheus.Gauge
 	InnovationRatio  prometheus.Gauge
 	ResidualNorm     prometheus.Gauge
 	SessionID        *prometheus.GaugeVec // orch_session_id{session_id} = 1
@@ -90,10 +89,6 @@ func New() *Registry {
 		Name: "orch_deadline_bytes",
 		Help: "Deadline bytes of the most recently dispatched plan.",
 	})
-	epsilon := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "orch_epsilon",
-		Help: "ε-greedy exploration rate.",
-	})
 	innovationRatio := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "orch_innovation_ratio",
 		Help: "Innovation ratio from the most recent controller update.",
@@ -139,7 +134,6 @@ func New() *Registry {
 		batchGasUsed,
 		blockNumber,
 		deadlineBytes,
-		epsilon,
 		innovationRatio,
 		residualNorm,
 		sessionID,
@@ -160,7 +154,6 @@ func New() *Registry {
 		BatchGasUsed:        batchGasUsed,
 		BlockNumber:         blockNumber,
 		DeadlineBytes:       deadlineBytes,
-		Epsilon:             epsilon,
 		InnovationRatio:     innovationRatio,
 		ResidualNorm:        residualNorm,
 		SessionID:           sessionID,

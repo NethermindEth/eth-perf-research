@@ -189,3 +189,42 @@ func containsTruncated(s string) bool {
 	}
 	return false
 }
+
+func TestAppendSyncReadable(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	path := filepath.Join(t.TempDir(), "sync.bin")
+
+	w, err := OpenWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := randPayload(rng, 0)
+	if err := w.Append(want); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := w.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// A second reader on the still-open writer must observe the synced frame.
+	r, err := OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close reader: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close writer: %v", err)
+	}
+
+	normalise(want)
+	normalise(got)
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("mismatch after Append+Sync\nwant %+v\ngot  %+v", want, got)
+	}
+}

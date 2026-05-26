@@ -14,22 +14,26 @@ import (
 )
 
 type runFlags struct {
-	rpcURL               string
-	stateDir             string
-	targetYAML           string
-	genesisSHA256        string
-	pluginGitSHA         string
-	nethermindCommitSHA  string
-	dotnetRuntimeMajor   string
-	jwtPath              string
-	sensorRPCURL         string
-	referenceFPath       string
-	manifestPath         string
-	maxBatches           int
-	targetTotalBytesOver int64
-	deployPrivateKey     string
-	metricsAddr          string
-	epsilon              float64
+	rpcURL                 string
+	stateDir               string
+	targetYAML             string
+	genesisSHA256          string
+	pluginGitSHA           string
+	nethermindCommitSHA    string
+	dotnetRuntimeMajor     string
+	jwtPath                string
+	sensorRPCURL           string
+	referenceFPath         string
+	manifestPath           string
+	maxBatches             int
+	targetTotalBytesOver   int64
+	deployPrivateKey       string
+	metricsAddr            string
+	overshootThreshold     float64
+	useRatioScoring        bool
+	epsilon                float64
+	allowNonZeroFreshHead  bool
+	debugPick              bool
 }
 
 func newRunCmd() *cobra.Command {
@@ -56,7 +60,11 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&f.targetTotalBytesOver, "target-total-bytes-override", 0, "Override target.total_bytes")
 	cmd.Flags().StringVar(&f.deployPrivateKey, "deploy-private-key", "", "Hex private key (0x-prefix optional); also reads ORCH_DEPLOY_PRIVATE_KEY")
 	cmd.Flags().StringVar(&f.metricsAddr, "metrics-addr", ":9101", "TCP address for the Prometheus /metrics endpoint")
-	cmd.Flags().Float64Var(&f.epsilon, "epsilon", 0.5, "ε-greedy exploration rate for verb selection")
+	cmd.Flags().Float64Var(&f.overshootThreshold, "overshoot-threshold", 0, "Override controller overshoot trip ratio (0=use target.yaml/default)")
+	cmd.Flags().BoolVar(&f.useRatioScoring, "use-ratio-scoring", false, "Score verbs by mainnet-ratio deficit instead of absolute residual")
+	cmd.Flags().Float64Var(&f.epsilon, "epsilon", -1, "ε-greedy exploration probability (-1=use target.yaml/default)")
+	cmd.Flags().BoolVar(&f.allowNonZeroFreshHead, "allow-non-zero-fresh-head", false, "Allow empty journal against a non-genesis chain (re-baseline runs)")
+	cmd.Flags().BoolVar(&f.debugPick, "debug-pick", false, "Emit per-batch per-verb controller debug logs")
 	return cmd
 }
 
@@ -91,31 +99,43 @@ func runOrchestrator(ctx context.Context, cmd *cobra.Command, f runFlags) error 
 	// CLI flags are the highest-precedence override, but only when the user
 	// actually set them — an unset flag must not clobber a target.yaml / env
 	// value with the cobra default.
+	if cmd.Flags().Changed("metrics-addr") {
+		rc.Run.MetricsAddr = f.metricsAddr
+	}
+	if cmd.Flags().Changed("overshoot-threshold") {
+		rc.Control.OvershootThreshold = f.overshootThreshold
+	}
+	if cmd.Flags().Changed("use-ratio-scoring") {
+		rc.Control.UseRatioScoring = f.useRatioScoring
+	}
 	if cmd.Flags().Changed("epsilon") {
 		rc.Control.Epsilon = f.epsilon
 	}
-	if cmd.Flags().Changed("metrics-addr") {
-		rc.Run.MetricsAddr = f.metricsAddr
+	if cmd.Flags().Changed("debug-pick") {
+		rc.Control.DebugPick = f.debugPick
 	}
 	if err := config.Validate(rc); err != nil {
 		return err
 	}
 
 	cfg := lifecycle.Config{
-		RPCURL:              f.rpcURL,
-		JWTPath:             f.jwtPath,
-		StateDir:            f.stateDir,
-		TargetYAMLPath:      f.targetYAML,
-		GenesisSHA256:       f.genesisSHA256,
-		ReferenceFPath:      f.referenceFPath,
-		ManifestPath:        f.manifestPath,
-		MaxBatches:          f.maxBatches,
-		DeployPrivateKey:    cmp.Or(f.deployPrivateKey, os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")),
-		Verbs:               resolveVerbs(),
-		PluginGitSHA:        f.pluginGitSHA,
-		NethermindCommitSHA: f.nethermindCommitSHA,
-		DotnetRuntimeMajor:  f.dotnetRuntimeMajor,
-		Run:                 rc,
+		RPCURL:                f.rpcURL,
+		SensorRPCURL:          f.sensorRPCURL,
+		JWTPath:               f.jwtPath,
+		StateDir:              f.stateDir,
+		TargetYAMLPath:        f.targetYAML,
+		GenesisSHA256:         f.genesisSHA256,
+		ReferenceFPath:        f.referenceFPath,
+		ManifestPath:          f.manifestPath,
+		MaxBatches:            f.maxBatches,
+		DeployPrivateKey:      cmp.Or(f.deployPrivateKey, os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")),
+		AllowNonZeroFreshHead: f.allowNonZeroFreshHead,
+		DebugPick:             f.debugPick,
+		Verbs:                 resolveVerbs(),
+		PluginGitSHA:          f.pluginGitSHA,
+		NethermindCommitSHA:   f.nethermindCommitSHA,
+		DotnetRuntimeMajor:    f.dotnetRuntimeMajor,
+		Run:                   rc,
 	}
 	return lifecycle.Run(ctx, cfg)
 }
@@ -126,7 +146,7 @@ func resolveVerbs() []string {
 		return []string{
 			"eoatx", "calltx", "deploytx", "factorydeploytx",
 			"storagespam", "erc20_bloater", "erc20tx", "uniswap_swaps",
-			"storagerefundtx", "gasburnertx",
+			"gasburnertx",
 		}
 	}
 	parts := strings.Split(raw, ",")

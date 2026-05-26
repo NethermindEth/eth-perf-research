@@ -27,9 +27,8 @@ func makeRecord(i int) *orchpb.Record {
 			Status:           "ok",
 		},
 		Observability: &orchpb.Observability{
-			GasUsed:  uint64(21000 + i*100),
-			TxCount:  uint32(i + 1),
-			Epsilon:  0.001 * float64(i+1),
+			GasUsed: uint64(21000 + i*100),
+			TxCount: uint32(i + 1),
 		},
 	}
 }

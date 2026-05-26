@@ -4,9 +4,19 @@ PB_DIR := internal
 GOFLAGS ?= -trimpath
 LDFLAGS ?= -s -w
 
-.PHONY: all proto build linux test test-race lint tidy clean
+# Sidecar build defaults — Linux production uses CGO+librocksdb (Docker);
+# local dev uses the nogrocksdb stub so Mac developers without librocksdb-dev
+# can run the unit tests.
+SIDECAR_TAGS ?= nogrocksdb
+SIDECAR_BIN          := bin/sidecar
+SIDECAR_BIN_LINUX    := bin/sidecar-linux-amd64
+SIDECAR_BIN_CGO      := bin/sidecar-cgo
 
-all: proto build
+.PHONY: all proto build linux test test-race lint tidy clean \
+        build-sidecar build-sidecar-linux build-sidecar-cgo \
+        test-sidecar vet-sidecar docker-sidecar
+
+all: proto build build-sidecar
 
 proto:
 	mkdir -p internal/orchpb
@@ -35,3 +45,27 @@ tidy:
 
 clean:
 	rm -rf bin/ proto/*.pb.go internal/*/pb
+
+# --- sidecar targets -------------------------------------------------------
+
+build-sidecar: ## Build the local sidecar binary (stub backend; no CGO required).
+	mkdir -p bin
+	CGO_ENABLED=0 go build $(GOFLAGS) -tags $(SIDECAR_TAGS) -ldflags='$(LDFLAGS)' -o $(SIDECAR_BIN) ./cmd/sidecar
+
+build-sidecar-linux: ## Cross-compile a Linux/amd64 sidecar binary (stub backend; Docker does the full grocksdb image).
+	mkdir -p bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build $(GOFLAGS) -tags $(SIDECAR_TAGS) -ldflags='$(LDFLAGS)' -o $(SIDECAR_BIN_LINUX) ./cmd/sidecar
+
+build-sidecar-cgo: ## Build the full grocksdb-backed sidecar binary (requires librocksdb-dev).
+	mkdir -p bin
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags='$(LDFLAGS)' -o $(SIDECAR_BIN_CGO) ./cmd/sidecar
+
+test-sidecar: ## Run sidecar unit + integration tests with the stub backend.
+	go test -tags $(SIDECAR_TAGS) -race -count=1 ./pkg/sidecar/... ./test/sidecar/... ./cmd/sidecar/...
+
+vet-sidecar:
+	go vet -tags $(SIDECAR_TAGS) ./pkg/sidecar/... ./test/sidecar/... ./cmd/sidecar/...
+
+docker-sidecar: ## Build the production sidecar Docker image (alpine + binary).
+	docker build -t eth-perf-research/sidecar:dev -f Dockerfile.sidecar .

@@ -46,7 +46,6 @@ func TestGaugesSet(t *testing.T) {
 	reg.BatchGasUsed.Set(3_000_000)
 	reg.BlockNumber.Set(100)
 	reg.DeadlineBytes.Set(8388608)
-	reg.Epsilon.Set(0.05)
 	reg.InnovationRatio.Set(0.12)
 	reg.ResidualNorm.Set(0.003)
 
@@ -55,7 +54,6 @@ func TestGaugesSet(t *testing.T) {
 	assertContains(t, body, "orch_batch_id 42")
 	assertContains(t, body, "orch_batch_gas_used 3e+06")
 	assertContains(t, body, "orch_block_number 100")
-	assertContains(t, body, "orch_epsilon 0.05")
 	assertContains(t, body, "orch_residual_norm 0.003")
 }
 
@@ -111,7 +109,6 @@ func TestMetricNamesPresent(t *testing.T) {
 		"orch_batch_gas_used",
 		"orch_block_number",
 		"orch_deadline_bytes",
-		"orch_epsilon",
 		"orch_innovation_ratio",
 		"orch_residual_norm",
 	}

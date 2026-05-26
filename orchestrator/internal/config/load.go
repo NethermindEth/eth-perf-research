@@ -26,10 +26,7 @@ type yamlFile struct {
 // present in the file overlay the default.
 type controlYAML struct {
 	Epsilon               *float64          `json:"epsilon"`
-	ProjectionEta         *float64          `json:"projection_eta"`
 	ToleranceFloor        *float64          `json:"tolerance_floor"`
-	EntropyFloor          *float64          `json:"entropy_floor"`
-	AntiWindupEnabled     *bool             `json:"anti_windup_enabled"`
 	BytesPerGasTieBreak   *bool             `json:"bytes_per_gas_tie_break"`
 	GasFillFraction       *float64          `json:"gas_fill_fraction"`
 	GasCapFraction        *float64          `json:"gas_cap_fraction"`
@@ -55,6 +52,8 @@ type controlYAML struct {
 	AvgTxRLPDecayNew      *float64          `json:"avg_tx_rlp_decay_new"`
 	DefaultBaseGasPerVerb *uint64           `json:"default_base_gas_per_verb"`
 	BaseGasPerVerb        map[string]uint64 `json:"base_gas_per_verb"`
+	NMaxHardCeilPerVerb   map[string]int    `json:"nmax_hard_ceil_per_verb"`
+	UseRatioScoring       *bool             `json:"use_ratio_scoring"`
 }
 
 type costYAML struct {
@@ -70,6 +69,7 @@ type runYAML struct {
 	DispatchSkipStreakHalt *int    `json:"dispatch_skip_streak_halt"`
 	RejectionStreakHalt    *int    `json:"rejection_streak_halt"`
 	IdleBackoffMS          *int64  `json:"idle_backoff_ms"`
+	LookaheadDepth         *int    `json:"lookahead_depth"`
 	ResumeReorgTolerance   *int64  `json:"resume_reorg_tolerance"`
 	RPCTimeoutS            *int64  `json:"rpc_timeout_s"`
 	SensorPollIntervalMS   *int64  `json:"sensor_poll_interval_ms"`
@@ -122,11 +122,8 @@ func Load(targetYAMLPath string) (RunConfig, error) {
 func applyYAML(cfg *RunConfig, yf *yamlFile) {
 	if c := yf.Control; c != nil {
 		setF(&cfg.Control.Epsilon, c.Epsilon)
-		setF(&cfg.Control.ProjectionEta, c.ProjectionEta)
 		setF(&cfg.Control.ToleranceFloor, c.ToleranceFloor)
-		setB(&cfg.Control.AntiWindupEnabled, c.AntiWindupEnabled)
 		setB(&cfg.Control.BytesPerGasTieBreak, c.BytesPerGasTieBreak)
-		setF(&cfg.Control.EntropyFloor, c.EntropyFloor)
 		setF(&cfg.Control.GasFillFraction, c.GasFillFraction)
 		setF(&cfg.Control.GasCapFraction, c.GasCapFraction)
 		setI(&cfg.Control.NMaxHardCeil, c.NMaxHardCeil)
@@ -157,6 +154,14 @@ func applyYAML(cfg *RunConfig, yf *yamlFile) {
 			}
 			cfg.Control.BaseGasPerVerb = m
 		}
+		if c.NMaxHardCeilPerVerb != nil {
+			m := make(map[string]int, len(c.NMaxHardCeilPerVerb))
+			for k, v := range c.NMaxHardCeilPerVerb {
+				m[k] = v
+			}
+			cfg.Control.NMaxHardCeilPerVerb = m
+		}
+		setB(&cfg.Control.UseRatioScoring, c.UseRatioScoring)
 	}
 	if c := yf.Cost; c != nil {
 		setI64(&cfg.Cost.PriorityTipWei, c.PriorityTipWei)
@@ -170,6 +175,7 @@ func applyYAML(cfg *RunConfig, yf *yamlFile) {
 		setI(&cfg.Run.DispatchSkipStreakHalt, r.DispatchSkipStreakHalt)
 		setI(&cfg.Run.RejectionStreakHalt, r.RejectionStreakHalt)
 		setI64(&cfg.Run.IdleBackoffMS, r.IdleBackoffMS)
+		setI(&cfg.Run.LookaheadDepth, r.LookaheadDepth)
 		setI64(&cfg.Run.ResumeReorgTolerance, r.ResumeReorgTolerance)
 		setI64(&cfg.Run.RPCTimeoutS, r.RPCTimeoutS)
 		setI64(&cfg.Run.SensorPollIntervalMS, r.SensorPollIntervalMS)
@@ -221,13 +227,6 @@ func setB(dst *bool, v *bool) {
 // deployment scripts keep working. A malformed value is a hard error — a typo
 // in an env var must fail fast, not silently fall back.
 func applyEnv(cfg *RunConfig) error {
-	if raw, ok := os.LookupEnv("ORCH_EPSILON"); ok && raw != "" {
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_EPSILON=%q: %w", raw, err)
-		}
-		cfg.Control.Epsilon = v
-	}
 	if raw, ok := os.LookupEnv("ORCH_EWMA_ALPHA"); ok && raw != "" {
 		v, err := strconv.ParseFloat(raw, 64)
 		if err != nil {
@@ -263,6 +262,23 @@ func applyEnv(cfg *RunConfig) error {
 		}
 		cfg.Run.ResumeReorgTolerance = v
 	}
+	if raw, ok := os.LookupEnv("ORCH_LOOKAHEAD_DEPTH"); ok && raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("config: ORCH_LOOKAHEAD_DEPTH=%q: %w", raw, err)
+		}
+		cfg.Run.LookaheadDepth = v
+	}
+	if raw, ok := os.LookupEnv("ORCH_EPSILON"); ok && raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return fmt.Errorf("config: ORCH_EPSILON=%q: %w", raw, err)
+		}
+		cfg.Control.Epsilon = v
+	}
+	if _, ok := os.LookupEnv("ORCH_USE_RATIO_SCORING"); ok {
+		cfg.Control.UseRatioScoring = EnvTruthy("ORCH_USE_RATIO_SCORING")
+	}
 	return nil
 }
 
@@ -291,14 +307,8 @@ func (c RunConfig) validate() error {
 	if !inUnit(ck.Epsilon) {
 		return rangeErr("control.epsilon", ck.Epsilon, "[0, 1]")
 	}
-	if ck.ProjectionEta <= 0 {
-		return rangeErr("control.projection_eta", ck.ProjectionEta, "> 0")
-	}
 	if ck.ToleranceFloor < 0 {
 		return rangeErr("control.tolerance_floor", ck.ToleranceFloor, ">= 0")
-	}
-	if math.IsNaN(ck.EntropyFloor) || ck.EntropyFloor <= 0 || ck.EntropyFloor >= 0.5 {
-		return rangeErr("control.entropy_floor", ck.EntropyFloor, "(0, 0.5)")
 	}
 	if !inUnit(ck.GasFillFraction) || ck.GasFillFraction <= 0 {
 		return rangeErr("control.gas_fill_fraction", ck.GasFillFraction, "(0, 1]")
@@ -374,6 +384,11 @@ func (c RunConfig) validate() error {
 			return fmt.Errorf("config: control.base_gas_per_verb[%q] is 0, must be > 0", verb)
 		}
 	}
+	for verb, ceil := range ck.NMaxHardCeilPerVerb {
+		if ceil < 1 {
+			return rangeErr(fmt.Sprintf("control.nmax_hard_ceil_per_verb[%q]", verb), float64(ceil), ">= 1")
+		}
+	}
 
 	cost := c.Cost
 	if cost.PriorityTipWei < 0 {
@@ -404,6 +419,9 @@ func (c RunConfig) validate() error {
 	}
 	if r.IdleBackoffMS < 0 {
 		return rangeErr("run.idle_backoff_ms", float64(r.IdleBackoffMS), ">= 0")
+	}
+	if r.LookaheadDepth < 1 {
+		return rangeErr("run.lookahead_depth", float64(r.LookaheadDepth), ">= 1")
 	}
 	if r.ResumeReorgTolerance < 0 {
 		return rangeErr("run.resume_reorg_tolerance", float64(r.ResumeReorgTolerance), ">= 0")
