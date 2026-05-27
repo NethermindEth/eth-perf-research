@@ -1,24 +1,29 @@
-// Package rpc provides a thin JSON-RPC HTTP client for Ethereum execution-layer
-// nodes. It supports both the public port (8545) and the JWT-authenticated Engine
-// API port (8551).
+// Package rpc provides a JSON-RPC HTTP client for Ethereum execution-layer
+// nodes. It supports both the public port (8545) and the JWT-authenticated
+// Engine API port (8551).
+//
+// The implementation wraps go-ethereum's rpc.Client and ethclient.Client so we
+// inherit canonical JSON envelope handling, JWT minting, and HTTP transport
+// reuse. The package surface is preserved so existing callers compile
+// unchanged.
 package rpc
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"os"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/node"
+	gethrpc "github.com/ethereum/go-ethereum/rpc"
 )
 
 const (
@@ -27,7 +32,7 @@ const (
 	defaultUserAgent    = "eth-perf-research/orchestrator"
 )
 
-// RpcError is returned when the JSON-RPC response envelope contains an error field.
+// RpcError is returned when the JSON-RPC response envelope contains an error.
 type RpcError struct {
 	Code    int
 	Message string
@@ -67,7 +72,6 @@ func WithJWTSecret(secretHex string) Option {
 	return func(o *clientOpts) {
 		b, err := decodeHex32(secretHex)
 		if err != nil {
-			// Surface at NewClient via a sentinel so callers get a clear error.
 			o.jwtSecret = nil
 			return
 		}
@@ -95,7 +99,8 @@ func WithTimeout(d time.Duration) Option {
 	return func(o *clientOpts) { o.timeout = d }
 }
 
-// WithMaxIdleConns sets the maximum number of idle keep-alive connections (default 16).
+// WithMaxIdleConns sets the maximum number of idle keep-alive connections
+// (default 16).
 func WithMaxIdleConns(n int) Option {
 	return func(o *clientOpts) { o.maxIdleConns = n }
 }
@@ -107,111 +112,68 @@ func WithUserAgent(ua string) Option {
 
 // Client is a JSON-RPC HTTP client. It is safe for concurrent use.
 type Client struct {
-	http      *http.Client
-	baseURL   string
-	userAgent string
-	reqID     atomic.Int64
+	rpc *gethrpc.Client
+	eth *ethclient.Client
 }
 
-// NewClient constructs a JSON-RPC client. baseURL must include scheme + host + port
-// (e.g. "http://localhost:8545"). Use WithJWTSecret or WithJWTFile to enable the
-// JWT round-tripper required by the Engine API port.
+// NewClient constructs a JSON-RPC client. baseURL must include scheme + host +
+// port (e.g. "http://localhost:8545"). Use WithJWTSecret or WithJWTFile to
+// enable JWT auth for the Engine API port.
 func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	o := &clientOpts{
 		timeout:      defaultTimeout,
 		maxIdleConns: defaultMaxIdleConns,
 		userAgent:    defaultUserAgent,
 	}
-	// Apply options in registration order so later options win.
 	for _, fn := range opts {
 		fn(o)
 	}
 
-	transport := &http.Transport{
-		MaxIdleConnsPerHost: o.maxIdleConns,
-		// HTTP/2 is negotiated automatically via TLS ALPN; for plain HTTP/1.1
-		// keep-alive the default transport settings are sufficient.
-	}
-
-	var rt http.RoundTripper = transport
-	if len(o.jwtSecret) > 0 {
-		rt = &jwtRoundTripper{base: transport, secret: o.jwtSecret}
-	}
-
-	hc := &http.Client{
-		Transport: rt,
+	httpClient := &http.Client{
+		Transport: &http.Transport{MaxIdleConnsPerHost: o.maxIdleConns},
 		Timeout:   o.timeout,
 	}
 
-	return &Client{
-		http:      hc,
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		userAgent: o.userAgent,
-	}, nil
+	clientOpts := []gethrpc.ClientOption{
+		gethrpc.WithHTTPClient(httpClient),
+		gethrpc.WithHeader("User-Agent", o.userAgent),
+	}
+	if len(o.jwtSecret) > 0 {
+		var secret [32]byte
+		copy(secret[:], o.jwtSecret)
+		clientOpts = append(clientOpts, gethrpc.WithHTTPAuth(node.NewJWTAuth(secret)))
+	}
+
+	rc, err := gethrpc.DialOptions(context.Background(), strings.TrimRight(baseURL, "/"), clientOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("rpc: dial %s: %w", baseURL, err)
+	}
+	return &Client{rpc: rc, eth: ethclient.NewClient(rc)}, nil
 }
 
-// Call invokes method with params and unmarshals the result into out (must be a pointer).
+// Call invokes method with params and unmarshals the result into out (must be
+// a pointer or nil).
 func (c *Client) Call(ctx context.Context, method string, params []any, out any) error {
-	id := c.reqID.Add(1)
-
-	reqBody := rpcRequest{
-		JSONRPC: "2.0",
-		ID:      id,
-		Method:  method,
-		Params:  params,
+	args := params
+	if args == nil {
+		args = []any{}
 	}
-	encoded, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("rpc: marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(encoded))
-	if err != nil {
-		return fmt.Errorf("rpc: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("rpc: http: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("rpc: read body: %w", err)
-	}
-
-	var rpcResp rpcResponse
-	if err := json.Unmarshal(body, &rpcResp); err != nil {
-		return fmt.Errorf("rpc: decode response: %w", err)
-	}
-
-	if rpcResp.Error != nil {
-		return &RpcError{Code: rpcResp.Error.Code, Message: rpcResp.Error.Message}
-	}
-
-	if out == nil {
-		return nil
-	}
-	if err := json.Unmarshal(rpcResp.Result, out); err != nil {
-		return fmt.Errorf("rpc: decode result for %s: %w", method, err)
+	if err := c.rpc.CallContext(ctx, out, method, args...); err != nil {
+		return translateError(err, method)
 	}
 	return nil
 }
 
 // ChainID returns the chain ID via eth_chainId.
 func (c *Client) ChainID(ctx context.Context) (uint64, error) {
-	var raw string
-	if err := c.Call(ctx, "eth_chainId", nil, &raw); err != nil {
-		return 0, fmt.Errorf("rpc: ChainID: %w", err)
-	}
-	v, err := parseHexUint64(raw)
+	id, err := c.eth.ChainID(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("rpc: ChainID: parse %q: %w", raw, err)
+		return 0, fmt.Errorf("rpc: ChainID: %w", translateError(err, "eth_chainId"))
 	}
-	return v, nil
+	if !id.IsUint64() {
+		return 0, fmt.Errorf("rpc: ChainID: %s does not fit in uint64", id.String())
+	}
+	return id.Uint64(), nil
 }
 
 // BlockByNumber returns the block header for number n. n < 0 fetches "latest".
@@ -239,15 +201,11 @@ func (c *Client) BlockByHash(ctx context.Context, h common.Hash, full bool) (*Bl
 
 // TransactionCount returns the on-chain nonce for addr at the latest block.
 func (c *Client) TransactionCount(ctx context.Context, addr common.Address) (uint64, error) {
-	var raw string
-	if err := c.Call(ctx, "eth_getTransactionCount", []any{addr.Hex(), "latest"}, &raw); err != nil {
-		return 0, fmt.Errorf("rpc: TransactionCount(%s): %w", addr.Hex(), err)
-	}
-	v, err := parseHexUint64(raw)
+	n, err := c.eth.NonceAt(ctx, addr, nil)
 	if err != nil {
-		return 0, fmt.Errorf("rpc: TransactionCount: parse %q: %w", raw, err)
+		return 0, fmt.Errorf("rpc: TransactionCount(%s): %w", addr.Hex(), translateError(err, "eth_getTransactionCount"))
 	}
-	return v, nil
+	return n, nil
 }
 
 // TestingCommitBlockV1 submits signed transactions to Nethermind's
@@ -259,10 +217,10 @@ func (c *Client) TestingCommitBlockV1(ctx context.Context, signedTxs [][]byte, t
 		hexTxs[i] = "0x" + hex.EncodeToString(tx)
 	}
 	payloadAttrs := map[string]any{
-		"timestamp":            fmt.Sprintf("0x%x", timestamp),
-		"prevRandao":           "0x" + strings.Repeat("00", 32),
+		"timestamp":             fmt.Sprintf("0x%x", timestamp),
+		"prevRandao":            "0x" + strings.Repeat("00", 32),
 		"suggestedFeeRecipient": "0x" + strings.Repeat("00", 20),
-		"withdrawals":          []any{},
+		"withdrawals":           []any{},
 		"parentBeaconBlockRoot": "0x" + strings.Repeat("00", 32),
 	}
 
@@ -274,12 +232,14 @@ func (c *Client) TestingCommitBlockV1(ctx context.Context, signedTxs [][]byte, t
 }
 
 // CodeAt returns the deployed bytecode at addr for the given block tag
-// ("latest" when blockTag is ""). An empty slice means the account has no
-// code. Used by the bootstrap phase's fail-loud guard to assert every
-// contract-verb target actually has code.
+// ("latest" when blockTag is ""). An empty slice means the account has no code.
 func (c *Client) CodeAt(ctx context.Context, addr common.Address, blockTag string) ([]byte, error) {
-	if blockTag == "" {
-		blockTag = "latest"
+	if blockTag == "" || blockTag == "latest" {
+		b, err := c.eth.CodeAt(ctx, addr, nil)
+		if err != nil {
+			return nil, fmt.Errorf("rpc: CodeAt(%s): %w", addr.Hex(), translateError(err, "eth_getCode"))
+		}
+		return b, nil
 	}
 	var raw string
 	if err := c.Call(ctx, "eth_getCode", []any{addr.Hex(), blockTag}, &raw); err != nil {
@@ -297,8 +257,8 @@ func (c *Client) CodeAt(ctx context.Context, addr common.Address, blockTag strin
 	return b, nil
 }
 
-// StatecompGet retrieves Nethermind's statecomp plugin report for the latest block.
-// The raw JSON is returned as-is for the sensor to parse.
+// StatecompGet retrieves Nethermind's statecomp plugin report for the latest
+// block. The raw JSON is returned as-is for the sensor to parse.
 func (c *Client) StatecompGet(ctx context.Context) (json.RawMessage, error) {
 	var raw json.RawMessage
 	if err := c.Call(ctx, "statecomp_get", nil, &raw); err != nil {
@@ -307,56 +267,17 @@ func (c *Client) StatecompGet(ctx context.Context) (json.RawMessage, error) {
 	return raw, nil
 }
 
-// --- JSON-RPC envelope types ---
-
-type rpcRequest struct {
-	JSONRPC string `json:"jsonrpc"`
-	ID      int64  `json:"id"`
-	Method  string `json:"method"`
-	Params  []any  `json:"params"`
-}
-
-type rpcResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      int64           `json:"id"`
-	Result  json.RawMessage `json:"result"`
-	Error   *rpcErrorBody   `json:"error,omitempty"`
-}
-
-type rpcErrorBody struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// --- JWT round-tripper ---
-
-// jwtRoundTripper wraps an http.RoundTripper and injects a fresh HS256 JWT on
-// every request. Tokens carry only iat=now; no exp is needed by the spec, but
-// clients must ensure iat skew is < 60s — we mint per-request so skew is always
-// near-zero.
-type jwtRoundTripper struct {
-	base   http.RoundTripper
-	secret []byte
-}
-
-func (j *jwtRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	token, err := mintJWT(j.secret)
-	if err != nil {
-		return nil, fmt.Errorf("jwt: mint token: %w", err)
+// translateError converts a go-ethereum rpc.Error into our RpcError envelope so
+// existing callers that type-assert on *RpcError keep working.
+func translateError(err error, method string) error {
+	if err == nil {
+		return nil
 	}
-	// Clone the request to avoid mutating the caller's headers.
-	r2 := req.Clone(req.Context())
-	r2.Header.Set("Authorization", "Bearer "+token)
-	return j.base.RoundTrip(r2)
-}
-
-// mintJWT creates a fresh HS256 token with iat=now.
-func mintJWT(secret []byte) (string, error) {
-	claims := jwt.MapClaims{
-		"iat": time.Now().Unix(),
+	var rerr gethrpc.Error
+	if errors.As(err, &rerr) {
+		return &RpcError{Code: rerr.ErrorCode(), Message: rerr.Error()}
 	}
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return tok.SignedString(secret)
+	return err
 }
 
 // --- wire parsing helpers ---
@@ -364,15 +285,15 @@ func mintJWT(secret []byte) (string, error) {
 // wireBlock is the subset of fields returned by eth_getBlockByNumber /
 // eth_getBlockByHash that the orchestrator uses.
 type wireBlock struct {
-	Number           string   `json:"number"`
-	Hash             string   `json:"hash"`
-	ParentHash       string   `json:"parentHash"`
-	StateRoot        string   `json:"stateRoot"`
-	GasLimit         string   `json:"gasLimit"`
-	GasUsed          string   `json:"gasUsed"`
-	Timestamp        string   `json:"timestamp"`
-	BaseFeePerGas    string   `json:"baseFeePerGas"`
-	Transactions     []string `json:"transactions"` // hashes when full=false
+	Number        string   `json:"number"`
+	Hash          string   `json:"hash"`
+	ParentHash    string   `json:"parentHash"`
+	StateRoot     string   `json:"stateRoot"`
+	GasLimit      string   `json:"gasLimit"`
+	GasUsed       string   `json:"gasUsed"`
+	Timestamp     string   `json:"timestamp"`
+	BaseFeePerGas string   `json:"baseFeePerGas"`
+	Transactions  []string `json:"transactions"`
 }
 
 func parseBlockHeader(raw json.RawMessage) (*BlockHeader, error) {
@@ -424,7 +345,6 @@ func parseBlockHeader(raw json.RawMessage) (*BlockHeader, error) {
 	}, nil
 }
 
-// parseHexUint64 decodes a 0x-prefixed hex string to uint64.
 func parseHexUint64(s string) (uint64, error) {
 	s = strings.TrimPrefix(s, "0x")
 	s = strings.TrimPrefix(s, "0X")
@@ -432,14 +352,12 @@ func parseHexUint64(s string) (uint64, error) {
 		return 0, nil
 	}
 	var v uint64
-	_, err := fmt.Sscanf(s, "%x", &v)
-	if err != nil {
+	if _, err := fmt.Sscanf(s, "%x", &v); err != nil {
 		return 0, fmt.Errorf("parseHexUint64 %q: %w", s, err)
 	}
 	return v, nil
 }
 
-// parseHexBigInt decodes a 0x-prefixed hex string to *big.Int.
 func parseHexBigInt(s string) (*big.Int, error) {
 	s = strings.TrimPrefix(s, "0x")
 	s = strings.TrimPrefix(s, "0X")
@@ -450,7 +368,6 @@ func parseHexBigInt(s string) (*big.Int, error) {
 	return b, nil
 }
 
-// decodeHex32 decodes a 64-char hex string (0x prefix optional) to 32 bytes.
 func decodeHex32(s string) ([]byte, error) {
 	s = strings.TrimPrefix(s, "0x")
 	s = strings.TrimPrefix(s, "0X")
