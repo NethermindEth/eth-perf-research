@@ -513,151 +513,46 @@ func runLoop(
 	rawTarget *target.Target,
 	mf *manifest.Manifest,
 ) (string, *rpc.BlockHeader) {
-	batchID := deps.resumedFrom
-	if batchID > 0 {
-		batchID++
+	// Depth-1 build-ahead pipeline: planner Picks/builds/signs batch N+1 while
+	// committer commits+sensor-waits+applies batch N. The ready channel buffers
+	// one prepared batch — the planner blocks once a batch is queued, preventing
+	// runaway dispatch. Observation lag of one batch is by design.
+	startBatchID := deps.resumedFrom
+	if startBatchID > 0 {
+		startBatchID++
 	}
 
-	obs := currentObs
-	var lastBlock *rpc.BlockHeader
-	reason := terminationSignal
-	consecutiveDispatchSkips := 0
-	consecutiveFullRejections := 0
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-loop:
-	for {
-		if ctx.Err() != nil {
-			break loop
-		}
-
-		// Drain target reloads.
-		select {
-		case newT := <-targetCh:
-			_, newCtrl, _ := refreshTarget(newT)
-			*ctrlTarget = newCtrl
-			deps.target = newCtrl
-			deps.targetDigest = targetSha256Bytes(newT.SHA256)
-			mf.TargetHistory = append(mf.TargetHistory, manifest.TargetEntry{
-				AppliedAtBatch: int(batchID),
-				AppliedAtISO:   time.Now().UTC().Format(time.RFC3339Nano),
-				TargetSHA256:   newT.SHA256,
-				Shares:         cloneShares(newT.Shares),
-				TotalBytes:     newT.TotalBytes,
-			})
-			slog.Info("lifecycle: target reloaded", "sha", newT.SHA256[:8], "total_bytes", newT.TotalBytes)
-		default:
-		}
-
-		// Termination predicates. obs is the post-commit observation of the
-		// previous batch — exact, not lagged, because the loop is sequential.
-		ck := cfg.Run.Control
-		if deps.state.HasInstability(ck.OvershootThreshold, ck.OvershootWindow, ck.OvershootMaxTrips, ck.OvershootGrace) {
-			reason = terminationOvershoot
-			break loop
-		}
-		if reachedTarget(obs, *ctrlTarget) {
-			reason = terminationTargetMet
-			break loop
-		}
-		if cfg.MaxBatches > 0 && batchID >= uint64(cfg.MaxBatches) {
-			reason = terminationBatchLimit
-			break loop
-		}
-
-		// Pick + build + sign off the fresh observation.
-		db, err := dispatchBatch(ctx, deps, batchID, obs)
-		if err != nil {
-			if ctx.Err() != nil {
-				break loop
-			}
-			consecutiveDispatchSkips++
-			slog.Warn("lifecycle: dispatch failed, skipping batch",
-				"batch_id", batchID, "streak", consecutiveDispatchSkips, "err", err)
-			if consecutiveDispatchSkips >= cfg.Run.Run.DispatchSkipStreakHalt {
-				reason = fmt.Sprintf("error: %d consecutive dispatch failures (last: %s)",
-					consecutiveDispatchSkips, err.Error())
-				break loop
-			}
-			batchID++
-			continue
-		}
-		consecutiveDispatchSkips = 0
-		if db == nil {
-			// Pick yielded no plan — back off briefly; retry the same batchID.
-			select {
-			case <-ctx.Done():
-				break loop
-			case <-time.After(time.Duration(cfg.Run.Run.IdleBackoffMS) * time.Millisecond):
-			}
-			continue
-		}
-
-		// Commit + sensor-wait + Apply + journal. commitBatch blocks until the
-		// sensor reflects this committed block, so res.postObs is exact.
-		res, err := commitBatch(ctx, deps, db)
-		if err != nil {
-			if ctx.Err() != nil {
-				break loop
-			}
-			// A transport error means NM is unreachable (restart / redeploy),
-			// not a logical failure. Wait for reconnect; only a reconnect
-			// timeout terminates. The batch is skipped on reconnect.
-			if isTransportError(err) {
-				slog.Warn("lifecycle: commit hit transport error — NM unreachable",
-					"batch_id", db.batchID, "err", err)
-				rcRun := deps.cfg.Run
-				if rerr := awaitReconnect(ctx, deps.rpc,
-					time.Duration(rcRun.ReconnectMaxWaitS)*time.Second,
-					time.Duration(rcRun.ReconnectBackoffInitialMS)*time.Millisecond,
-					time.Duration(rcRun.ReconnectBackoffMaxMS)*time.Millisecond); rerr != nil {
-					if ctx.Err() == nil {
-						reason = terminationNMUnreachable
-					}
-					break loop
-				}
-				batchID++
-				continue
-			}
-			if isPartialAcceptanceErr(err) {
-				expected, included := parsePartialAcceptance(err)
-				slog.Warn("lifecycle: commit partial-acceptance, skipping batch",
-					"batch_id", db.batchID,
-					"expected", expected,
-					"included", included,
-					"verb", db.plan.Verb,
-				)
-				if included == 0 {
-					consecutiveFullRejections++
-					if consecutiveFullRejections >= deps.cfg.Run.RejectionStreakHalt {
-						reason = fmt.Sprintf("error: %d consecutive batches fully rejected (verb=%s); chain state likely missing dependencies",
-							consecutiveFullRejections, db.plan.Verb)
-						break loop
-					}
-				} else {
-					consecutiveFullRejections = 0
-				}
-				batchID++
-				continue
-			}
-			slog.Error("lifecycle: commit failed", "batch_id", db.batchID, "err", err)
-			reason = "error: " + err.Error()
-			break loop
-		}
-		if res != nil && res.committed {
-			obs = res.postObs
-			lastBlock = res.blockHeader
-			consecutiveFullRejections = 0
-		}
-		batchID++
+	p := &pipeline{
+		obs:          currentObs,
+		ready:        make(chan *dispatched, 1),
+		startBatchID: startBatchID,
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		p.planner(loopCtx, cancel, cfg, deps, ctrlTarget, targetCh, mf)
+	}()
+	go func() {
+		defer wg.Done()
+		p.committer(loopCtx, cancel, deps)
+	}()
+	wg.Wait()
 
 	// Drain residual pending sidecar in case commit was interrupted mid-flight.
-	// Best-effort: errors are logged but don't fail the run.
 	if err := journal.ClearPending(deps.pendingPath); err != nil {
 		slog.Warn("lifecycle: clear pending on shutdown", "err", err)
 	}
 
-	return reason, lastBlock
+	reason := terminationSignal
+	if r := p.termReason(); r != "" {
+		reason = r
+	}
+	return reason, p.lastBlock()
 }
 
 // refreshTarget reloads the target and returns the controller projection.
