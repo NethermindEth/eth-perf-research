@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
@@ -184,9 +185,16 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 7a. Metrics registry + HTTP server.
 	metricsReg := metrics.New()
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metricsReg.Handler())
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	metricsSrv := &http.Server{
 		Addr:    rc.Run.MetricsAddr,
-		Handler: metricsReg.Handler(),
+		Handler: mux,
 	}
 	go func() {
 		slog.Info("lifecycle: metrics listening", "addr", rc.Run.MetricsAddr)
