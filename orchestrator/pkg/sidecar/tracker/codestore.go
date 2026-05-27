@@ -20,8 +20,16 @@ import "sync"
 type CodeStore interface {
 	// Get returns the stored entry for hash, or (zero, false) if absent.
 	Get(hash [32]byte) (codeEntry, bool)
+	// MultiGet reads N hashes in one shot. results[i] is the entry for
+	// hashes[i] (zero value if absent); present[i] reports whether the entry
+	// existed. For disk-backed stores this collapses N cgo crossings into
+	// one and lets the implementation parallelise across L0 files.
+	MultiGet(hashes [][32]byte) (results []codeEntry, present []bool)
 	// Put stores (or overwrites) the entry for hash.
 	Put(hash [32]byte, e codeEntry)
+	// BatchPut writes all (hash, entry) pairs as one atomic operation.
+	// Same single-cgo-crossing motivation as MultiGet.
+	BatchPut(hashes [][32]byte, entries []codeEntry)
 	// Delete removes the entry for hash (no-op if absent).
 	Delete(hash [32]byte)
 	// Iterate calls fn for every entry. Returning false from fn aborts the
@@ -57,9 +65,32 @@ func (s *memCodeStore) Get(hash [32]byte) (codeEntry, bool) {
 	return e, ok
 }
 
+func (s *memCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, present []bool) {
+	results = make([]codeEntry, len(hashes))
+	present = make([]bool, len(hashes))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i, h := range hashes {
+		e, ok := s.m[h]
+		if ok {
+			results[i] = e
+			present[i] = true
+		}
+	}
+	return results, present
+}
+
 func (s *memCodeStore) Put(hash [32]byte, e codeEntry) {
 	s.mu.Lock()
 	s.m[hash] = e
+	s.mu.Unlock()
+}
+
+func (s *memCodeStore) BatchPut(hashes [][32]byte, entries []codeEntry) {
+	s.mu.Lock()
+	for i, h := range hashes {
+		s.m[h] = entries[i]
+	}
 	s.mu.Unlock()
 }
 

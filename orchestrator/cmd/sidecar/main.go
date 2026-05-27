@@ -166,11 +166,11 @@ func runBootstrap(ctx context.Context, cfg config.Config, logger zerolog.Logger,
 func runServe(ctx context.Context, cfg config.Config, logger zerolog.Logger, machine *state.Machine, prom *promexport.Metrics) error {
 	var codes tracker.CodeStore
 	if cfg.CodeStoreDir != "" {
-		store, oerr := tracker.OpenRocksCodeStore(cfg.CodeStoreDir)
+		rawStore, oerr := tracker.OpenRocksCodeStore(cfg.CodeStoreDir)
 		if oerr != nil {
 			return fmt.Errorf("serve: reopen codestore: %w", oerr)
 		}
-		codes = store
+		codes = tracker.NewCachedCodeStore(rawStore)
 	}
 	t, hdr, err := snapshot.RestoreInto(cfg.SnapshotDir, codes)
 	if err != nil {
@@ -204,11 +204,11 @@ func runServe(ctx context.Context, cfg config.Config, logger zerolog.Logger, mac
 func runTail(ctx context.Context, cfg config.Config, logger zerolog.Logger, machine *state.Machine, prom *promexport.Metrics) error {
 	var codes tracker.CodeStore
 	if cfg.CodeStoreDir != "" {
-		store, oerr := tracker.OpenRocksCodeStore(cfg.CodeStoreDir)
+		rawStore, oerr := tracker.OpenRocksCodeStore(cfg.CodeStoreDir)
 		if oerr != nil {
 			return fmt.Errorf("tail: reopen codestore: %w", oerr)
 		}
-		codes = store
+		codes = tracker.NewCachedCodeStore(rawStore)
 	}
 	t, _, err := snapshot.RestoreInto(cfg.SnapshotDir, codes)
 	if err != nil {
@@ -242,11 +242,11 @@ func runAll(ctx context.Context, cfg config.Config, logger zerolog.Logger, machi
 		// (the bloatnet path) finds its authoritative backing on restart.
 		var codes tracker.CodeStore
 		if cfg.CodeStoreDir != "" {
-			store, oerr := tracker.OpenRocksCodeStore(cfg.CodeStoreDir)
+			rawStore, oerr := tracker.OpenRocksCodeStore(cfg.CodeStoreDir)
 			if oerr != nil {
 				return fmt.Errorf("all: reopen codestore at %s: %w", cfg.CodeStoreDir, oerr)
 			}
-			codes = store
+			codes = tracker.NewCachedCodeStore(rawStore)
 		}
 		restored, hdr, rerr := snapshot.RestoreInto(cfg.SnapshotDir, codes)
 		if rerr != nil {

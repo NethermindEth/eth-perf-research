@@ -15,8 +15,12 @@ func OpenRocksCodeStore(dir string) (*RocksCodeStore, error) {
 }
 
 func (s *RocksCodeStore) Get(hash [32]byte) (codeEntry, bool) { return codeEntry{}, false }
-func (s *RocksCodeStore) Put(hash [32]byte, e codeEntry)      {}
-func (s *RocksCodeStore) Delete(hash [32]byte)                {}
+func (s *RocksCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, present []bool) {
+	return make([]codeEntry, len(hashes)), make([]bool, len(hashes))
+}
+func (s *RocksCodeStore) Put(hash [32]byte, e codeEntry)                 {}
+func (s *RocksCodeStore) BatchPut(hashes [][32]byte, entries []codeEntry) {}
+func (s *RocksCodeStore) Delete(hash [32]byte)                           {}
 func (s *RocksCodeStore) Iterate(fn func(hash [32]byte, e codeEntry) bool) error {
 	return nil
 }

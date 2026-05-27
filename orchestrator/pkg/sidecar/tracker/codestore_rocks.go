@@ -139,6 +139,58 @@ func (s *RocksCodeStore) Put(hash [32]byte, e codeEntry) {
 	}
 }
 
+// MultiGet reads N hashes in one cgo call. The keys are passed as a single
+// [][]byte to grocksdb's MultiGet, which internally parallelises the
+// per-file lookups. At our bloating cadence (thousands of code-hash changes
+// per block) this collapses ~2N cgo crossings into 1 and was the bottleneck
+// identified by the 2026-05-27 pprof (75% of sidecar CPU in cgocall).
+func (s *RocksCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, present []bool) {
+	results = make([]codeEntry, len(hashes))
+	present = make([]bool, len(hashes))
+	if len(hashes) == 0 {
+		return results, present
+	}
+	keys := make([][]byte, len(hashes))
+	for i := range hashes {
+		keys[i] = hashes[i][:]
+	}
+	slices, err := s.db.MultiGet(s.ro, keys...)
+	if err != nil {
+		// MultiGet returns at most one error covering the whole batch.
+		// Behave as if every entry were absent — the caller will fall back
+		// to fresh-entry semantics, which is safe.
+		return results, present
+	}
+	for i, sl := range slices {
+		if sl.Exists() {
+			if e, ok := decodeCodeEntry(sl.Data()); ok {
+				results[i] = e
+				present[i] = true
+			}
+		}
+		sl.Free()
+	}
+	return results, present
+}
+
+// BatchPut writes all (hash, entry) pairs through one RocksDB WriteBatch.
+// Pairs with MultiGet to bound the per-block cgo cost to two crossings
+// regardless of how many code-hash changes a block carries.
+func (s *RocksCodeStore) BatchPut(hashes [][32]byte, entries []codeEntry) {
+	if len(hashes) == 0 {
+		return
+	}
+	wb := grocksdb.NewWriteBatch()
+	defer wb.Destroy()
+	for i, h := range hashes {
+		v := encodeCodeEntry(entries[i])
+		wb.Put(h[:], v[:])
+	}
+	if err := s.db.Write(s.wo, wb); err != nil {
+		log.Fatalf("codestore batch put: %v", err)
+	}
+}
+
 // Delete removes the entry for hash (no-op if absent). See Put for the
 // fail-fast rationale.
 func (s *RocksCodeStore) Delete(hash [32]byte) {

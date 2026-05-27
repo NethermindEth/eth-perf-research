@@ -137,12 +137,16 @@ func (t *Tracker) ApplySlotChange(addr [32]byte, oldCount, newCount uint64) {
 func (t *Tracker) ApplyBlockDiff(rec rlp.BlockDiffRecord) {
 	var slotDelta int64
 	var accountAddedDelta int64
+	// Code changes fold through the batched MultiGet+BatchPut path so the
+	// per-block cgo crossings stay bounded at 2 regardless of code-change
+	// count. accountAddedDelta is tallied here so a future change to the
+	// batched routine can't silently miss the account-creation signal.
 	for _, c := range rec.CodeHashChanges {
-		t.ApplyCodeChange(zeroHash, c.OldHash, c.NewHash, c.NewCodeSize)
 		if c.OldHash == zeroHash && c.NewHash != zeroHash {
 			accountAddedDelta++
 		}
 	}
+	t.applyCodeChangesBatched(rec.CodeHashChanges)
 	for _, s := range rec.SlotCountChanges {
 		t.ApplySlotChange(s.HashedAddress, s.OldCount, s.NewCount)
 		slotDelta += int64(s.NewCount) - int64(s.OldCount)
