@@ -219,7 +219,7 @@ func runTail(ctx context.Context, cfg config.Config, logger zerolog.Logger, mach
 	}
 	defer tailHandle.Close()
 	machine.Advance(state.PhaseCatchingUp)
-	tlr := tailer.New(tailHandle, t, logger, time.Second)
+	tlr := tailer.New(tailHandle, t, logger, 100*time.Millisecond)
 	go runSnapshotLoop(ctx, cfg, t, nil, logger)
 	go prom.Run(ctx, t, time.Second)
 	machine.Advance(state.PhaseLive)
@@ -299,7 +299,7 @@ func runAll(ctx context.Context, cfg config.Config, logger zerolog.Logger, machi
 	go runSnapshotLoop(ctx, cfg, t, rpcSrv, logger)
 	go prom.Run(ctx, t, time.Second)
 
-	tlr := tailer.New(tailHandle, t, logger, time.Second)
+	tlr := tailer.New(tailHandle, t, logger, 100*time.Millisecond)
 	machine.Advance(state.PhaseLive)
 	runErr := tlr.Run(ctx)
 	writeShutdownSnapshot(cfg, t, logger)
