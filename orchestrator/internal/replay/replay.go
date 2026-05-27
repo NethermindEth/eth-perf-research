@@ -5,14 +5,16 @@ package replay
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/beacon/engine"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads"
@@ -99,145 +101,69 @@ func (d *Driver) Replay(ctx context.Context, payloadsPath string) error {
 
 // submitPayload sends engine_newPayloadV4 then engine_forkchoiceUpdatedV3 for p.
 func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayloadV3) error {
-	blockHashHex := "0x" + hex.EncodeToString(p.BlockHash[:])
+	ed := toExecutableData(p)
 
 	// engine_newPayloadV4
-	wp := toWirePayload(p)
-	var newPayloadResp payloadStatusResponse
+	var status engine.PayloadStatusV1
 	err := d.Client.Call(ctx, "engine_newPayloadV4", []any{
-		wp,
-		[]string{},                      // blobVersionedHashes
-		"0x" + strings.Repeat("00", 32), // parentBeaconBlockRoot
-		[]string{},                      // executionRequests
-	}, &newPayloadResp)
+		ed,
+		[]hexutil.Bytes{},  // blobVersionedHashes
+		common.Hash{},      // parentBeaconBlockRoot (zero)
+		[]hexutil.Bytes{},  // executionRequests
+	}, &status)
 	if err != nil {
-		return fmt.Errorf("replay: engine_newPayloadV4 block %s: %w", blockHashHex, err)
+		return fmt.Errorf("replay: engine_newPayloadV4 block %s: %w", p.BlockHash.Hex(), err)
 	}
-	if newPayloadResp.Status != "VALID" {
+	if status.Status != "VALID" {
 		return fmt.Errorf("%w: block %s newPayload status=%s",
-			ErrReplayInvalid, blockHashHex, newPayloadResp.Status)
+			ErrReplayInvalid, p.BlockHash.Hex(), status.Status)
 	}
-	if !equalHex(newPayloadResp.LatestValidHash, blockHashHex) {
-		return fmt.Errorf("%w: block %s newPayload latestValidHash=%s",
-			ErrReplayInvalid, blockHashHex, newPayloadResp.LatestValidHash)
+	if status.LatestValidHash == nil || *status.LatestValidHash != p.BlockHash {
+		return fmt.Errorf("%w: block %s newPayload latestValidHash=%v",
+			ErrReplayInvalid, p.BlockHash.Hex(), status.LatestValidHash)
 	}
 
 	// engine_forkchoiceUpdatedV3
-	fcs := forkchoiceState{
-		HeadBlockHash:      blockHashHex,
-		SafeBlockHash:      blockHashHex,
-		FinalizedBlockHash: blockHashHex,
+	fcs := engine.ForkchoiceStateV1{
+		HeadBlockHash:      p.BlockHash,
+		SafeBlockHash:      p.BlockHash,
+		FinalizedBlockHash: p.BlockHash,
 	}
-	var fcuResp forkchoiceUpdatedResponse
+	var fcuResp engine.ForkChoiceResponse
 	if err := d.Client.Call(ctx, "engine_forkchoiceUpdatedV3", []any{fcs, nil}, &fcuResp); err != nil {
-		return fmt.Errorf("replay: engine_forkchoiceUpdatedV3 block %s: %w", blockHashHex, err)
+		return fmt.Errorf("replay: engine_forkchoiceUpdatedV3 block %s: %w", p.BlockHash.Hex(), err)
 	}
 	if fcuResp.PayloadStatus.Status != "VALID" {
 		return fmt.Errorf("%w: block %s forkchoiceUpdated status=%s",
-			ErrReplayInvalid, blockHashHex, fcuResp.PayloadStatus.Status)
+			ErrReplayInvalid, p.BlockHash.Hex(), fcuResp.PayloadStatus.Status)
 	}
 
 	return nil
 }
 
-// --- Engine API wire types ---
-
-// wirePayload is the JSON shape sent to engine_newPayloadV4.
-type wirePayload struct {
-	ParentHash    string   `json:"parentHash"`
-	FeeRecipient  string   `json:"feeRecipient"`
-	StateRoot     string   `json:"stateRoot"`
-	ReceiptsRoot  string   `json:"receiptsRoot"`
-	LogsBloom     string   `json:"logsBloom"`
-	PrevRandao    string   `json:"prevRandao"`
-	BlockNumber   string   `json:"blockNumber"`
-	GasLimit      string   `json:"gasLimit"`
-	GasUsed       string   `json:"gasUsed"`
-	Timestamp     string   `json:"timestamp"`
-	ExtraData     string   `json:"extraData"`
-	BaseFeePerGas string   `json:"baseFeePerGas"`
-	BlockHash     string   `json:"blockHash"`
-	Transactions  []string `json:"transactions"`
-	Withdrawals   []any    `json:"withdrawals"`
-	BlobGasUsed   string   `json:"blobGasUsed"`
-	ExcessBlobGas string   `json:"excessBlobGas"`
-}
-
-type payloadStatusResponse struct {
-	Status          string `json:"status"`
-	LatestValidHash string `json:"latestValidHash"`
-	ValidationError any    `json:"validationError"`
-}
-
-type forkchoiceState struct {
-	HeadBlockHash      string `json:"headBlockHash"`
-	SafeBlockHash      string `json:"safeBlockHash"`
-	FinalizedBlockHash string `json:"finalizedBlockHash"`
-}
-
-type forkchoiceUpdatedResponse struct {
-	PayloadStatus payloadStatusResponse `json:"payloadStatus"`
-	PayloadID     *string               `json:"payloadId"`
-}
-
-// toWirePayload converts an ExecutionPayloadV3 to its Engine API JSON form.
-func toWirePayload(p *payloads.ExecutionPayloadV3) *wirePayload {
-	txs := make([]string, len(p.Transactions))
-	for i, tx := range p.Transactions {
-		txs[i] = "0x" + hex.EncodeToString(tx)
+// toExecutableData adapts our on-disk ExecutionPayloadV3 to go-ethereum's
+// canonical engine.ExecutableData. The two structs hold the same fields; this
+// is purely a memberwise copy.
+func toExecutableData(p *payloads.ExecutionPayloadV3) *engine.ExecutableData {
+	return &engine.ExecutableData{
+		ParentHash:    p.ParentHash,
+		FeeRecipient:  p.FeeRecipient,
+		StateRoot:     p.StateRoot,
+		ReceiptsRoot:  p.ReceiptsRoot,
+		LogsBloom:     append([]byte(nil), p.LogsBloom[:]...),
+		Random:        p.PrevRandao,
+		Number:        p.BlockNumber,
+		GasLimit:      p.GasLimit,
+		GasUsed:       p.GasUsed,
+		Timestamp:     p.Timestamp,
+		ExtraData:     p.ExtraData,
+		BaseFeePerGas: p.BaseFeePerGas,
+		BlockHash:     p.BlockHash,
+		Transactions:  p.Transactions,
+		Withdrawals:   p.Withdrawals,
+		BlobGasUsed:   &p.BlobGasUsed,
+		ExcessBlobGas: &p.ExcessBlobGas,
 	}
-
-	var withdrawals []any
-	if p.Withdrawals != nil {
-		withdrawals = make([]any, len(p.Withdrawals))
-		for i, w := range p.Withdrawals {
-			withdrawals[i] = map[string]string{
-				"index":          toHexUint(w.Index),
-				"validatorIndex": toHexUint(w.Validator),
-				"address":        "0x" + hex.EncodeToString(w.Address[:]),
-				"amount":         toHexUint(w.Amount),
-			}
-		}
-	} else {
-		withdrawals = []any{}
-	}
-
-	return &wirePayload{
-		ParentHash:    "0x" + hex.EncodeToString(p.ParentHash[:]),
-		FeeRecipient:  "0x" + hex.EncodeToString(p.FeeRecipient[:]),
-		StateRoot:     "0x" + hex.EncodeToString(p.StateRoot[:]),
-		ReceiptsRoot:  "0x" + hex.EncodeToString(p.ReceiptsRoot[:]),
-		LogsBloom:     "0x" + hex.EncodeToString(p.LogsBloom[:]),
-		PrevRandao:    "0x" + hex.EncodeToString(p.PrevRandao[:]),
-		BlockNumber:   toHexUint(p.BlockNumber),
-		GasLimit:      toHexUint(p.GasLimit),
-		GasUsed:       toHexUint(p.GasUsed),
-		Timestamp:     toHexUint(p.Timestamp),
-		ExtraData:     "0x" + hex.EncodeToString(p.ExtraData),
-		BaseFeePerGas: toHexBigInt(p.BaseFeePerGas),
-		BlockHash:     "0x" + hex.EncodeToString(p.BlockHash[:]),
-		Transactions:  txs,
-		Withdrawals:   withdrawals,
-		BlobGasUsed:   toHexUint(p.BlobGasUsed),
-		ExcessBlobGas: toHexUint(p.ExcessBlobGas),
-	}
-}
-
-// toHexUint encodes u as a 0x-prefixed minimal-zero hex string.
-// Zero encodes as "0x0".
-func toHexUint(u uint64) string {
-	if u == 0 {
-		return "0x0"
-	}
-	return fmt.Sprintf("0x%x", u)
-}
-
-// toHexBigInt encodes b as a 0x-prefixed hex string. Nil or zero → "0x0".
-func toHexBigInt(b *big.Int) string {
-	if b == nil || b.Sign() == 0 {
-		return "0x0"
-	}
-	return "0x" + b.Text(16)
 }
 
 // equalHex compares two 0x-prefixed hex strings case-insensitively after

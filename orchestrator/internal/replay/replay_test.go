@@ -162,7 +162,7 @@ func validHandler(stateRoot string) handlerFunc {
 				Params []json.RawMessage `json:"params"`
 			}
 			json.Unmarshal(body, &req)
-			var wp wirePayload
+			var wp struct{ BlockHash string `json:"blockHash"` }
 			json.Unmarshal(req.Params[0], &wp)
 			return mockResponse(id, map[string]any{
 				"status":          "VALID",
@@ -243,7 +243,7 @@ func TestReplayInvalid(t *testing.T) {
 				Params []json.RawMessage `json:"params"`
 			}
 			json.Unmarshal(body, &req)
-			var wp wirePayload
+			var wp struct{ BlockHash string `json:"blockHash"` }
 			json.Unmarshal(req.Params[0], &wp)
 			// Second newPayload call → INVALID.
 			if n == 2 {
@@ -340,7 +340,7 @@ func TestReplayPayloadCount(t *testing.T) {
 				Params []json.RawMessage `json:"params"`
 			}
 			json.Unmarshal(body, &req)
-			var wp wirePayload
+			var wp struct{ BlockHash string `json:"blockHash"` }
 			json.Unmarshal(req.Params[0], &wp)
 			return mockResponse(id, map[string]any{
 				"status":          "VALID",
