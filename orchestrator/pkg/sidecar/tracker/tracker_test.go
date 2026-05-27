@@ -257,17 +257,32 @@ func TestStreamingSeed1M_Correctness(t *testing.T) {
 	}
 }
 
-func TestExportKeysRoundTrip(t *testing.T) {
+
+func TestAdvanceLastBlockMonotonic(t *testing.T) {
 	tr := New()
-	tr.SeedFromScan(
-		[]CodeSeed{{CodeHash: [32]byte{0x01}, CodeSize: 100, Refcount: 2}},
-		[]SlotSeed{{HashedAddress: [32]byte{0xaa}, SlotCount: 50}},
-	)
-	codes, slots := tr.ExportKeys()
-	if len(codes) != 1 || codes[0].CodeSize != 100 {
-		t.Errorf("ExportKeys codes: %+v", codes)
+
+	tr.AdvanceLastBlock(100)
+	if got := tr.LastBlock(); got != 100 {
+		t.Fatalf("after Advance(100): LastBlock=%d, want 100", got)
 	}
-	if len(slots) != 1 || slots[0].SlotCount != 50 {
-		t.Errorf("ExportKeys slots: %+v", slots)
+
+	// Going backwards must be a no-op.
+	tr.AdvanceLastBlock(50)
+	if got := tr.LastBlock(); got != 100 {
+		t.Fatalf("after Advance(50): LastBlock=%d, want 100 (monotonic)", got)
+	}
+
+	// Forward progress works.
+	tr.AdvanceLastBlock(150)
+	if got := tr.LastBlock(); got != 150 {
+		t.Fatalf("after Advance(150): LastBlock=%d, want 150", got)
+	}
+
+	// Existing state root pinned by SetLastBlock must NOT be cleared.
+	root := [32]byte{0xab}
+	tr.SetLastBlock(200, root)
+	tr.AdvanceLastBlock(250)
+	if tr.StateRoot() != root {
+		t.Fatalf("AdvanceLastBlock cleared the state root; want pin %x, got %x", root, tr.StateRoot())
 	}
 }

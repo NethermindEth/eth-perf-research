@@ -445,6 +445,21 @@ func (t *Tracker) SetLastBlock(block int64, root [32]byte) {
 	t.stateRoot.Store(root)
 }
 
+// AdvanceLastBlock monotonically bumps the tracker's notion of the highest
+// observed block number WITHOUT applying any counter deltas. It exists for
+// the tailer's decode-failure path: when a BlockDiffs record can't be
+// decoded the tailer still needs the tracker's LastBlock to advance past
+// the failed block, otherwise sensor consumers (statecomp_lite) deadlock
+// when the failed block is also the chain head.
+//
+// The state root is left untouched — it remains the root of the last
+// successfully applied block, which is the safest pre-existing invariant.
+func (t *Tracker) AdvanceLastBlock(block int64) {
+	if block > t.lastBlock.Load() {
+		t.lastBlock.Store(block)
+	}
+}
+
 // ExportCodes streams every code-hash entry through fn. Returning false from
 // fn aborts the walk. Memory: O(1) per call.
 func (t *Tracker) ExportCodes(fn func(CodeSeed) bool) error {

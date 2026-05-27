@@ -123,6 +123,12 @@ func (l *Tailer) consumeFrom(ctx context.Context, start int64) error {
 		if err != nil {
 			l.log.Error().Err(err).Int64("block", blockNum).Msg("tailer: decode failed, skipping")
 			l.lastApplied = blockNum
+			// Also bump the tracker's observed-block pointer so that sensor
+			// consumers (statecomp_lite incrementalBlockNumber) don't stall
+			// when a failed block lands on the current chain head. Without
+			// this, the orchestrator's strict waitSensorForBlock deadlocks
+			// because the tracker stays at blockNum-1 forever.
+			l.t.AdvanceLastBlock(blockNum)
 			continue
 		}
 		if rec.BlockNumber == 0 {
