@@ -122,7 +122,13 @@ func writeFile(path string, t *tracker.Tracker) (err error) {
 		return fmt.Errorf("write magic: %w", err)
 	}
 
-	enc, err := zstd.NewWriter(bw, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	// SpeedFastest: snapshot.bin is used only for restart rehydration, never
+	// shipped or stored long-term, so the ~30 % size penalty vs SpeedDefault
+	// is worth trading for the ~3× encoding-CPU win. The 2026-05-27 sidecar
+	// pprof had 34 % CPU in zstd.(*doubleFastEncoder).Encode at SpeedDefault;
+	// SpeedFastest uses the cheaper fastEncoder. Accuracy is unaffected —
+	// zstd is lossless at every level.
+	enc, err := zstd.NewWriter(bw, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		return fmt.Errorf("zstd writer: %w", err)
 	}
@@ -190,7 +196,7 @@ func writeShards(w io.Writer, t *tracker.Tracker) error {
 		}
 		codeCount = n
 	}
-	slotCount := countSlots(t)
+	slotCount := t.SlotEntryCount()
 
 	// Code section.
 	if err := writeByte(w, secCode); err != nil {
@@ -256,17 +262,6 @@ func countCodes(t *tracker.Tracker) (int64, error) {
 		return true
 	})
 	return n, err
-}
-
-// countSlots walks the in-RAM slot maps to count entries. O(N) over a hash
-// map; bounded by unique contracts (~25 M at 10× state).
-func countSlots(t *tracker.Tracker) int64 {
-	var n int64
-	t.ExportSlots(func(tracker.SlotSeed) bool {
-		n++
-		return true
-	})
-	return n
 }
 
 func writeByte(w io.Writer, b byte) error {

@@ -490,6 +490,21 @@ func (t *Tracker) ExportSlots(fn func(SlotSeed) bool) {
 	}
 }
 
+// SlotEntryCount returns the total number of (address → slotCount) entries
+// across all shards. O(ShardCount) — sums len() of each shard's slot map
+// under its RLock rather than iterating every entry. Lets the snapshot
+// writer emit the section length prefix without walking the slot map twice.
+func (t *Tracker) SlotEntryCount() int64 {
+	var n int64
+	for i := 0; i < ShardCount; i++ {
+		sh := t.shards[i]
+		sh.mu.RLock()
+		n += int64(len(sh.slots))
+		sh.mu.RUnlock()
+	}
+	return n
+}
+
 // Close releases resources owned by the tracker (notably the CodeStore's disk
 // handles if it is backed by RocksDB). Safe to call multiple times.
 func (t *Tracker) Close() error {
