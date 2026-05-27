@@ -43,7 +43,20 @@ func (s *Signer) Address() common.Address {
 
 // SignBatch signs txs in parallel (bounded by GOMAXPROCS workers) and returns
 // signed RLP bytes in input order. Cancels early if ctx is done.
+//
+// chainID and the corresponding LatestSignerForChainID(chainID) are batch
+// constants — all txs in one Dispatch share the same ChainID — so both are
+// computed once here and reused across every signOne. Pre-fix, signOne
+// allocated a fresh big.Int chainID and a fresh signer per tx; eliding those
+// removes two big-Int allocations from each of ~7-10k signOne calls per
+// batch.
 func (s *Signer) SignBatch(ctx context.Context, txs []*orchpb.TxIn) ([][]byte, error) {
+	if len(txs) == 0 {
+		return nil, nil
+	}
+	chainID := new(big.Int).SetUint64(txs[0].ChainId)
+	signer := types.LatestSignerForChainID(chainID)
+
 	results := make([][]byte, len(txs))
 	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
 
@@ -57,7 +70,7 @@ func (s *Signer) SignBatch(ctx context.Context, txs []*orchpb.TxIn) ([][]byte, e
 		}
 		g.Go(func() error {
 			defer func() { <-sem }()
-			raw, err := signOne(tx, s.privKey)
+			raw, err := signOne(tx, s.privKey, chainID, signer)
 			if err != nil {
 				return fmt.Errorf("tx[%d]: %w", i, err)
 			}
@@ -72,10 +85,9 @@ func (s *Signer) SignBatch(ctx context.Context, txs []*orchpb.TxIn) ([][]byte, e
 }
 
 // signOne converts a protobuf TxIn to a signed EIP-1559 transaction and
-// returns the canonical type-2 prefixed RLP bytes.
-func signOne(tx *orchpb.TxIn, key *ecdsa.PrivateKey) ([]byte, error) {
-	chainID := new(big.Int).SetUint64(tx.ChainId)
-
+// returns the canonical type-2 prefixed RLP bytes. chainID/signer are
+// batch-constants supplied by the caller.
+func signOne(tx *orchpb.TxIn, key *ecdsa.PrivateKey, chainID *big.Int, signer types.Signer) ([]byte, error) {
 	var to *common.Address
 	switch len(tx.To) {
 	case 0:
@@ -117,7 +129,6 @@ func signOne(tx *orchpb.TxIn, key *ecdsa.PrivateKey) ([]byte, error) {
 		AccessList: al,
 	}
 	unsigned := types.NewTx(inner)
-	signer := types.LatestSignerForChainID(chainID)
 	signed, err := types.SignTx(unsigned, signer, key)
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
