@@ -101,15 +101,13 @@ func (d *Driver) Replay(ctx context.Context, payloadsPath string) error {
 
 // submitPayload sends engine_newPayloadV4 then engine_forkchoiceUpdatedV3 for p.
 func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayloadV3) error {
-	ed := toExecutableData(p)
-
 	// engine_newPayloadV4
 	var status engine.PayloadStatusV1
 	err := d.Client.Call(ctx, "engine_newPayloadV4", []any{
-		ed,
-		[]hexutil.Bytes{},  // blobVersionedHashes
-		common.Hash{},      // parentBeaconBlockRoot (zero)
-		[]hexutil.Bytes{},  // executionRequests
+		p,                 // ExecutionPayloadV3 == engine.ExecutableData
+		[]hexutil.Bytes{}, // blobVersionedHashes
+		common.Hash{},     // parentBeaconBlockRoot (zero)
+		[]hexutil.Bytes{}, // executionRequests
 	}, &status)
 	if err != nil {
 		return fmt.Errorf("replay: engine_newPayloadV4 block %s: %w", p.BlockHash.Hex(), err)
@@ -139,31 +137,6 @@ func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayload
 	}
 
 	return nil
-}
-
-// toExecutableData adapts our on-disk ExecutionPayloadV3 to go-ethereum's
-// canonical engine.ExecutableData. The two structs hold the same fields; this
-// is purely a memberwise copy.
-func toExecutableData(p *payloads.ExecutionPayloadV3) *engine.ExecutableData {
-	return &engine.ExecutableData{
-		ParentHash:    p.ParentHash,
-		FeeRecipient:  p.FeeRecipient,
-		StateRoot:     p.StateRoot,
-		ReceiptsRoot:  p.ReceiptsRoot,
-		LogsBloom:     append([]byte(nil), p.LogsBloom[:]...),
-		Random:        p.PrevRandao,
-		Number:        p.BlockNumber,
-		GasLimit:      p.GasLimit,
-		GasUsed:       p.GasUsed,
-		Timestamp:     p.Timestamp,
-		ExtraData:     p.ExtraData,
-		BaseFeePerGas: p.BaseFeePerGas,
-		BlockHash:     p.BlockHash,
-		Transactions:  p.Transactions,
-		Withdrawals:   p.Withdrawals,
-		BlobGasUsed:   &p.BlobGasUsed,
-		ExcessBlobGas: &p.ExcessBlobGas,
-	}
 }
 
 // equalHex compares two 0x-prefixed hex strings case-insensitively after

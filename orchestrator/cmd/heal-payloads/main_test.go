@@ -38,9 +38,9 @@ func fakePayload(n uint64) *payloads.ExecutionPayloadV3 {
 		FeeRecipient:  common.Address{0xaa, byte(n)},
 		StateRoot:     hash(byte(n) | 0x40),
 		ReceiptsRoot:  hash(byte(n) | 0x60),
-		LogsBloom:     bloom,
-		PrevRandao:    hash(byte(n) | 0x80),
-		BlockNumber:   n,
+		LogsBloom:     bloom[:],
+		Random:        hash(byte(n) | 0x80),
+		Number:        n,
 		GasLimit:      30_000_000,
 		GasUsed:       21000 * n,
 		Timestamp:     1_700_000_000 + n*12,
@@ -49,8 +49,8 @@ func fakePayload(n uint64) *payloads.ExecutionPayloadV3 {
 		BlockHash:     hash(byte(n)),
 		Transactions:  [][]byte{{0x01, byte(n)}, {0x02, byte(n)}},
 		Withdrawals:   []*types.Withdrawal{{Index: n, Validator: n, Address: common.Address{0xbb, byte(n)}, Amount: 1000 + n}},
-		BlobGasUsed:   0,
-		ExcessBlobGas: 0,
+		BlobGasUsed:   new(uint64),
+		ExcessBlobGas: new(uint64),
 	}
 }
 
@@ -70,9 +70,9 @@ func newFakeRPC(blocks []*payloads.ExecutionPayloadV3, head uint64) *fakeRPC {
 		head:          head,
 	}
 	for _, p := range blocks {
-		f.payloadsByNum[p.BlockNumber] = p
+		f.payloadsByNum[p.Number] = p
 		for i, tx := range p.Transactions {
-			h := txHash(p.BlockNumber, i)
+			h := txHash(p.Number, i)
 			f.txByHash[h] = tx
 		}
 	}
@@ -132,7 +132,7 @@ func (f *fakeRPC) handleRawTx(params []json.RawMessage) (any, *rpcErr) {
 func wireBlockFor(p *payloads.ExecutionPayloadV3) map[string]any {
 	txHashes := make([]string, len(p.Transactions))
 	for i := range p.Transactions {
-		txHashes[i] = txHash(p.BlockNumber, i)
+		txHashes[i] = txHash(p.Number, i)
 	}
 	withdrawals := make([]map[string]string, len(p.Withdrawals))
 	for i, w := range p.Withdrawals {
@@ -144,21 +144,21 @@ func wireBlockFor(p *payloads.ExecutionPayloadV3) map[string]any {
 		}
 	}
 	return map[string]any{
-		"number":        fmt.Sprintf("0x%x", p.BlockNumber),
+		"number":        fmt.Sprintf("0x%x", p.Number),
 		"hash":          "0x" + hex.EncodeToString(p.BlockHash[:]),
 		"parentHash":    "0x" + hex.EncodeToString(p.ParentHash[:]),
 		"miner":         "0x" + hex.EncodeToString(p.FeeRecipient[:]),
 		"stateRoot":     "0x" + hex.EncodeToString(p.StateRoot[:]),
 		"receiptsRoot":  "0x" + hex.EncodeToString(p.ReceiptsRoot[:]),
 		"logsBloom":     "0x" + hex.EncodeToString(p.LogsBloom[:]),
-		"mixHash":       "0x" + hex.EncodeToString(p.PrevRandao[:]),
+		"mixHash":       "0x" + hex.EncodeToString(p.Random[:]),
 		"gasLimit":      fmt.Sprintf("0x%x", p.GasLimit),
 		"gasUsed":       fmt.Sprintf("0x%x", p.GasUsed),
 		"timestamp":     fmt.Sprintf("0x%x", p.Timestamp),
 		"extraData":     "0x" + hex.EncodeToString(p.ExtraData),
 		"baseFeePerGas": fmt.Sprintf("0x%x", p.BaseFeePerGas),
-		"blobGasUsed":   fmt.Sprintf("0x%x", p.BlobGasUsed),
-		"excessBlobGas": fmt.Sprintf("0x%x", p.ExcessBlobGas),
+		"blobGasUsed":   fmt.Sprintf("0x%x", deref(p.BlobGasUsed)),
+		"excessBlobGas": fmt.Sprintf("0x%x", deref(p.ExcessBlobGas)),
 		"transactions":  txHashes,
 		"withdrawals":   withdrawals,
 	}
@@ -167,6 +167,13 @@ func wireBlockFor(p *payloads.ExecutionPayloadV3) map[string]any {
 type rpcErr struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+func deref(p *uint64) uint64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func newFakeRPCServer(t *testing.T, f *fakeRPC) *httptest.Server {
@@ -243,7 +250,7 @@ func readPayloadNumbers(t *testing.T, path string) []uint64 {
 		if err != nil {
 			t.Fatalf("Next: %v", err)
 		}
-		out = append(out, p.BlockNumber)
+		out = append(out, p.Number)
 	}
 }
 

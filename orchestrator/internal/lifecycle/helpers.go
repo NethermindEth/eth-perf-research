@@ -88,9 +88,9 @@ func buildExecutionPayloadV3(block *rpc.BlockHeader, signedRLP [][]byte) *payloa
 		FeeRecipient:  common.Address{},
 		StateRoot:     block.StateRoot,
 		ReceiptsRoot:  common.Hash{},
-		LogsBloom:     [256]byte{},
-		PrevRandao:    common.Hash{},
-		BlockNumber:   block.Number,
+		LogsBloom:     make([]byte, 256),
+		Random:        common.Hash{},
+		Number:        block.Number,
 		GasLimit:      block.GasLimit,
 		GasUsed:       block.GasUsed,
 		Timestamp:     block.Timestamp,
@@ -99,8 +99,8 @@ func buildExecutionPayloadV3(block *rpc.BlockHeader, signedRLP [][]byte) *payloa
 		BlockHash:     block.Hash,
 		Transactions:  signedRLP,
 		Withdrawals:   nil,
-		BlobGasUsed:   0,
-		ExcessBlobGas: 0,
+		BlobGasUsed:   new(uint64),
+		ExcessBlobGas: new(uint64),
 	}
 }
 

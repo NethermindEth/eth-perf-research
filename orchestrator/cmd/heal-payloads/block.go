@@ -159,8 +159,9 @@ func wireBlockToPayload(wb *wireBlock, txs [][]byte) (*payloads.ExecutionPayload
 		FeeRecipient:  common.HexToAddress(wb.Miner),
 		StateRoot:     common.HexToHash(wb.StateRoot),
 		ReceiptsRoot:  common.HexToHash(wb.ReceiptsRoot),
-		PrevRandao:    common.HexToHash(wb.MixHash),
-		BlockNumber:   number,
+		LogsBloom:     bloom,
+		Random:        common.HexToHash(wb.MixHash),
+		Number:        number,
 		GasLimit:      gasLimit,
 		GasUsed:       gasUsed,
 		Timestamp:     ts,
@@ -169,10 +170,9 @@ func wireBlockToPayload(wb *wireBlock, txs [][]byte) (*payloads.ExecutionPayload
 		BlockHash:     common.HexToHash(wb.Hash),
 		Transactions:  txs,
 		Withdrawals:   withdrawals,
-		BlobGasUsed:   blobGasUsed,
-		ExcessBlobGas: excessBlobGas,
+		BlobGasUsed:   &blobGasUsed,
+		ExcessBlobGas: &excessBlobGas,
 	}
-	copy(p.LogsBloom[:], bloom)
 	return p, nil
 }
 

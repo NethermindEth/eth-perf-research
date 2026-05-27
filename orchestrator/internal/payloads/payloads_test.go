@@ -1,6 +1,8 @@
 package payloads
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"math/big"
 	"math/rand"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 func randBytes(rng *rand.Rand, n int) []byte {
@@ -60,9 +63,9 @@ func randPayload(rng *rand.Rand, i int) *ExecutionPayloadV3 {
 		FeeRecipient:  randAddr(rng),
 		StateRoot:     randHash(rng),
 		ReceiptsRoot:  randHash(rng),
-		LogsBloom:     bloom,
-		PrevRandao:    randHash(rng),
-		BlockNumber:   uint64(i + 1),
+		LogsBloom:     bloom[:],
+		Random:        randHash(rng),
+		Number:        uint64(i + 1),
 		GasLimit:      30_000_000,
 		GasUsed:       uint64(rng.Intn(30_000_000)),
 		Timestamp:     uint64(1_700_000_000 + i*12),
@@ -71,8 +74,8 @@ func randPayload(rng *rand.Rand, i int) *ExecutionPayloadV3 {
 		BlockHash:     randHash(rng),
 		Transactions:  txs,
 		Withdrawals:   ws,
-		BlobGasUsed:   0,
-		ExcessBlobGas: 0,
+		BlobGasUsed:   new(uint64),
+		ExcessBlobGas: new(uint64),
 	}
 }
 
@@ -226,5 +229,46 @@ func TestAppendSyncReadable(t *testing.T) {
 	normalise(got)
 	if !reflect.DeepEqual(want, got) {
 		t.Fatalf("mismatch after Append+Sync\nwant %+v\ngot  %+v", want, got)
+	}
+}
+
+// TestRLPByteStabilityGolden asserts that a known payload still RLP-encodes
+// to the exact byte sequence that prior consumers (sidecar, replay, external
+// Geth replayers) expect. Any change to field order, type, or RLP layout will
+// flip this hash. The expected hash was computed from the canonical wire
+// representation locked at v1; do not update without a migration plan.
+func TestRLPByteStabilityGolden(t *testing.T) {
+	bloom := make([]byte, 256)
+	for i := range bloom {
+		bloom[i] = byte(i)
+	}
+	zero := uint64(0)
+	p := &ExecutionPayloadV3{
+		ParentHash:    common.Hash{0x01},
+		FeeRecipient:  common.Address{0x02},
+		StateRoot:     common.Hash{0x03},
+		ReceiptsRoot:  common.Hash{0x04},
+		LogsBloom:     bloom,
+		Random:        common.Hash{0x05},
+		Number:        100,
+		GasLimit:      30_000_000,
+		GasUsed:       21000,
+		Timestamp:     1_700_000_000,
+		ExtraData:     []byte{0xde, 0xad},
+		BaseFeePerGas: big.NewInt(7),
+		BlockHash:     common.Hash{0x06},
+		Transactions:  [][]byte{{0xff}},
+		Withdrawals:   []*types.Withdrawal{},
+		BlobGasUsed:   &zero,
+		ExcessBlobGas: &zero,
+	}
+	buf, err := rlp.EncodeToBytes(toRLP(p))
+	if err != nil {
+		t.Fatalf("rlp encode: %v", err)
+	}
+	got := sha256.Sum256(buf)
+	const want = "99544c9cc8e2571aea1fc1cf7a3c8756f837a1591580b39032d961c51ce08bfc"
+	if hex.EncodeToString(got[:]) != want {
+		t.Fatalf("wire format changed: got sha256=%x want %s (len=%d)", got[:], want, len(buf))
 	}
 }

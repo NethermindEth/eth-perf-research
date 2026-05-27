@@ -77,8 +77,8 @@ func Heal(ctx context.Context, cfg HealConfig) (*HealSummary, error) {
 		}
 		summary.InputFrames++
 
-		if havePrev && p.BlockNumber > prev+1 {
-			for missing := prev + 1; missing < p.BlockNumber; missing++ {
+		if havePrev && p.Number > prev+1 {
+			for missing := prev + 1; missing < p.Number; missing++ {
 				filled, err := cfg.Fetcher.PayloadAt(ctx, missing)
 				if err != nil {
 					return nil, fmt.Errorf("heal: fetch gap block %d: %w", missing, err)
@@ -90,19 +90,19 @@ func Heal(ctx context.Context, cfg HealConfig) (*HealSummary, error) {
 				summary.OutputFrames++
 				slog.Info("heal: filled gap block", "block", missing)
 			}
-		} else if havePrev && p.BlockNumber <= prev {
-			return nil, fmt.Errorf("heal: non-monotonic input at frame %d: prev=%d current=%d", summary.InputFrames, prev, p.BlockNumber)
+		} else if havePrev && p.Number <= prev {
+			return nil, fmt.Errorf("heal: non-monotonic input at frame %d: prev=%d current=%d", summary.InputFrames, prev, p.Number)
 		}
 
 		if err := w.Append(p); err != nil {
-			return nil, fmt.Errorf("heal: write frame %d (block %d): %w", summary.InputFrames, p.BlockNumber, err)
+			return nil, fmt.Errorf("heal: write frame %d (block %d): %w", summary.InputFrames, p.Number, err)
 		}
 		summary.OutputFrames++
 		if summary.FirstBlock == 0 {
-			summary.FirstBlock = p.BlockNumber
+			summary.FirstBlock = p.Number
 		}
-		summary.LastBlock = p.BlockNumber
-		prev = p.BlockNumber
+		summary.LastBlock = p.Number
+		prev = p.Number
 		havePrev = true
 	}
 
@@ -155,10 +155,10 @@ func verifyContiguous(path string) error {
 		if err != nil {
 			return fmt.Errorf("heal: verify frame %d: %w", idx, err)
 		}
-		if havePrev && p.BlockNumber != prev+1 {
-			return fmt.Errorf("heal: output non-contiguous at frame %d: prev=%d current=%d", idx, prev, p.BlockNumber)
+		if havePrev && p.Number != prev+1 {
+			return fmt.Errorf("heal: output non-contiguous at frame %d: prev=%d current=%d", idx, prev, p.Number)
 		}
-		prev = p.BlockNumber
+		prev = p.Number
 		havePrev = true
 		idx++
 	}

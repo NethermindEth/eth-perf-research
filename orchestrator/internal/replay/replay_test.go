@@ -48,9 +48,9 @@ func randPayload(rng *rand.Rand, i int) *payloads.ExecutionPayloadV3 {
 		FeeRecipient:  feeRecipient,
 		StateRoot:     stateRoot,
 		ReceiptsRoot:  receiptsRoot,
-		LogsBloom:     bloom,
-		PrevRandao:    prevRandao,
-		BlockNumber:   uint64(i + 1),
+		LogsBloom:     bloom[:],
+		Random:        prevRandao,
+		Number:        uint64(i + 1),
 		GasLimit:      30_000_000,
 		GasUsed:       uint64(rng.Intn(30_000_000)),
 		Timestamp:     uint64(1_700_000_000 + i*12),
@@ -59,8 +59,8 @@ func randPayload(rng *rand.Rand, i int) *payloads.ExecutionPayloadV3 {
 		BlockHash:     blockHash,
 		Transactions:  [][]byte{randBytes(rng, 50)},
 		Withdrawals:   []*goethtypes.Withdrawal{},
-		BlobGasUsed:   0,
-		ExcessBlobGas: 0,
+		BlobGasUsed:   new(uint64),
+		ExcessBlobGas: new(uint64),
 	}
 }
 

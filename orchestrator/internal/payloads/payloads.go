@@ -8,32 +8,17 @@ import (
 	"math/big"
 	"os"
 
-	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // ExecutionPayloadV3 is the canonical Engine API ExecutionPayloadV3 carrier.
-// Field order matches the Engine API spec and the Python encode_rlp layout.
-type ExecutionPayloadV3 struct {
-	ParentHash    common.Hash
-	FeeRecipient  common.Address
-	StateRoot     common.Hash
-	ReceiptsRoot  common.Hash
-	LogsBloom     [256]byte
-	PrevRandao    common.Hash
-	BlockNumber   uint64
-	GasLimit      uint64
-	GasUsed       uint64
-	Timestamp     uint64
-	ExtraData     []byte
-	BaseFeePerGas *big.Int
-	BlockHash     common.Hash
-	Transactions  [][]byte
-	Withdrawals   []*types.Withdrawal
-	BlobGasUsed   uint64
-	ExcessBlobGas uint64
-}
+// It aliases go-ethereum's engine.ExecutableData so we share the canonical
+// type across orchestrator, replay, and heal-payloads. The on-disk wire
+// format below (rlpPayload + 4-byte BE length prefix) is preserved for
+// byte-equal compatibility with existing payloads.rlp artifacts.
+type ExecutionPayloadV3 = engine.ExecutableData
 
 // rlpPayload is the wire representation fed to rlp.Encode.
 // go-ethereum's RLP encoder uses struct field order; types.Withdrawal has its
@@ -59,15 +44,27 @@ type rlpPayload struct {
 }
 
 func toRLP(p *ExecutionPayloadV3) *rlpPayload {
-	bloom := p.LogsBloom[:]
+	if len(p.LogsBloom) != 256 {
+		// All callers (lifecycle, heal-payloads, replay) build LogsBloom from
+		// a 256-byte source; this guards a future caller that forgets.
+		panic(fmt.Sprintf("payloads: LogsBloom must be 256 bytes, got %d", len(p.LogsBloom)))
+	}
+	blobGasUsed := uint64(0)
+	if p.BlobGasUsed != nil {
+		blobGasUsed = *p.BlobGasUsed
+	}
+	excessBlobGas := uint64(0)
+	if p.ExcessBlobGas != nil {
+		excessBlobGas = *p.ExcessBlobGas
+	}
 	return &rlpPayload{
 		ParentHash:    p.ParentHash[:],
 		FeeRecipient:  p.FeeRecipient[:],
 		StateRoot:     p.StateRoot[:],
 		ReceiptsRoot:  p.ReceiptsRoot[:],
-		LogsBloom:     bloom,
-		PrevRandao:    p.PrevRandao[:],
-		BlockNumber:   p.BlockNumber,
+		LogsBloom:     p.LogsBloom,
+		PrevRandao:    p.Random[:],
+		BlockNumber:   p.Number,
 		GasLimit:      p.GasLimit,
 		GasUsed:       p.GasUsed,
 		Timestamp:     p.Timestamp,
@@ -76,14 +73,14 @@ func toRLP(p *ExecutionPayloadV3) *rlpPayload {
 		BlockHash:     p.BlockHash[:],
 		Transactions:  p.Transactions,
 		Withdrawals:   p.Withdrawals,
-		BlobGasUsed:   p.BlobGasUsed,
-		ExcessBlobGas: p.ExcessBlobGas,
+		BlobGasUsed:   blobGasUsed,
+		ExcessBlobGas: excessBlobGas,
 	}
 }
 
 func fromRLP(r *rlpPayload) (*ExecutionPayloadV3, error) {
 	p := &ExecutionPayloadV3{
-		BlockNumber:   r.BlockNumber,
+		Number:        r.BlockNumber,
 		GasLimit:      r.GasLimit,
 		GasUsed:       r.GasUsed,
 		Timestamp:     r.Timestamp,
@@ -91,8 +88,8 @@ func fromRLP(r *rlpPayload) (*ExecutionPayloadV3, error) {
 		BaseFeePerGas: r.BaseFeePerGas,
 		Transactions:  r.Transactions,
 		Withdrawals:   r.Withdrawals,
-		BlobGasUsed:   r.BlobGasUsed,
-		ExcessBlobGas: r.ExcessBlobGas,
+		BlobGasUsed:   &r.BlobGasUsed,
+		ExcessBlobGas: &r.ExcessBlobGas,
 	}
 	if n := copy(p.ParentHash[:], r.ParentHash); n != 32 {
 		return nil, fmt.Errorf("payloads: parentHash: expected 32 bytes, got %d", n)
@@ -106,10 +103,11 @@ func fromRLP(r *rlpPayload) (*ExecutionPayloadV3, error) {
 	if n := copy(p.ReceiptsRoot[:], r.ReceiptsRoot); n != 32 {
 		return nil, fmt.Errorf("payloads: receiptsRoot: expected 32 bytes, got %d", n)
 	}
-	if n := copy(p.LogsBloom[:], r.LogsBloom); n != 256 {
-		return nil, fmt.Errorf("payloads: logsBloom: expected 256 bytes, got %d", n)
+	if len(r.LogsBloom) != 256 {
+		return nil, fmt.Errorf("payloads: logsBloom: expected 256 bytes, got %d", len(r.LogsBloom))
 	}
-	if n := copy(p.PrevRandao[:], r.PrevRandao); n != 32 {
+	p.LogsBloom = append([]byte(nil), r.LogsBloom...)
+	if n := copy(p.Random[:], r.PrevRandao); n != 32 {
 		return nil, fmt.Errorf("payloads: prevRandao: expected 32 bytes, got %d", n)
 	}
 	if n := copy(p.BlockHash[:], r.BlockHash); n != 32 {
