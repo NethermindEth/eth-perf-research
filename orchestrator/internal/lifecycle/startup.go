@@ -225,13 +225,17 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		val  float64
 	}
 	coeffBound := state.CoeffBound()
+	// The controller stores F/Sigma/Alpha in flat arrays keyed by (verb,axis).
+	// Snapshot the verb set so we can fast-reject cells for verbs that aren't
+	// configured for this run.
+	knownVerbs := state.FSnapshot()
 	var fCells, sigmaCells, alphaCells []cell
 	for k, v := range obs.CoeffsAfter {
 		verb, ax, ok := splitFlatKey(k)
 		if !ok {
 			continue
 		}
-		if _, has := state.F[verb]; !has {
+		if _, has := knownVerbs[verb]; !has {
 			continue
 		}
 		if !mathx.IsFiniteInRange(v, coeffBound) {
@@ -246,7 +250,7 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		if !ok {
 			continue
 		}
-		if _, has := state.Sigma[verb]; !has {
+		if _, has := knownVerbs[verb]; !has {
 			continue
 		}
 		if !mathx.IsFiniteInRange(v, coeffBound) {
@@ -261,7 +265,7 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		if !ok {
 			continue
 		}
-		if _, has := state.Alpha[verb]; !has {
+		if _, has := knownVerbs[verb]; !has {
 			continue
 		}
 		if math.IsNaN(v) || math.IsInf(v, 0) {
@@ -272,17 +276,18 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		alphaCells = append(alphaCells, cell{verb, ax, v})
 	}
 
-	// Pass 2: every cell validated — commit them to state.
+	// Pass 2: every cell validated — commit them to state via the
+	// (verb,axis)-keyed setters.
 	for _, fc := range fCells {
-		state.F[fc.verb][fc.ax] = fc.val
+		state.SetF(fc.verb, fc.ax, fc.val)
 		res.CoeffCells++
 	}
 	for _, sc := range sigmaCells {
-		state.Sigma[sc.verb][sc.ax] = sc.val
+		state.SetSigma(sc.verb, sc.ax, sc.val)
 		res.SigmaCells++
 	}
 	for _, ac := range alphaCells {
-		state.Alpha[ac.verb][ac.ax] = ac.val
+		state.SetAlpha(ac.verb, ac.ax, ac.val)
 		res.AlphaCells++
 	}
 	state.BatchID = tail.BatchId + 1

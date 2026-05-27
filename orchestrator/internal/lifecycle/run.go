@@ -46,6 +46,7 @@ import (
 // target.yaml + env once at startup and threads it everywhere.
 type Config struct {
 	RPCURL              string
+	SensorRPCURL        string // optional: separate RPC endpoint for statecomp_get (sidecar)
 	JWTPath             string
 	StateDir            string
 	TargetYAMLPath      string
@@ -58,6 +59,17 @@ type Config struct {
 	PluginGitSHA        string
 	NethermindCommitSHA string
 	DotnetRuntimeMajor  string
+
+	// AllowNonZeroFreshHead allows an empty-journal startup against a chain
+	// whose head block != 0. Used by re-baseline runs where the snapshot was
+	// imported from another node. Currently informational; the strict guard
+	// was removed in the v19 lifecycle rewrite — kept on Config so cmd flags
+	// still bind cleanly.
+	AllowNonZeroFreshHead bool
+
+	// DebugPick is a convenience mirror of Run.Control.DebugPick. cmd-side
+	// flag binding writes both fields; the controller reads Run.Control.
+	DebugPick bool
 
 	// Run is the resolved RunConfig. If left zero-valued, Run() resolves it
 	// from TargetYAMLPath + environment via config.Load.
@@ -116,6 +128,19 @@ func Run(ctx context.Context, cfg Config) error {
 	rpcCli, err := rpc.NewClient(cfg.RPCURL, rpcOpts...)
 	if err != nil {
 		return fmt.Errorf("lifecycle: rpc client: %w", err)
+	}
+	// In the v19 architecture statecomp_get is served by the external sidecar,
+	// not by Nethermind. When a separate URL is provided, the sensor talks to
+	// that endpoint while everything else (commits, queries, codeAt) keeps
+	// using the main rpc client.
+	sensorRPC := rpcCli
+	if cfg.SensorRPCURL != "" && cfg.SensorRPCURL != cfg.RPCURL {
+		sensorRPC, err = rpc.NewClient(cfg.SensorRPCURL,
+			rpc.WithTimeout(time.Duration(rc.Run.RPCTimeoutS)*time.Second))
+		if err != nil {
+			return fmt.Errorf("lifecycle: sensor rpc client: %w", err)
+		}
+		slog.Info("lifecycle: sensor using dedicated rpc endpoint", "sensor_rpc_url", cfg.SensorRPCURL)
 	}
 	chainID, err := rpcCli.ChainID(ctx)
 	if err != nil {
@@ -181,7 +206,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// 7. Open sensor, journal writer, payloads writer. Transaction building
 	// is in-process (internal/verbs) — no builder subprocess pool. Every sensor
 	// poll/deadline value comes from the resolved RunConfig.
-	sens := sensor.New(rpcCli,
+	sens := sensor.New(sensorRPC,
 		sensor.WithPollInterval(time.Duration(rc.Run.SensorPollIntervalMS)*time.Millisecond),
 		sensor.WithDeadline(time.Duration(rc.Run.SensorDeadlineMS)*time.Millisecond),
 	)

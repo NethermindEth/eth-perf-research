@@ -101,8 +101,8 @@ func TestBuildExecutionPayloadV3Fields(t *testing.T) {
 	if p == nil {
 		t.Fatalf("nil payload")
 	}
-	if p.BlockNumber != 42 {
-		t.Errorf("BlockNumber=%d want 42", p.BlockNumber)
+	if p.Number != 42 {
+		t.Errorf("BlockNumber=%d want 42", p.Number)
 	}
 	if p.GasLimit != 30_000_000 {
 		t.Errorf("GasLimit=%d", p.GasLimit)
@@ -208,16 +208,16 @@ func TestHydrateStateFromTailReconstructsCoefficients(t *testing.T) {
 		t.Errorf("counts = coeff:%d alpha:%d sigma:%d, want 2/1/1",
 			res.CoeffCells, res.AlphaCells, res.SigmaCells)
 	}
-	if got := state.F["eoatx"][controller.AxisAccounts]; got != 123.0 {
+	if got := state.GetF("eoatx", controller.AxisAccounts); got != 123.0 {
 		t.Errorf("F[eoatx][accounts]=%v, want 123", got)
 	}
-	if got := state.F["storagespam"][controller.AxisStorage]; got != 456.0 {
+	if got := state.GetF("storagespam", controller.AxisStorage); got != 456.0 {
 		t.Errorf("F[storagespam][storage]=%v, want 456", got)
 	}
-	if got := state.Alpha["eoatx"][controller.AxisAccounts]; got != 0.07 {
+	if got := state.GetAlpha("eoatx", controller.AxisAccounts); got != 0.07 {
 		t.Errorf("Alpha[eoatx][accounts]=%v, want 0.07", got)
 	}
-	if got := state.Sigma["storagespam"][controller.AxisStorage]; got != 2.5 {
+	if got := state.GetSigma("storagespam", controller.AxisStorage); got != 2.5 {
 		t.Errorf("Sigma[storagespam][storage]=%v, want 2.5", got)
 	}
 	if state.BatchID != 42 {
@@ -230,7 +230,7 @@ func TestHydrateStateFromTailReconstructsCoefficients(t *testing.T) {
 // Reconstructed=false — the safe fall-through the resume path relies on.
 func TestHydrateStateFromTailColdStartFallback(t *testing.T) {
 	state := newColdState([]string{"eoatx"})
-	seedF := state.F["eoatx"][controller.AxisAccounts]
+	seedF := state.GetF("eoatx", controller.AxisAccounts)
 
 	cases := []struct {
 		name string
@@ -250,7 +250,7 @@ func TestHydrateStateFromTailColdStartFallback(t *testing.T) {
 			if res.Reconstructed {
 				t.Errorf("Reconstructed=true, want false for %s", tc.name)
 			}
-			if got := st.F["eoatx"][controller.AxisAccounts]; got != seedF {
+			if got := st.GetF("eoatx", controller.AxisAccounts); got != seedF {
 				t.Errorf("F mutated on cold-start fallback: got %v, want seed %v", got, seedF)
 			}
 		})
@@ -309,7 +309,7 @@ func TestHydrateStateFromTailRejectsCorruptCoefficients(t *testing.T) {
 			for _, v := range verbs {
 				seedF[v] = map[controller.Axis]float64{}
 				for _, ax := range controller.Axes {
-					seedF[v][ax] = state.F[v][ax]
+					seedF[v][ax] = state.GetF(v, ax)
 				}
 			}
 
@@ -325,7 +325,7 @@ func TestHydrateStateFromTailRejectsCorruptCoefficients(t *testing.T) {
 			}
 			for _, v := range verbs {
 				for _, ax := range controller.Axes {
-					if got := state.F[v][ax]; got != seedF[v][ax] {
+					if got := state.GetF(v, ax); got != seedF[v][ax] {
 						t.Errorf("F[%s][%s] mutated by rejected reconstruction: got %v, want seed %v",
 							v, ax, got, seedF[v][ax])
 					}
@@ -373,10 +373,10 @@ func TestHydrateStateFromTailSkipsUnknownVerbs(t *testing.T) {
 	if res.AlphaCells != 0 || res.SigmaCells != 0 {
 		t.Errorf("unknown-verb α/σ cells leaked: alpha=%d sigma=%d, want 0/0", res.AlphaCells, res.SigmaCells)
 	}
-	if got := state.F["eoatx"][controller.AxisAccounts]; got != 150.0 {
+	if got := state.GetF("eoatx", controller.AxisAccounts); got != 150.0 {
 		t.Errorf("F[eoatx][accounts]=%v, want 150 (known cell must hydrate)", got)
 	}
-	if _, exists := state.F["noop"]; exists {
+	if _, exists := state.FSnapshot()["noop"]; exists {
 		t.Errorf("removed verb noop must not appear in controller State")
 	}
 }
