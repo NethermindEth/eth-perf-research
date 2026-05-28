@@ -68,6 +68,51 @@ func TestSlotCountChangeDelta(t *testing.T) {
 	}
 }
 
+// TestDecodeUint64Lenient_SingleByte is the regression test for the
+// 2026-05-28 drift bug: go-ethereum's RLP returns Kind=Byte (not String)
+// for single-byte integers 0x00-0x7f, and the old decoder rejected those
+// with "not a string-encoded integer", causing the tailer to skip every
+// block whose StorageTrieBytesDelta (or any delta field) landed in [1,127].
+func TestDecodeUint64Lenient_SingleByte(t *testing.T) {
+	cases := []struct {
+		name string
+		rlp  []byte
+		want uint64
+	}{
+		{"bare byte 5 (the bug case)", []byte{0x05}, 5},
+		{"bare byte 1", []byte{0x01}, 1},
+		{"bare byte 0x7f (max single)", []byte{0x7f}, 0x7f},
+		{"empty string = 0", []byte{0x80}, 0},
+		{"two-byte 256", []byte{0x82, 0x01, 0x00}, 256},
+		{"single-byte string 0x80", []byte{0x81, 0x80}, 0x80},
+	}
+	for _, c := range cases {
+		got, err := decodeUint64Lenient(c.rlp)
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", c.name, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s: got %d want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestDecodeUint64Lenient_Negative confirms Nethermind's 8-byte
+// two's-complement encoding of negative longs round-trips to the right
+// signed value after the int64 cast the caller applies.
+func TestDecodeUint64Lenient_Negative(t *testing.T) {
+	// -1 as 8-byte big-endian two's complement, RLP string of length 8.
+	rlp := []byte{0x88, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	v, err := decodeUint64Lenient(rlp)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if int64(v) != -1 {
+		t.Errorf("got %d want -1", int64(v))
+	}
+}
+
 func TestCodeHashChangeHadHas(t *testing.T) {
 	zero := [32]byte{}
 	nz := [32]byte{0x01}

@@ -151,13 +151,19 @@ func DecodeBlockDiff(buf []byte) (BlockDiffRecord, error) {
 // which is how Nethermind's RlpStream.Encode(long) writes negative values
 // as two's-complement). The bit pattern is preserved verbatim so the caller
 // can int64-cast to recover the signed value.
+//
+// Uses gethrlp.SplitString, NOT Split: go-ethereum's RLP returns Kind=Byte
+// (not String) for single-byte values 0x00-0x7f. A previous version checked
+// `kind != String` and so rejected every delta in [1,127] with "not a
+// string-encoded integer" — those blocks were silently skipped by the
+// tailer, dropping their byte deltas and drifting the incremental tracker
+// away from ground truth (only a full bootstrap rescan corrected it).
+// SplitString accepts both Byte and String content and rejects only List,
+// which is exactly the lenient contract we need.
 func decodeUint64Lenient(itemRLP []byte) (uint64, error) {
-	kind, content, _, err := gethrlp.Split(itemRLP)
+	content, _, err := gethrlp.SplitString(itemRLP)
 	if err != nil {
 		return 0, err
-	}
-	if kind != gethrlp.String {
-		return 0, fmt.Errorf("not a string-encoded integer")
 	}
 	if len(content) > 8 {
 		return 0, fmt.Errorf("integer >8 bytes")

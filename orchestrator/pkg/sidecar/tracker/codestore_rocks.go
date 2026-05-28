@@ -144,17 +144,27 @@ func (s *RocksCodeStore) Put(hash [32]byte, e codeEntry) {
 // per-file lookups. At our bloating cadence (thousands of code-hash changes
 // per block) this collapses ~2N cgo crossings into 1 and was the bottleneck
 // identified by the 2026-05-27 pprof (75% of sidecar CPU in cgocall).
+//
+// The intermediate keys slice (and its element pointers into hashes[i][:])
+// is reused across calls via rocksScratchPool — same alloc-avoidance trick
+// as applyCodeChangesBatched, which pprof showed cut sidecar alloc_space
+// by ~11×. The grocksdb MultiGet receives a fresh []byte slice header per
+// element either way; pooling at least eliminates the outer [][]byte
+// reallocation per block.
 func (s *RocksCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, present []bool) {
 	results = make([]codeEntry, len(hashes))
 	present = make([]bool, len(hashes))
 	if len(hashes) == 0 {
 		return results, present
 	}
-	keys := make([][]byte, len(hashes))
+	sc := acquireRocksScratch()
+	keys := sc.keys[:0]
 	for i := range hashes {
-		keys[i] = hashes[i][:]
+		keys = append(keys, hashes[i][:])
 	}
 	slices, err := s.db.MultiGet(s.ro, keys...)
+	sc.keys = keys[:0]
+	releaseRocksScratch(sc)
 	if err != nil {
 		// MultiGet returns at most one error covering the whole batch.
 		// Behave as if every entry were absent — the caller will fall back
@@ -175,13 +185,15 @@ func (s *RocksCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, prese
 
 // BatchPut writes all (hash, entry) pairs through one RocksDB WriteBatch.
 // Pairs with MultiGet to bound the per-block cgo cost to two crossings
-// regardless of how many code-hash changes a block carries.
+// regardless of how many code-hash changes a block carries. The WriteBatch
+// is pooled (Clear()ed on release) so per-block calls don't allocate a
+// fresh grocksdb.WriteBatch every time.
 func (s *RocksCodeStore) BatchPut(hashes [][32]byte, entries []codeEntry) {
 	if len(hashes) == 0 {
 		return
 	}
-	wb := grocksdb.NewWriteBatch()
-	defer wb.Destroy()
+	wb := acquireWriteBatch()
+	defer releaseWriteBatch(wb)
 	for i, h := range hashes {
 		v := encodeCodeEntry(entries[i])
 		wb.Put(h[:], v[:])
