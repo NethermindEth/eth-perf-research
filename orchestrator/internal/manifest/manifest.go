@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/atomicio"
 )
 
 const SchemaVersion = 2
@@ -53,31 +54,8 @@ func (m *Manifest) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("manifest: marshal: %w", err)
 	}
-
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("manifest: create tmp: %w", err)
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("manifest: write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("manifest: fsync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("manifest: close tmp: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("manifest: rename to %s: %w", path, err)
+	if err := atomicio.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("manifest: %w", err)
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/atomicio"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/verbs"
 )
 
@@ -66,39 +67,8 @@ func saveContractRegistry(stateDir string, reg *verbs.ContractRegistry) error {
 	if err != nil {
 		return fmt.Errorf("lifecycle: encode contract registry: %w", err)
 	}
-
-	path := contractsRegistryPath(stateDir)
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return fmt.Errorf("lifecycle: open registry temp: %w", err)
-	}
-	if _, err := f.Write(raw); err != nil {
-		f.Close()
-		return fmt.Errorf("lifecycle: write registry temp: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return fmt.Errorf("lifecycle: fsync registry temp: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("lifecycle: close registry temp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("lifecycle: rename registry: %w", err)
-	}
-	return syncDir(stateDir)
-}
-
-// syncDir fsyncs a directory so a rename within it is durable.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("lifecycle: open state dir for fsync: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("lifecycle: fsync state dir: %w", err)
+	if err := atomicio.WriteFile(contractsRegistryPath(stateDir), raw, 0o644); err != nil {
+		return fmt.Errorf("lifecycle: %w", err)
 	}
 	return nil
 }

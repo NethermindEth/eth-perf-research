@@ -3,10 +3,10 @@ package journal
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/atomicio"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb"
 )
 
@@ -17,40 +17,8 @@ func WritePending(path string, pb *orchpb.PendingBatch) error {
 	if err != nil {
 		return fmt.Errorf("journal: marshal pending batch: %w", err)
 	}
-
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".pending-batch-*.tmp")
-	if err != nil {
-		return fmt.Errorf("journal: create tmp for pending batch: %w", err)
-	}
-	tmpName := tmp.Name()
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("journal: write pending batch tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return fmt.Errorf("journal: fsync pending batch tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("journal: close pending batch tmp: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
-		return fmt.Errorf("journal: rename pending batch: %w", err)
-	}
-	// fsync the directory so the rename is durable.
-	df, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("journal: open dir for fsync: %w", err)
-	}
-	defer df.Close()
-	if err := df.Sync(); err != nil {
-		return fmt.Errorf("journal: fsync dir: %w", err)
+	if err := atomicio.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("journal: %w", err)
 	}
 	return nil
 }

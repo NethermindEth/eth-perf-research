@@ -447,47 +447,36 @@ type ResidualSnapshot struct {
 	DispatchedRLPBytes uint64
 }
 
-// FSnapshot returns a verb -> axis -> F-coefficient map built from the current
-// Rows. Slow path: O(len(Verbs)*3) per call. Used by the journal-record writer
-// to serialise CoeffsAfter; safe to call without holding pickApplyMu because
-// every slot read goes through atomicLoadFloat — a concurrent Apply (which
-// uses atomicStoreFloat) cannot tear the load, and the result is either the
-// pre-Apply or the post-Apply value per slot, both valid for the journal
-// record's "F after the last batch I confirmed" semantics.
+// snapshotField builds a verb -> axis -> coefficient map from the AxisVec that
+// sel selects on each VerbRow. Slow path: O(len(Verbs)*numAxes). Safe to call
+// without holding pickApplyMu because every slot read goes through
+// atomicLoadFloat — a concurrent Apply (which uses atomicStoreFloat) cannot tear
+// the load, and the result is either the pre-Apply or the post-Apply value per
+// slot, both valid for the journal record's "after the last confirmed batch"
+// semantics.
+func (s *State) snapshotField(sel func(*VerbRow) *AxisVec) map[string]map[Axis]float64 {
+	out := make(map[string]map[Axis]float64, len(s.Rows))
+	for i := range s.Rows {
+		vec := sel(&s.Rows[i])
+		row := make(map[Axis]float64, numAxes)
+		for axIdx, ax := range Axes {
+			row[ax] = atomicLoadFloat(&vec[axIdx])
+		}
+		out[s.Rows[i].Verb] = row
+	}
+	return out
+}
+
+// FSnapshot / AlphaSnapshot / SigmaSnapshot serialise the F / α / σ matrices for
+// the journal record and the Prometheus emitter.
 func (s *State) FSnapshot() map[string]map[Axis]float64 {
-	out := make(map[string]map[Axis]float64, len(s.Rows))
-	for i := range s.Rows {
-		row := make(map[Axis]float64, 3)
-		for axIdx, ax := range Axes {
-			row[ax] = atomicLoadFloat(&s.Rows[i].F[axIdx])
-		}
-		out[s.Rows[i].Verb] = row
-	}
-	return out
+	return s.snapshotField(func(r *VerbRow) *AxisVec { return &r.F })
 }
 
-// AlphaSnapshot mirrors FSnapshot for α.
 func (s *State) AlphaSnapshot() map[string]map[Axis]float64 {
-	out := make(map[string]map[Axis]float64, len(s.Rows))
-	for i := range s.Rows {
-		row := make(map[Axis]float64, 3)
-		for axIdx, ax := range Axes {
-			row[ax] = atomicLoadFloat(&s.Rows[i].Alpha[axIdx])
-		}
-		out[s.Rows[i].Verb] = row
-	}
-	return out
+	return s.snapshotField(func(r *VerbRow) *AxisVec { return &r.Alpha })
 }
 
-// SigmaSnapshot mirrors FSnapshot for σ.
 func (s *State) SigmaSnapshot() map[string]map[Axis]float64 {
-	out := make(map[string]map[Axis]float64, len(s.Rows))
-	for i := range s.Rows {
-		row := make(map[Axis]float64, 3)
-		for axIdx, ax := range Axes {
-			row[ax] = atomicLoadFloat(&s.Rows[i].Sigma[axIdx])
-		}
-		out[s.Rows[i].Verb] = row
-	}
-	return out
+	return s.snapshotField(func(r *VerbRow) *AxisVec { return &r.Sigma })
 }
