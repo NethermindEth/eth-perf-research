@@ -27,7 +27,7 @@ total_bytes: 500000
 func TestLoadValid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "target.yaml")
-	if err := os.WriteFile(path, []byte(validYAML), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(validYAML), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -49,7 +49,7 @@ func TestLoadValid(t *testing.T) {
 func TestLoadInvalidShares(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "target.yaml")
-	if err := os.WriteFile(path, []byte(invalidSharesYAML), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(invalidSharesYAML), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestLoadInvalidShares(t *testing.T) {
 func TestWatcherFiresOnChange(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "target.yaml")
-	if err := os.WriteFile(path, []byte(validYAML), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(validYAML), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -88,7 +88,7 @@ total_bytes: 2000000
 `
 	// Small sleep to let watcher settle before writing.
 	time.Sleep(50 * time.Millisecond)
-	if err := os.WriteFile(path, []byte(updated), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		t.Fatalf("WriteFile update: %v", err)
 	}
 
@@ -108,7 +108,7 @@ total_bytes: 2000000
 func TestWatcherContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "target.yaml")
-	if err := os.WriteFile(path, []byte(validYAML), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(validYAML), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 

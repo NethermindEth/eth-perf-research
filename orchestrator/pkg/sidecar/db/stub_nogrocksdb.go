@@ -12,7 +12,6 @@ import (
 // Sentinel returned by every Open call when the stub backend is active.
 var ErrStubBackend = errors.New("db: built without grocksdb (use -tags=\"\" to enable RocksDB)")
 
-// CFNames is a no-op record kept for source compatibility.
 type CFNames struct {
 	State      string
 	Storage    string
@@ -20,17 +19,14 @@ type CFNames struct {
 	BlockDiffs string
 }
 
-// OpenOptions is a no-op record kept for source compatibility.
 type OpenOptions struct {
 	BlockCacheMiB int
 	UseMmap       bool
 	Secondary     bool
 }
 
-// Handle is a placeholder. Every method is a no-op.
+// Handle is a placeholder; every method is a no-op.
 type Handle struct {
-	// Exported only so test code can reference these fields as zero values
-	// (e.g. `h.BlockDiffsCF == nil`). All such checks return true.
 	DB           any
 	StateCF      any
 	StorageCF    any
@@ -52,7 +48,6 @@ func (h *Handle) Close() {}
 
 func (h *Handle) CatchUp() error { return nil }
 
-// ReadOptions is a stub used by scanner/tailer code via NewScanReadOptions.
 type ReadOptions struct{}
 
 func (*ReadOptions) Destroy() {}

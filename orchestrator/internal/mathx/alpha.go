@@ -7,8 +7,7 @@ import (
 
 // Tuning carries the adaptive-α algorithm parameters. Before RunConfig these
 // were package-level constants; they are now passed in so the orchestrator can
-// resolve them once from config and thread them here. DefaultTuning() returns
-// the historical constant values, so calling with it is behaviour-neutral.
+// resolve them once from config and thread them here.
 type Tuning struct {
 	AMin           float64 // lower bound on the learning rate
 	AMax           float64 // upper bound on the learning rate
@@ -19,26 +18,6 @@ type Tuning struct {
 	SigmaEWMADecay float64 // EWMA decay for σ
 	AlphaEWMADecay float64 // EWMA decay for α
 	CoeffBound     float64 // physical magnitude ceiling for F and σ
-}
-
-// DefaultTuning returns the historical adaptive-α constants. See the field
-// docs and the long-form rationale that previously lived on the package
-// constants: the largest legitimate reference-F seed is 3500, so CoeffBound
-// (1e6) sits ~285x above any genuine verb footprint yet far below the observed
-// garbage value of 6.48e13 — it never clamps a real measurement but always
-// catches divergence.
-func DefaultTuning() Tuning {
-	return Tuning{
-		AMin:           0.02,
-		AMax:           0.30,
-		C:              0.08,
-		K:              25.0,
-		SigmaFloor:     1.0,
-		Eps:            1000.0,
-		SigmaEWMADecay: 0.9,
-		AlphaEWMADecay: 0.7,
-		CoeffBound:     1e6,
-	}
 }
 
 // IsFiniteInRange reports whether v is finite and within [-CoeffBound,
@@ -95,8 +74,7 @@ type AlphaUpdate struct {
 // UpdateCoeff applies the tanh-saturated adaptive-α innovation update for one
 // (axis, verb) coefficient. fHat is the current estimate, observed is the new
 // measurement, sigma is the running scale, alpha is the current learning rate.
-// t carries the algorithm parameters (DefaultTuning() reproduces the historical
-// behaviour).
+// t carries the algorithm parameters.
 func UpdateCoeff(fHat, observed, sigma, alpha float64, t Tuning) AlphaUpdate {
 	for label, v := range map[string]float64{"fHat": fHat, "observed": observed, "sigma": sigma, "alpha": alpha} {
 		if math.IsNaN(v) || math.IsInf(v, 0) {

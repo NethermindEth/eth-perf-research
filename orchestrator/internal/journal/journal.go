@@ -132,14 +132,12 @@ func (w *Writer) Append(rec *orchpb.Record) ([32]byte, error) {
 	return newHash, nil
 }
 
-// CurrentChainHash returns the latest chain hash (32 zero bytes if nothing written).
 func (w *Writer) CurrentChainHash() [32]byte {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.prevHash
 }
 
-// Close closes the underlying file.
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -152,7 +150,6 @@ type Reader struct {
 	prevHash [32]byte
 }
 
-// OpenReader opens a journal file for reading.
 func OpenReader(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -204,7 +201,6 @@ func (r *Reader) Next() (*orchpb.Record, error) {
 	return rec, nil
 }
 
-// Close closes the underlying file.
 func (r *Reader) Close() error {
 	return r.f.Close()
 }

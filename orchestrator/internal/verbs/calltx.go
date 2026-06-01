@@ -6,18 +6,15 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// calltxGas is the exec-tx gas limit. EELS build_calltx_transactions
-// (helpers.py:232) defaults execution_gas to 500_000 when no gas_limit is
-// configured (helpers.py:342).
+// calltxGas is the exec-tx gas limit (EELS default execution_gas when no
+// gas_limit is configured).
 const calltxGas = 500_000
 
 // verbCalltx builds a non-reverting call into the deployed StorageSpam
-// contract. EELS build_calltx_transactions is a generic contract-call builder:
-// the exec tx targets contract_address with caller-supplied calldata and a
-// default gas of 500_000. The orchestrator pins a concrete, non-reverting call
-// — getStorage(uint256 key) — which performs a single SLOAD and returns,
-// warming the contract account and one storage slot without bloating state.
-// The key is the per-tx index so successive calls touch different slots.
+// contract. The orchestrator pins getStorage(uint256 key) — a single SLOAD
+// that returns without reverting, warming the contract account and one storage
+// slot without bloating state. The key is the per-tx index so successive calls
+// touch different slots.
 type verbCalltx struct{}
 
 func (verbCalltx) Name() string { return "calltx" }

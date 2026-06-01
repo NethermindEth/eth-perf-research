@@ -31,7 +31,7 @@ type Server struct {
 	addr    string
 
 	mu                 sync.RWMutex
-	chainHeadBlock     int64 // updated by the tailer; used for blocksBehind
+	chainHeadBlock     int64 // updated by the tailer; used to compute blocksBehind
 	startedAt          time.Time
 	lastSnapshotAt     atomic.Int64 // unix-ns
 	bootstrapCompleted atomic.Bool
@@ -48,7 +48,6 @@ func New(t *tracker.Tracker, addr string, log zerolog.Logger) *Server {
 }
 
 // SetChainHead records the orchestrator's view of the current chain head.
-// Phase 2 will populate this from the tailer's last-seen BlockDiffs key.
 func (s *Server) SetChainHead(b int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -63,9 +62,7 @@ func (s *Server) NoteSnapshotWritten() { s.lastSnapshotAt.Store(time.Now().UnixN
 // NoteBootstrapDone flips the bootstrap-complete flag.
 func (s *Server) NoteBootstrapDone() { s.bootstrapCompleted.Store(true) }
 
-// ListenAndServe blocks. Call Shutdown via http.Server.Shutdown on a cloned
-// http.Server if you need graceful cancellation; otherwise just close the
-// parent context's listener.
+// ListenAndServe starts the HTTP server in a goroutine and returns it for graceful shutdown.
 func (s *Server) ListenAndServe() (*http.Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handle)
@@ -82,8 +79,6 @@ func (s *Server) ListenAndServe() (*http.Server, error) {
 	return srv, nil
 }
 
-// jsonRPCRequest mirrors the JSON-RPC 2.0 request shape we accept. We only
-// support `id`, `method`, and (ignored) `params`.
 type jsonRPCRequest struct {
 	Jsonrpc string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -91,7 +86,6 @@ type jsonRPCRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
-// jsonRPCResponse is the standard 2.0 envelope.
 type jsonRPCResponse struct {
 	Jsonrpc string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
@@ -168,11 +162,9 @@ func hex32(b [32]byte) string {
 	return "0x" + hex.EncodeToString(b[:])
 }
 
-// readRSSMB returns the process RSS in MiB. Cross-platform best effort:
-// Linux reads /proc/self/status; Darwin returns 0 (Go MemStats already
-// reports Alloc).
+// readRSSMB returns process memory in MiB via MemStats.Sys (avoids
+// syscall.Getrusage Darwin/Linux unit differences).
 func readRSSMB() int64 {
-	// Avoid syscall.Getrusage Darwin/Linux unit differences — keep it simple.
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	return int64(ms.Sys / (1024 * 1024))

@@ -45,9 +45,8 @@ func TestBuildUniqueStorageBurnerInit(t *testing.T) {
 	}
 }
 
-// TestDeploytxBuildTx checks the deploytx verb actually emits a CREATE tx
-// carrying the unique storage-burner init code — not the old empty-runtime
-// default (0x6001600055) that deposits zero-byte contracts.
+// TestDeploytxBuildTx checks the deploytx verb emits a CREATE tx carrying
+// unique storage-burner init code.
 func TestDeploytxBuildTx(t *testing.T) {
 	tx, err := verbDeploytx{}.BuildTx(7, BuildCtx{})
 	if err != nil {

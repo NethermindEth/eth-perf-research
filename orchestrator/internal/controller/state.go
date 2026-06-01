@@ -15,43 +15,91 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
 )
 
-// Axis names the three state-growth dimensions tracked by the controller. The
-// type stays `string` because the on-disk journal keys (`verb.accounts`, etc.)
-// and the Prometheus axis labels both serialise the string form; refactor A8
-// switches the controller's INTERNAL representation to position-indexed flat
-// arrays without disturbing that wire form.
-type Axis string
+// Axis names the state-growth dimensions tracked by the controller. It is a
+// uint8 enum whose value IS the slot index into an AxisVec — AxisAccounts==0,
+// AxisStorage==1, AxisCode==2 — so an Axis can index a vector directly with no
+// lookup table. The wire form (journal keys `verb.accounts`, Prometheus axis
+// labels) is produced by String and parsed by ParseAxis, so on-disk and metric
+// formats are unchanged. numAxes is the iota sentinel: it tracks the constant
+// count automatically and is the single source for every fixed-size axis array.
+type Axis uint8
 
 const (
-	AxisAccounts Axis = "accounts"
-	AxisStorage  Axis = "storage"
-	AxisCode     Axis = "code"
+	AxisAccounts Axis = iota
+	AxisStorage
+	AxisCode
+	numAxes
 )
 
-// Axes is the canonical ordered triple used wherever axis iteration is needed.
-// The slot in this array IS the int index used by VerbRow.F/Sigma/Alpha — the
-// two MUST stay in lock-step.
-var Axes = [3]Axis{AxisAccounts, AxisStorage, AxisCode}
+// Axes is the canonical ordered set used wherever axis iteration needs the Axis
+// values themselves (e.g. building a map[Axis]…). Length tracks numAxes.
+var Axes = [numAxes]Axis{AxisAccounts, AxisStorage, AxisCode}
 
-// axisIndex maps an Axis to its slot in the [3]float64 row arrays. Returns -1
-// if the axis is unrecognised; callers must guard that case before using the
-// index. Defined as a function rather than a map literal so it has no init()
-// side-effect and no allocation on lookup.
-func axisIndex(a Axis) int {
+// String renders the wire form used by journal keys and Prometheus labels.
+func (a Axis) String() string {
 	switch a {
 	case AxisAccounts:
-		return 0
+		return "accounts"
 	case AxisStorage:
-		return 1
+		return "storage"
 	case AxisCode:
-		return 2
+		return "code"
 	}
-	return -1
+	return "unknown"
+}
+
+// ParseAxis maps a wire-form axis name to its enum value. ok is false for any
+// unrecognised string, so callers reject malformed journal/target keys instead
+// of silently defaulting to AxisAccounts.
+func ParseAxis(s string) (Axis, bool) {
+	switch s {
+	case "accounts":
+		return AxisAccounts, true
+	case "storage":
+		return AxisStorage, true
+	case "code":
+		return AxisCode, true
+	}
+	return 0, false
+}
+
+// AxisVec is a fixed-length per-axis float64 vector. Its length (numAxes) and
+// the slot↔Axis mapping live in exactly one place — the Axis enum — so callers
+// index it with an Axis value and never restate the axis count or order. It has
+// the same memory layout as the previous bare [numAxes]float64, so it stays
+// alloc-free on the Pick/Apply hot path and the methods inline away.
+type AxisVec [numAxes]float64
+
+// Sum returns the sum of every axis slot.
+func (v AxisVec) Sum() float64 {
+	var s float64
+	for _, x := range v {
+		s += x
+	}
+	return s
+}
+
+// Sub returns the element-wise difference v - o.
+func (v AxisVec) Sub(o AxisVec) AxisVec {
+	var r AxisVec
+	for a := range v {
+		r[a] = v[a] - o[a]
+	}
+	return r
+}
+
+// L2 returns the Euclidean norm of the vector.
+func (v AxisVec) L2() float64 {
+	var s float64
+	for _, x := range v {
+		s += x * x
+	}
+	return math.Sqrt(s)
 }
 
 // VerbRow is the per-verb flat coefficient row replacing the nested
 // map[string]map[Axis]float64 trio. Field order (F, Sigma, Alpha) matches the
-// previous struct-level grouping; the [3]float64 slot ordering matches `Axes`.
+// previous struct-level grouping; each AxisVec slot is indexed by Axis.
 //
 // Slots are read under pickApplyMu by Pick (planner goroutine) and written
 // under the same mutex by Apply (committer goroutine). The lock-free snapshot
@@ -63,15 +111,15 @@ func axisIndex(a Axis) int {
 // via pickApplyMu.
 type VerbRow struct {
 	Verb  string
-	F     [3]float64
-	Sigma [3]float64
-	Alpha [3]float64
+	F     AxisVec
+	Sigma AxisVec
+	Alpha AxisVec
 }
 
 // atomicLoadFloat reads a float64 slot atomically by re-interpreting it as a
-// uint64. The aliasing is safe because [3]float64 has the same layout as
-// [3]uint64 on every supported architecture and float64 / uint64 are both
-// 8-byte word-aligned in array context.
+// uint64. The aliasing is safe because AxisVec (a [numAxes]float64) has the same
+// layout as [numAxes]uint64 on every supported architecture and float64 /
+// uint64 are both 8-byte word-aligned in array context.
 func atomicLoadFloat(p *float64) float64 {
 	bits := atomic.LoadUint64((*uint64)(unsafe.Pointer(p)))
 	return math.Float64frombits(bits)
@@ -87,14 +135,12 @@ type Observation struct {
 	AccountTrieBytes uint64
 	StorageTrieBytes uint64
 	CodeBytesTotal   uint64
-	BlockNumber      uint64
 }
 
 // Target describes the desired axis proportions and the absolute byte budget.
 type Target struct {
 	Shares     map[Axis]float64 // axis -> proportion (must sum to 1.0)
 	TotalBytes int64
-	SHA256Hex  string
 }
 
 // ByteTarget returns the desired cumulative bytes for axis a at full progress.
@@ -107,34 +153,31 @@ func (t *Target) ByteTarget(a Axis) float64 {
 // Pick. Sized to len(Verbs); never grown, so concurrent readers of `Rows` see
 // a fixed slice header.
 type pickScratch struct {
-	fMat       [3][]float64 // [axis][verb] F-matrix view
-	score      []float64    // per-verb argmax score
-	maxNTxs    []float64    // per-verb trajectory cap
-	candidates []int        // eligible+feasible verb indices
-	mix        map[string]float64
+	fMat       [numAxes][]float64 // [axis][verb] F-matrix view
+	score      []float64          // per-verb argmax score
+	maxNTxs    []float64          // per-verb trajectory cap
+	candidates []int              // eligible+feasible verb indices
 }
 
 func newPickScratch(n int) *pickScratch {
-	return &pickScratch{
-		fMat: [3][]float64{
-			make([]float64, n),
-			make([]float64, n),
-			make([]float64, n),
-		},
+	p := &pickScratch{
 		score:      make([]float64, n),
 		maxNTxs:    make([]float64, n),
 		candidates: make([]int, 0, n),
-		mix:        make(map[string]float64, n),
 	}
+	for a := range p.fMat {
+		p.fMat[a] = make([]float64, n)
+	}
+	return p
 }
 
 // reset zeroes every scratch buffer in-place, then re-fills the F-matrix from
 // the Rows table. Allocates nothing on a steady-state call.
 func (p *pickScratch) reset(rows []VerbRow) {
 	n := len(rows)
-	for ax := 0; ax < 3; ax++ {
+	for ax := range numAxes {
 		row := p.fMat[ax]
-		for j := 0; j < n; j++ {
+		for j := range n {
 			row[j] = rows[j].F[ax]
 		}
 	}
@@ -143,9 +186,6 @@ func (p *pickScratch) reset(rows []VerbRow) {
 		p.maxNTxs[j] = 0
 	}
 	p.candidates = p.candidates[:0]
-	for k := range p.mix {
-		delete(p.mix, k)
-	}
 }
 
 // State holds the per-verb controller rows and supporting bookkeeping. F/σ/α
@@ -169,9 +209,9 @@ type State struct {
 	// overshootMu guards the rolling overshoot window. Apply (commit goroutine)
 	// writes via pushOvershoot; planner goroutines read via HasInstability.
 	// F/Sigma/Alpha races are not the concern they were under the nested-map
-	// representation — Rows is fixed-length post-NewState, and slot reads on a
-	// [3]float64 array are word-atomic, so a snapshot reader sees either
-	// pre-Apply or post-Apply values per slot, both valid.
+	// representation — Rows is fixed-length post-NewState, and slot reads on an
+	// AxisVec are word-atomic, so a snapshot reader sees either pre-Apply or
+	// post-Apply values per slot, both valid.
 	overshootMu     sync.Mutex
 	overshootWindow []bool
 	overshootHead   int
@@ -194,8 +234,6 @@ type State struct {
 	// torn-update reader sees either the pre-Apply or post-Apply value per
 	// slot, both valid plan inputs.
 	pickApplyMu sync.Mutex
-
-	lastResidualL2 float64
 
 	// debugPick gates per-batch per-verb debug logs (set by --debug-pick).
 	debugPick bool
@@ -270,54 +308,33 @@ func (s *State) LockState() { s.pickApplyMu.Lock() }
 // UnlockState releases the LockState mutex.
 func (s *State) UnlockState() { s.pickApplyMu.Unlock() }
 
-// HasVerb reports whether verb is part of this State's verb table. Used by the
-// journal-tail hydration to skip cells for verbs no longer in the registry
-// without exposing the Rows index.
-func (s *State) HasVerb(verb string) bool {
-	_, ok := s.verbIdx[verb]
-	return ok
-}
-
 // GetF returns the current F coefficient for (verb, ax). Returns 0 when the
-// verb is unknown or ax is out of range — callers that need to distinguish
-// missing from zero should HasVerb-check first. Read-only; safe under
-// pickApplyMu but does not take it.
+// verb is unknown or ax is out of range. Read-only; safe under pickApplyMu but
+// does not take it.
 func (s *State) GetF(verb string, ax Axis) float64 {
 	i, ok := s.verbIdx[verb]
-	if !ok {
+	if !ok || ax >= numAxes {
 		return 0
 	}
-	ai := axisIndex(ax)
-	if ai < 0 {
-		return 0
-	}
-	return atomicLoadFloat(&s.Rows[i].F[ai])
+	return atomicLoadFloat(&s.Rows[i].F[ax])
 }
 
 // GetSigma mirrors GetF for the σ row.
 func (s *State) GetSigma(verb string, ax Axis) float64 {
 	i, ok := s.verbIdx[verb]
-	if !ok {
+	if !ok || ax >= numAxes {
 		return 0
 	}
-	ai := axisIndex(ax)
-	if ai < 0 {
-		return 0
-	}
-	return atomicLoadFloat(&s.Rows[i].Sigma[ai])
+	return atomicLoadFloat(&s.Rows[i].Sigma[ax])
 }
 
 // GetAlpha mirrors GetF for the α row.
 func (s *State) GetAlpha(verb string, ax Axis) float64 {
 	i, ok := s.verbIdx[verb]
-	if !ok {
+	if !ok || ax >= numAxes {
 		return 0
 	}
-	ai := axisIndex(ax)
-	if ai < 0 {
-		return 0
-	}
-	return atomicLoadFloat(&s.Rows[i].Alpha[ai])
+	return atomicLoadFloat(&s.Rows[i].Alpha[ax])
 }
 
 // SetF assigns a new F coefficient for (verb, ax). No-op when the verb is
@@ -327,40 +344,28 @@ func (s *State) GetAlpha(verb string, ax Axis) float64 {
 // before any pipeline goroutine starts so it needs no lock.
 func (s *State) SetF(verb string, ax Axis, val float64) {
 	i, ok := s.verbIdx[verb]
-	if !ok {
+	if !ok || ax >= numAxes {
 		return
 	}
-	ai := axisIndex(ax)
-	if ai < 0 {
-		return
-	}
-	atomicStoreFloat(&s.Rows[i].F[ai], val)
+	atomicStoreFloat(&s.Rows[i].F[ax], val)
 }
 
 // SetSigma mirrors SetF for σ.
 func (s *State) SetSigma(verb string, ax Axis, val float64) {
 	i, ok := s.verbIdx[verb]
-	if !ok {
+	if !ok || ax >= numAxes {
 		return
 	}
-	ai := axisIndex(ax)
-	if ai < 0 {
-		return
-	}
-	atomicStoreFloat(&s.Rows[i].Sigma[ai], val)
+	atomicStoreFloat(&s.Rows[i].Sigma[ax], val)
 }
 
 // SetAlpha mirrors SetF for α.
 func (s *State) SetAlpha(verb string, ax Axis, val float64) {
 	i, ok := s.verbIdx[verb]
-	if !ok {
+	if !ok || ax >= numAxes {
 		return
 	}
-	ai := axisIndex(ax)
-	if ai < 0 {
-		return
-	}
-	atomicStoreFloat(&s.Rows[i].Alpha[ai], val)
+	atomicStoreFloat(&s.Rows[i].Alpha[ax], val)
 }
 
 // NewState initialises a State from the reference-F seed values and the
@@ -379,7 +384,7 @@ func NewState(cfg config.RunConfig, verbs []string, ref *referencef.ReferenceF, 
 		refPerVerb := ref.Verbs[verb]
 		row := VerbRow{Verb: verb}
 		for axIdx, ax := range Axes {
-			row.F[axIdx] = refPerVerb[string(ax)]
+			row.F[axIdx] = refPerVerb[ax.String()]
 			row.Sigma[axIdx] = cfg.Control.DefaultSigma
 			row.Alpha[axIdx] = cfg.Control.AlphaMin
 		}
@@ -402,7 +407,6 @@ func NewState(cfg config.RunConfig, verbs []string, ref *referencef.ReferenceF, 
 		ChainIdentity:   chainIdentity,
 		pick:            newPickScratch(len(verbsCopy)),
 		VerbStats:       make(map[string]*VerbStats),
-		lastResidualL2:  0,
 		debugPick:       cfg.Control.DebugPick,
 		UseRatioScoring: cfg.Control.UseRatioScoring,
 		cfg:             cfg,

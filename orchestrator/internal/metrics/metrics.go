@@ -28,17 +28,17 @@ type Registry struct {
 	JournalStatusTotal  *prometheus.CounterVec // orch_journal_status_total{status}
 
 	// Gauges — current state snapshots.
-	BatchID          prometheus.Gauge
-	BatchGasUsed     prometheus.Gauge
-	BlockNumber      prometheus.Gauge
-	DeadlineBytes    prometheus.Gauge
-	InnovationRatio  prometheus.Gauge
-	ResidualNorm     prometheus.Gauge
-	SessionID        *prometheus.GaugeVec // orch_session_id{session_id} = 1
+	BatchID           prometheus.Gauge
+	BatchGasUsed      prometheus.Gauge
+	BlockNumber       prometheus.Gauge
+	DeadlineBytes     prometheus.Gauge
+	InnovationRatio   prometheus.Gauge
+	ResidualNorm      prometheus.Gauge
+	SessionID         *prometheus.GaugeVec // orch_session_id{session_id} = 1
 	ObservedFlatBytes *prometheus.GaugeVec // orch_observed_flat_bytes{axis}
-	AlphaCurrent     *prometheus.GaugeVec // orch_alpha_current{verb,axis}
-	AlphaState       *prometheus.GaugeVec // orch_alpha_state{verb,axis}  (sigma in Python)
-	MixSimplex       *prometheus.GaugeVec // orch_mix_simplex{verb}
+	AlphaCurrent      *prometheus.GaugeVec // orch_alpha_current{verb,axis}
+	AlphaState        *prometheus.GaugeVec // orch_alpha_state{verb,axis}  (sigma in Python)
+	MixSimplex        *prometheus.GaugeVec // orch_mix_simplex{verb}
 
 	// Histograms — latency distributions.
 	PhaseDuration *prometheus.HistogramVec // orch_phase_duration_seconds{phase}
@@ -145,7 +145,7 @@ func New() *Registry {
 	)
 
 	return &Registry{
-		reg:               r,
+		reg:                 r,
 		JournalRecordsTotal: journalRecordsTotal,
 		JournalGasUsedTotal: journalGasUsedTotal,
 		JournalVerbTotal:    journalVerbTotal,

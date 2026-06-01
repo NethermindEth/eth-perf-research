@@ -31,15 +31,3 @@ func (s *State) HasInstability(threshold float64, window, maxTrips, grace int) b
 	}
 	return trips >= maxTrips
 }
-
-// initOvershootWindow ensures the rolling buffer is sized to cap. Called
-// lazily by pushOvershoot / HasInstability so callers don't have to
-// pre-configure it.
-func (s *State) initOvershootWindow(cap int) {
-	if len(s.overshootWindow) == cap {
-		return
-	}
-	s.overshootWindow = make([]bool, cap)
-	s.overshootHead = 0
-	s.overshootFilled = 0
-}

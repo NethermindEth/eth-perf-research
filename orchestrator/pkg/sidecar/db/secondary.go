@@ -1,7 +1,7 @@
 //go:build !nogrocksdb
 
 // Package db wraps grocksdb for the FlatDb open/iterate patterns the sidecar
-// uses. Two modes: secondary (live NM, replays WAL) and read-only (offline).
+// uses. Secondary mode (live NM, replays WAL) and read-only mode (offline).
 //
 // Build tag: pass `-tags nogrocksdb` to build without CGO/RocksDB; that
 // substitutes a no-op stub useful for unit tests on machines without the
@@ -24,8 +24,7 @@ type CFNames struct {
 }
 
 // Handle bundles the open DB plus the CF handles the sidecar uses. Callers
-// MUST call Close() to release everything; the sidecar's main() registers a
-// SIGTERM handler that drives this.
+// MUST call Close() to release everything.
 type Handle struct {
 	DB           *grocksdb.DB
 	StateCF      *grocksdb.ColumnFamilyHandle
@@ -96,16 +95,14 @@ func OpenBlockDiffsDB(path string, oo OpenOptions) (*Handle, error) {
 	for i, name := range listed {
 		cfByName[name] = handles[i]
 	}
-	// NM plugin names the per-block CF "Default" (the BlockDiffsColumns enum
-	// in C# maps to the standard RocksDB "default" CF). Accept either.
+	// NM plugin names the per-block CF "Default"; the C# BlockDiffsColumns enum
+	// maps to the standard RocksDB "default" CF. Accept either spelling.
 	bdCF := cfByName["Default"]
 	if bdCF == nil {
 		bdCF = cfByName["default"]
 	}
-	if bdCF == nil {
-		// No per-block CF means an empty/uninitialised DB; tailer will idle.
-		// Keep the handle alive so the secondary CatchUp keeps replaying WAL.
-	}
+	// nil bdCF means an empty/uninitialised DB; tailer will idle but the
+	// handle is kept alive so secondary CatchUp keeps replaying the WAL.
 	h := &Handle{
 		DB:           ddb,
 		BlockDiffsCF: bdCF,
@@ -117,8 +114,7 @@ func OpenBlockDiffsDB(path string, oo OpenOptions) (*Handle, error) {
 	return h, nil
 }
 
-// Open a FlatDb with the named CFs. Missing CFs return non-fatal handles
-// (BlockDiffs is allowed to be absent in pre-Phase-2 deployments).
+// Open opens a FlatDb with the named CFs. A missing BlockDiffs CF is non-fatal.
 func Open(path string, cfNames CFNames, oo OpenOptions) (*Handle, error) {
 	opts, cache := buildOptions(oo.BlockCacheMiB, oo.UseMmap)
 	listed, err := grocksdb.ListColumnFamilies(opts, path)
@@ -177,8 +173,7 @@ func Open(path string, cfNames CFNames, oo OpenOptions) (*Handle, error) {
 	return h, nil
 }
 
-// Close releases the DB, all CF handles, options, cache and the secondary
-// scratch directory.
+// Close releases the DB, all CF handles, options, cache, and the secondary scratch directory.
 func (h *Handle) Close() {
 	if h == nil {
 		return
@@ -203,13 +198,13 @@ func (h *Handle) Close() {
 }
 
 // CatchUp asks RocksDB to replay any WAL entries written by the primary since
-// the last call. Only valid in secondary mode; a no-op otherwise.
+// the last call. Only valid in secondary mode; a no-op in read-only mode.
 func (h *Handle) CatchUp() error {
 	if h == nil || h.DB == nil {
 		return nil
 	}
 	if h.secondaryDir == "" {
-		return nil // read-only mode
+		return nil
 	}
 	return h.DB.TryCatchUpWithPrimary()
 }

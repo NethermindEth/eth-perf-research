@@ -32,14 +32,9 @@ func Restore(dir string) (*tracker.Tracker, Header, error) {
 }
 
 // RestoreInto is like Restore but installs codes as the active CodeStore
-// before any per-key section is decoded. Pass nil to use the in-memory
-// default. The supplied store must be empty unless the caller has just
-// reopened a persistent store that already holds the same codes the
-// snapshot.bin is about to replay — in the persistent-store case the seed
-// records arriving from snapshot.bin are best-effort no-ops because the
-// store already has authoritative entries; we still decode them so the
-// aggregate counters (uniqueCodeHashes, codeBytesTotal, contractsTotal) get
-// rebuilt from scratch into the new tracker.
+// before any per-key section is decoded. Pass nil to use the in-memory default.
+// When a persistent store is supplied its existing authoritative entries are
+// used; snapshot seeds are no-ops but still decoded to rebuild aggregate counters.
 func RestoreInto(dir string, codes tracker.CodeStore) (*tracker.Tracker, Header, error) {
 	path := filepath.Join(dir, "snapshot.bin")
 	f, err := os.Open(path)
@@ -99,9 +94,7 @@ func RestoreInto(dir string, codes tracker.CodeStore) (*tracker.Tracker, Header,
 		}
 		switch secType {
 		case secCode:
-			// Streaming decode: feed each seed straight into the tracker so
-			// the snapshot reader never materialises an O(N) seed slice.
-			// Critical at bloatnet scale (1.4 B codehashes).
+			// Stream into the tracker directly to avoid an O(N) seed slice.
 			var buf [44]byte
 			var cs tracker.CodeSeed
 			for i := uint64(0); i < count; i++ {
@@ -129,11 +122,9 @@ func RestoreInto(dir string, codes tracker.CodeStore) (*tracker.Tracker, Header,
 		}
 	}
 
-	// When the writer flagged codes as external, the per-codehash section in
-	// snapshot.bin was empty. Schema v2+ snapshots carry per-shard counters
-	// in the header so we can install them directly and skip the multi-
-	// minute RebuildCountersFromCodeStore walk. v1 snapshots (or v2 with a
-	// length-mismatched counters slice) fall back to the legacy rebuild.
+	// CodesExternal: the code section was empty. Schema v2+ carries per-shard
+	// counters in the header to skip RebuildCountersFromCodeStore.
+	// v1 or length-mismatched slice falls back to the rebuild path.
 	if hdr.CodesExternal && codes != nil {
 		installed := false
 		if len(hdr.ShardCodeCounters) == tracker.ShardCount {
@@ -146,7 +137,6 @@ func RestoreInto(dir string, codes tracker.CodeStore) (*tracker.Tracker, Header,
 		}
 	}
 
-	// Apply tier-2 / scan-only counters from the header.
 	t.SetScanCounters(tracker.ScanCounters{
 		BlockNumber:           hdr.BlockNumber,
 		StateRoot:             parseStateRoot(hdr.StateRoot),

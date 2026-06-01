@@ -153,16 +153,16 @@ func TestBuildExecutionPayloadV3NilBaseFee(t *testing.T) {
 
 func TestSplitFlatKey(t *testing.T) {
 	cases := []struct {
-		k      string
-		verb   string
-		ax     controller.Axis
-		ok     bool
+		k    string
+		verb string
+		ax   controller.Axis
+		ok   bool
 	}{
 		{"eoatx.accounts", "eoatx", controller.AxisAccounts, true},
 		{"erc20_bloater.storage", "erc20_bloater", controller.AxisStorage, true},
 		{"calltx.code", "calltx", controller.AxisCode, true},
-		{"calltx.unknown", "", "", false},
-		{"no_separator", "", "", false},
+		{"calltx.unknown", "", 0, false},
+		{"no_separator", "", 0, false},
 	}
 	for _, tc := range cases {
 		v, a, ok := splitFlatKey(tc.k)
@@ -192,8 +192,8 @@ func TestHydrateStateFromTailReconstructsCoefficients(t *testing.T) {
 		BatchId: 41,
 		Observability: &orchpb.Observability{
 			CoeffsAfter: map[string]float64{
-				"eoatx.accounts":       123.0,
-				"storagespam.storage":  456.0,
+				"eoatx.accounts":      123.0,
+				"storagespam.storage": 456.0,
 			},
 			AlphaCurrent: map[string]float64{"eoatx.accounts": 0.07},
 			SigmaInnov:   map[string]float64{"storagespam.storage": 2.5},

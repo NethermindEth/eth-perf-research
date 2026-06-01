@@ -26,9 +26,7 @@ import (
 // treat this as a soft warning in `tail` mode (sleep, retry, log).
 var ErrNoBlockDiffsCF = errors.New("tailer: BlockDiffs CF not present")
 
-// Tailer applies every new record from the BlockDiffs CF to the in-memory
-// tracker. Designed to be called in a goroutine; Stop() returns when the
-// loop has drained.
+// Tailer applies BlockDiffs CF records to the in-memory tracker.
 type Tailer struct {
 	h           *db.Handle
 	t           *tracker.Tracker
@@ -37,9 +35,7 @@ type Tailer struct {
 	lastApplied int64
 }
 
-// New constructs a Tailer.
-//
-//	pollEvery is the dwell time between CatchUp/scan iterations.
+// New constructs a Tailer. pollEvery is the dwell time between CatchUp/scan iterations.
 func New(h *db.Handle, t *tracker.Tracker, log zerolog.Logger, pollEvery time.Duration) *Tailer {
 	if pollEvery <= 0 {
 		pollEvery = time.Second
@@ -47,10 +43,8 @@ func New(h *db.Handle, t *tracker.Tracker, log zerolog.Logger, pollEvery time.Du
 	return &Tailer{h: h, t: t, log: log, pollEvery: pollEvery, lastApplied: t.LastBlock()}
 }
 
-// Run blocks until ctx is cancelled. Each iteration:
-//  1. catch up the secondary RocksDB with the primary's WAL,
-//  2. iterate BlockDiffs from key > lastApplied,
-//  3. apply every decoded record to the tracker.
+// Run blocks until ctx is cancelled. Each tick: (1) catch up secondary WAL,
+// (2) iterate BlockDiffs from key > lastApplied, (3) apply to tracker.
 func (l *Tailer) Run(ctx context.Context) error {
 	if l.h.BlockDiffsCF == nil {
 		l.log.Warn().Msg("tailer: BlockDiffs CF not present, idling")
@@ -72,7 +66,7 @@ func (l *Tailer) Run(ctx context.Context) error {
 
 func (l *Tailer) tick(ctx context.Context) error {
 	if l.h.BlockDiffsCF == nil {
-		return nil // soft idle until the CF appears
+		return nil // idle until the CF appears
 	}
 	if err := l.h.CatchUp(); err != nil {
 		l.log.Warn().Err(err).Msg("tailer: CatchUp failed")
@@ -113,8 +107,7 @@ func (l *Tailer) consumeFrom(ctx context.Context, start int64) error {
 			continue
 		}
 		blockNum := int64(binary.BigEndian.Uint64(key))
-		// Copy out of the iterator-owned slice before decoding (RocksDB may
-		// recycle the buffer on the next Next() call).
+		// Copy before Next(): RocksDB may recycle the slice on the next call.
 		valCopy := append([]byte(nil), val...)
 		k.Free()
 		v.Free()
@@ -123,16 +116,13 @@ func (l *Tailer) consumeFrom(ctx context.Context, start int64) error {
 		if err != nil {
 			l.log.Error().Err(err).Int64("block", blockNum).Msg("tailer: decode failed, skipping")
 			l.lastApplied = blockNum
-			// Also bump the tracker's observed-block pointer so that sensor
-			// consumers (statecomp_lite incrementalBlockNumber) don't stall
-			// when a failed block lands on the current chain head. Without
-			// this, the orchestrator's strict waitSensorForBlock deadlocks
-			// because the tracker stays at blockNum-1 forever.
+			// Advance the tracker's block pointer even on decode failure so
+			// statecomp_lite doesn't stall when the failed block is the chain head.
 			l.t.AdvanceLastBlock(blockNum)
 			continue
 		}
 		if rec.BlockNumber == 0 {
-			rec.BlockNumber = uint64(blockNum) // tolerate header-elided wire (defensive)
+			rec.BlockNumber = uint64(blockNum) // tolerate header-elided wire
 		}
 		l.t.ApplyBlockDiff(rec)
 		l.lastApplied = blockNum
@@ -151,7 +141,6 @@ func (l *Tailer) consumeFrom(ctx context.Context, start int64) error {
 func (l *Tailer) LastApplied() int64 { return l.lastApplied }
 
 // EncodeKey is the canonical big-endian uint64 key encoder for BlockDiffs.
-// Exposed so tests + the Phase 2 NM plugin can share one definition.
 func EncodeKey(blockNumber uint64) []byte {
 	out := make([]byte, 8)
 	binary.BigEndian.PutUint64(out, blockNumber)

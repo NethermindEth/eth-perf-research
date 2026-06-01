@@ -4,19 +4,11 @@
 // template (*types.DynamicFeeTx) with To, Value, Data and Gas populated.
 //
 // The dispatcher fills the remaining fields (ChainID, Nonce, GasFeeCap,
-// GasTipCap) and hands the result to the signer. This package replaces the
-// former out-of-process Python builder pool: building is now an in-process
-// loop over BuildTx.
-//
-// The verb construction logic is a faithful port of the EELS spamoor builders
-// and the orchestrator-py facade wrappers; byte-equality with the Python
-// oracle is enforced by verbs_golden_test.go.
+// GasTipCap) and hands the result to the signer. Byte-equality with the EELS
+// Spamoor builders is enforced by verbs_golden_test.go.
 package verbs
 
 import (
-	"math/big"
-
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
@@ -24,10 +16,6 @@ import (
 // transaction template. It mirrors the subset of facade.Context that the
 // builders consume.
 type BuildCtx struct {
-	// ChainID is informational; the dispatcher sets DynamicFeeTx.ChainID.
-	ChainID *big.Int
-	// SignerAddr is the master signer address.
-	SignerAddr common.Address
 	// BaseAddress is the 20-byte base for sequential address derivation.
 	BaseAddress []byte
 	// Revision is the address-space generation used by derived addresses.

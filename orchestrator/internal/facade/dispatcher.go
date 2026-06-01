@@ -49,11 +49,10 @@ type DispatchInput struct {
 type Result struct {
 	SignedRLP   [][]byte
 	TxCount     int
-	RLPBytes    uint64            // sum of len(SignedRLP[i])
-	TxRLPHashes [][]byte          // Keccak256(SignedRLP[i]) for pending-sidecar
-	NewCursor   uint64            // first nonce after this batch (StartNonce + TxCount)
-	NewSalt     uint64            // first salt after this batch (StartSalt + NumNonces)
-	VerbGasUsed map[string]uint64 // for EWMA feedback; may be empty
+	RLPBytes    uint64   // sum of len(SignedRLP[i])
+	TxRLPHashes [][]byte // Keccak256(SignedRLP[i]) for pending-sidecar
+	NewCursor   uint64   // first nonce after this batch (StartNonce + TxCount)
+	NewSalt     uint64   // first salt after this batch (StartSalt + NumNonces)
 
 	// BuildDuration / SignDuration are the wall-clock cost of the in-process
 	// verb-template construction and the parallel secp256k1 signing phases,
@@ -84,7 +83,6 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 
 	plan := in.Plan
 
-	// 1. Resolve the native verb.
 	verb, ok := d.Lookup(plan.Verb)
 	if !ok {
 		return nil, fmt.Errorf("facade: unknown verb: %s", plan.Verb)
@@ -95,12 +93,7 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		count = 1 // always build at least one tx for forward-progress
 	}
 
-	// 2. Build the raw batch in-process. The verb returns an unsigned
-	// EIP-1559 template (To/Value/Data/Gas); the remaining fields are
-	// filled below.
 	buildCtx := verbs.BuildCtx{
-		ChainID:       new(big.Int).SetUint64(c.ChainID),
-		SignerAddr:    c.signerAddress(),
 		BaseAddress:   c.BaseAddress,
 		Revision:      c.Revision,
 		AddressStride: c.AddressStride,
@@ -116,10 +109,7 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		maxPri = new(big.Int)
 	}
 
-	// Hoist maxFee/maxPri big.Int.Bytes() out of the per-tx loop — they are
-	// constant for the entire batch. Previously templateToTxIn allocated four
-	// new byte slices per tx (~40 % of orchestrator heap); now the fee bytes
-	// are computed once per batch.
+	// Hoist fee bytes out of the per-tx loop: constant for the entire batch.
 	maxFeeBytes := maxFee.Bytes()
 	maxPriBytes := maxPri.Bytes()
 	chainID := c.ChainID
@@ -152,10 +142,8 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 	}
 	buildDur := time.Since(buildStart)
 
-	// 3. Hard gas cap: assert cumulative tx gas <= 0.95 × BlockGasLimit. We
-	// can't silently trim under parallel planners — it would create nonce
-	// gaps. The controller's Pick is responsible for sizing the plan to fit;
-	// if it didn't, fail the batch so the operator can fix the model.
+	// Hard gas cap: cumulative tx gas must not exceed 0.95 × BlockGasLimit.
+	// Silent trim is not safe under parallel planners — it creates nonce gaps.
 	if blockGas := c.LoadBlockGasLimit(); blockGas > 0 {
 		ceiling := blockGas * 95 / 100
 		var accGas uint64
@@ -172,7 +160,6 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		return nil, errors.New("facade: builder returned zero txs for non-zero plan")
 	}
 
-	// 4. Sign the slice.
 	signStart := time.Now()
 	raws, err := d.Signer.SignBatch(context.Background(), signables)
 	if err != nil {
@@ -180,7 +167,6 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 	}
 	signDur := time.Since(signStart)
 
-	// 5. Compute per-tx Keccak256 hashes and accumulate byte count.
 	hashes := make([][]byte, len(raws))
 	var totalBytes uint64
 	for i, raw := range raws {
@@ -188,9 +174,6 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		totalBytes += uint64(len(raw))
 	}
 
-	// 6. Compute cursor-advance results. NewSalt is StartSalt+NumNonces;
-	// the salt range was reserved atomically and unused slots are abandoned
-	// (salt domain is 2^64).
 	txCount := len(raws)
 	return &Result{
 		SignedRLP:     raws,
@@ -199,9 +182,7 @@ func (d *Dispatcher) Dispatch(_ context.Context, in DispatchInput, c *Context) (
 		TxRLPHashes:   hashes,
 		NewCursor:     in.StartNonce + uint64(txCount),
 		NewSalt:       in.StartSalt + in.NumNonces,
-		VerbGasUsed:   map[string]uint64{},
 		BuildDuration: buildDur,
 		SignDuration:  signDur,
 	}, nil
 }
-

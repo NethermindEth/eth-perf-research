@@ -52,38 +52,27 @@ func (e *EWMA) Samples() uint64 { return e.n }
 // the separate State.AvgTxRLP EWMA (design-v3 §2.6, batch-byte sizing) — this
 // struct does not duplicate it.
 type VerbStats struct {
-	GasPerTx    *EWMA
-	BytesPerGas *EWMA
-	Samples     uint64
+	GasPerTx *EWMA
+	Samples  uint64
 }
 
 func newVerbStats(alpha float64, coldStartN uint64) *VerbStats {
 	return &VerbStats{
-		GasPerTx:    NewEWMA(alpha, coldStartN),
-		BytesPerGas: NewEWMA(alpha, coldStartN),
+		GasPerTx: NewEWMA(alpha, coldStartN),
 	}
 }
 
-// UpdateVerbStats folds one batch's measurements into the running EWMAs.
+// UpdateVerbStats folds one batch's measurements into the running EWMA.
 // gasUsed is the block's total gas consumption attributed to this batch;
-// txCount is the number of txs actually included; bytesPerTx is the per-tx
-// dispatched RLP byte average (sumF), used only to derive BytesPerGas. Calls
-// with txCount == 0 or gasUsed == 0 are ignored so a no-op batch can't pollute
-// the EWMAs.
-func (s *State) UpdateVerbStats(verb string, gasUsed, txCount uint64, bytesPerTx float64) {
+// txCount is the number of txs actually included. Calls with txCount == 0 or
+// gasUsed == 0 are ignored so a no-op batch can't pollute the EWMA.
+func (s *State) UpdateVerbStats(verb string, gasUsed, txCount uint64) {
 	if txCount == 0 || gasUsed == 0 {
 		return
 	}
 	gasPerTx := float64(gasUsed) / float64(txCount)
 	if gasPerTx <= 0 || math.IsNaN(gasPerTx) || math.IsInf(gasPerTx, 0) {
 		return
-	}
-	if bytesPerTx < 0 || math.IsNaN(bytesPerTx) || math.IsInf(bytesPerTx, 0) {
-		bytesPerTx = 0
-	}
-	bytesPerGas := bytesPerTx / gasPerTx
-	if math.IsNaN(bytesPerGas) || math.IsInf(bytesPerGas, 0) {
-		bytesPerGas = 0
 	}
 
 	s.verbStatsMu.Lock()
@@ -97,7 +86,6 @@ func (s *State) UpdateVerbStats(verb string, gasUsed, txCount uint64, bytesPerTx
 		s.VerbStats[verb] = vs
 	}
 	vs.GasPerTx.Update(gasPerTx)
-	vs.BytesPerGas.Update(bytesPerGas)
 	vs.Samples = vs.GasPerTx.Samples()
 }
 

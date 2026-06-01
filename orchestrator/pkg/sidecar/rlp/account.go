@@ -29,7 +29,6 @@ var (
 )
 
 // AccountInfo is the slim record the sidecar carries per state leaf.
-// Per CLAUDE rule: immutable — callers receive a value copy, never a pointer.
 type AccountInfo struct {
 	HasCode    bool
 	HasStorage bool
@@ -90,8 +89,7 @@ const (
 )
 
 // Classify mirrors Nethermind.StateComposition/Bootstrap/TrieNodeScanner.Classify.
-// For Leaf nodes, leafValue points at the raw inner value bytes (account RLP
-// for state leaves, slot value for storage leaves). For other kinds it is nil.
+// For leaf nodes leafValue points at the raw inner value bytes; for other kinds it is nil.
 func Classify(nodeRLP []byte) (kind NodeKind, leafValue []byte) {
 	if len(nodeRLP) == 0 {
 		return NodeInvalid, nil

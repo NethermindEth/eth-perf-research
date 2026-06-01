@@ -55,8 +55,7 @@ func WritePending(path string, pb *orchpb.PendingBatch) error {
 	return nil
 }
 
-// ReadPending reads the PendingBatch sidecar at path.
-// Returns os.ErrNotExist when the sidecar is absent.
+// ReadPending returns os.ErrNotExist when the sidecar is absent.
 func ReadPending(path string) (*orchpb.PendingBatch, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -1,6 +1,9 @@
 package rpc
 
-import "time"
+import (
+	"runtime"
+	"time"
+)
 
 // StateCompositionLite mirrors Nethermind.StateComposition.Data.StateCompositionLite.
 // JSON field names match the C# record's camelCase serialisation so the
@@ -47,14 +50,10 @@ type CumulativeTrieStats struct {
 	SlotCountHistogram    []int64 `json:"slotCountHistogram"`
 }
 
-// StateCompositionGet is the verbose payload returned by statecomp_get. The
-// schema matches the legacy NM Nethermind.StateComposition.Data.StateCompositionReport
-// shape — nested `trieStats` plus top-level `blockNumber` — so the orchestrator's
-// sensor.go works against either backend with no code change.
-//
-// All flat fields (accountsTotal, storageTrieBytes, slotCountHistogram, …) are
-// kept as well for back-compat with existing dashboards and integration tests
-// that pre-dated the wrapper. They are simply duplicated from trieStats.
+// StateCompositionGet is the verbose payload returned by statecomp_get.
+// Schema matches the legacy NM StateCompositionReport shape so the
+// orchestrator's sensor.go works against either backend unchanged. Flat fields
+// duplicate trieStats for back-compat with dashboards that pre-dated the wrapper.
 type StateCompositionGet struct {
 	BlockNumber int64               `json:"blockNumber"`
 	StateRoot   string              `json:"stateRoot"`
@@ -188,5 +187,6 @@ func (s *Server) statecompHealth() HealthReport {
 		LagBlocks:          head - last,
 		LastSnapshotAgeS:   snapAge,
 		PeakRSSMb:          readRSSMB(),
+		GoroutineCount:     runtime.NumGoroutine(),
 	}
 }

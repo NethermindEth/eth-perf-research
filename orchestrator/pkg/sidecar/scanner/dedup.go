@@ -29,18 +29,16 @@ const (
 	dedupWriteBatchRecords = 8192      // 8192 × 32 B = 256 KB per batch
 )
 
-// streamSpillIntoDedupDB opens a fresh RocksDB at dedupDir, streams every
-// 32-byte record from spillPath into it via batched Puts, then flushes and
-// full-range compacts. On success the returned db is open for read iteration;
-// caller is responsible for invoking the returned cleanup, which closes the
-// db, destroys options/cache, and removes dedupDir.
+// streamSpillIntoDedupDB opens a fresh RocksDB at dedupDir, ingests every
+// 32-byte record from the spill via batched Puts, then flushes and compacts.
+// On success the returned db is open for read iteration. The caller must invoke
+// the returned cleanup to close the db and remove dedupDir.
 func streamSpillIntoDedupDB(spillPath, dedupDir string, log zerolog.Logger) (
 	db *grocksdb.DB,
 	cleanup func(),
 	written int64,
 	err error,
 ) {
-	// Cleanup any prior dedup attempt at this path so OpenDb sees a fresh dir.
 	if rerr := os.RemoveAll(dedupDir); rerr != nil {
 		return nil, nil, 0, fmt.Errorf("remove stale dedup dir %s: %w", dedupDir, rerr)
 	}
@@ -78,7 +76,6 @@ func streamSpillIntoDedupDB(spillPath, dedupDir string, log zerolog.Logger) (
 		_ = os.RemoveAll(dedupDir)
 	}
 
-	// Stream the spill in chunked Puts.
 	f, ferr := os.Open(spillPath)
 	if ferr != nil {
 		cleanup()
@@ -87,7 +84,7 @@ func streamSpillIntoDedupDB(spillPath, dedupDir string, log zerolog.Logger) (
 	defer f.Close()
 
 	wo := grocksdb.NewDefaultWriteOptions()
-	wo.DisableWAL(true) // temp DB; durability not required
+	wo.DisableWAL(true) // temp DB: durability not needed
 	defer wo.Destroy()
 
 	const readChunk = 32 * (1 << 16) // 2 MiB
@@ -143,8 +140,7 @@ func streamSpillIntoDedupDB(spillPath, dedupDir string, log zerolog.Logger) (
 		Dur("elapsed", time.Since(writeStart)).
 		Msg("dedup ingest done")
 
-	// Flush memtables to SST and run a full compaction so the merge-join
-	// iterator sees the dedup DB at its smallest, fully-sorted layout.
+	// Flush and compact so the merge-join iterator sees a fully-sorted layout.
 	flushOpts := grocksdb.NewDefaultFlushOptions()
 	flushOpts.SetWait(true)
 	defer flushOpts.Destroy()
@@ -159,18 +155,12 @@ func streamSpillIntoDedupDB(spillPath, dedupDir string, log zerolog.Logger) (
 	return db, cleanup, written, nil
 }
 
-// streamingDedupAndLookupSink performs the dedup+merge-join pipeline and
-// pushes every (codehash, codeSize, refcount=1) tuple through sink as soon
-// as it is computed. Memory is bounded by RocksDB's write-buffer + block
-// cache (~1.5 GB total) regardless of unique-codehash cardinality, AND no
-// Go-slice ever holds all seeds.
+// streamingDedupAndLookupSink runs the dedup+merge-join pipeline and pushes
+// one (codehash, codeSize, refcount=1) seed to sink per unique codehash.
+// Memory is bounded by the RocksDB write-buffer + block-cache (~1.5 GB total).
 //
-// Refcount=1 mirrors the existing bootstrap convention: the per-account
-// contractsTotal is counted separately in the account-CF scan, so we must
-// NOT use the actual refcount here (it would double-count code reuse).
-//
-// dedupDir is the on-disk location of the temp RocksDB. It will be created
-// fresh (any prior contents removed) and deleted on return.
+// Refcount=1 is intentional: contractsTotal is counted separately in the
+// account-CF scan; using the actual refcount would double-count code reuse.
 func streamingDedupAndLookupSink(
 	spillPath string,
 	codeDBPath string,
@@ -204,7 +194,6 @@ func streamingDedupAndLookupSink(
 	}
 	defer dedupCleanup()
 
-	// --- Open codeDB read-only ---
 	codeOpts, codeCache := buildCodeOpts(codeDBBlockCacheMiB, useMmap)
 	defer codeOpts.Destroy()
 	defer codeCache.Destroy()
@@ -215,7 +204,6 @@ func streamingDedupAndLookupSink(
 	}
 	defer codeDB.Close()
 
-	// --- Two iterators, merge-join ---
 	dro := grocksdb.NewDefaultReadOptions()
 	defer dro.Destroy()
 	dro.SetFillCache(false)
@@ -233,8 +221,8 @@ func streamingDedupAndLookupSink(
 	dedupIt.SeekToFirst()
 	codeIt.SeekToFirst()
 
-	// Advance codeIt past any non-32-byte keys (defensive; stock NM uses
-	// 32-byte codehash keys but other CFs/tools might leave artifacts).
+	// Skip non-32-byte keys defensively; stock NM uses 32-byte codehash keys
+	// but other CFs/tools might leave stray entries.
 	advanceCodeTo32 := func() bool {
 		for codeIt.Valid() {
 			k := codeIt.Key()
@@ -254,7 +242,6 @@ func streamingDedupAndLookupSink(
 		dk := dedupIt.Key()
 		ck := codeIt.Key()
 		if dk.Size() != 32 {
-			// Defensive: skip malformed entries on the dedup side too.
 			dk.Free()
 			ck.Free()
 			dedupIt.Next()
@@ -264,7 +251,6 @@ func streamingDedupAndLookupSink(
 
 		switch {
 		case cmp == 0:
-			// Hit: this codehash is referenced AND present in codeDB.
 			var h [32]byte
 			copy(h[:], dk.Data())
 			cv := codeIt.Value()
@@ -288,15 +274,14 @@ func streamingDedupAndLookupSink(
 			dedupIt.Next()
 			codeIt.Next()
 		case cmp < 0:
-			// Codehash referenced but missing in codeDB — data integrity flag.
+			// Referenced but absent in codeDB — data integrity issue.
 			missingInCodeDB++
 			uniqueCount++
 			dk.Free()
 			ck.Free()
 			dedupIt.Next()
 		default:
-			// Codehash present in codeDB but not referenced by any account.
-			// Orphaned blob (archive-mode leftover); skip.
+			// Present in codeDB but not referenced — orphaned (archive-mode leftover).
 			dk.Free()
 			ck.Free()
 			codeIt.Next()
@@ -312,7 +297,6 @@ func streamingDedupAndLookupSink(
 			lastLog = time.Now()
 		}
 	}
-	// Drain any remaining dedup entries (codeDB exhausted or never had them).
 	for dedupIt.Valid() {
 		dk := dedupIt.Key()
 		if dk.Size() == 32 {

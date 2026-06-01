@@ -22,7 +22,7 @@ avg_tx_rlp:
 func TestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "reference_f.yaml")
-	if err := os.WriteFile(path, []byte(sampleYAML), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(sampleYAML), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 

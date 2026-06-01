@@ -29,17 +29,8 @@ type verbEoatx struct{}
 func (verbEoatx) Name() string { return "eoatx" }
 
 // BuildTx builds an EOA-to-EOA type-2 transfer that creates the recipient.
-//
-//   - To:    deriveAddress(idx) — globally unique. idx is the dispatcher's
-//     per-tx nonce (StartNonce + i), drawn from the run-wide monotonic
-//     AddressCursor that ReserveAddresses advances; it never resets per batch,
-//     so recipient N is unique for the lifetime of the bloatnet and every tx
-//     hits a fresh empty address.
-//   - Value: 1 wei — a non-zero transfer to an empty address is required to
-//     insert a new account leaf; a 0-value send would be a no-op.
-//   - Gas:   21000 — the base cost of a plain value transfer; sufficient to
-//     cover the new-account insertion on a standard EVM chain.
-//   - Data:  empty — plain transfer, no calldata.
+// Value is 1 wei because a 0-value send to an empty address is a no-op and
+// inserts no account leaf.
 func (verbEoatx) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx, error) {
 	to, err := deriveAddress(ctx, idx)
 	if err != nil {
@@ -56,8 +47,7 @@ func (verbEoatx) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx, error) 
 // deriveAddress returns the 20-byte recipient address for logical index idx:
 // baseAddress + revision*stride + idx, big-endian-packed. The revision*stride
 // term keeps successive address-space generations disjoint; idx makes every
-// recipient unique within a generation. Mirrors orchestrator-py
-// FacadeContext.derive_address.
+// recipient unique within a generation.
 func deriveAddress(ctx BuildCtx, idx uint64) (common.Address, error) {
 	base := new(big.Int)
 	if len(ctx.BaseAddress) > 0 {

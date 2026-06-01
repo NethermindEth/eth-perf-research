@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
@@ -65,16 +64,16 @@ func loadTarget(path string) (*target.Target, *controller.Target, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle: load target: %w", err)
 	}
-	ct := shareTargetFromTarget(t.Shares, t.TotalBytes, t.SHA256)
+	ct := shareTargetFromTarget(t.Shares, t.TotalBytes)
 	return t, ct, nil
 }
 
 // loadReferenceF loads the reference-F YAML. When no path is supplied it
-// returns the built-in design-v3 §B.1 default table; when a file IS supplied,
-// any verb (or axis) absent from it is backfilled from that same default. This
-// guarantees NewState never seeds an all-zero F-row — an all-zero row gives a
-// verb a zero gradient in the controller's ‖Fx − r‖² objective, structurally
-// trapping it as unselectable cold-start dead state.
+// returns the built-in default table; when a file IS supplied, any verb (or
+// axis) absent from it is backfilled from that same default. This guarantees
+// NewState never seeds an all-zero F-row — an all-zero row gives a verb a zero
+// gradient in the controller's ‖Fx − r‖² objective, structurally trapping it
+// as unselectable cold-start dead state.
 func loadReferenceF(path string) (*referencef.ReferenceF, error) {
 	if path == "" {
 		return referencef.DefaultReferenceF(), nil
@@ -89,7 +88,7 @@ func loadReferenceF(path string) (*referencef.ReferenceF, error) {
 // resolveStartupMode inspects the state-dir and the RPC head to decide
 // between fresh start, resume, or error. resumeReorgTolerance is the resolved
 // RunConfig value bounding the head/journal-tail gap a resume tolerates.
-func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client, resumeReorgTolerance int64) (*startupDecision, error) {
+func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client, resumeReorgTolerance int64, allowNonZeroFreshHead bool) (*startupDecision, error) {
 	jp := filepath.Join(stateDir, journalFilename)
 	pp := filepath.Join(stateDir, payloadsFilename)
 	pendp := filepath.Join(stateDir, pendingFilename)
@@ -103,7 +102,7 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 	journalExists := jErr == nil && jStat.Size() > 0
 
 	if !journalExists {
-		if head.Number == 0 || config.EnvTruthy("ORCH_ALLOW_NON_ZERO_FRESH_HEAD") {
+		if head.Number == 0 || allowNonZeroFreshHead {
 			return &startupDecision{
 				Mode:         modeFresh,
 				JournalPath:  jp,
@@ -117,7 +116,6 @@ func resolveStartupMode(ctx context.Context, stateDir string, rpcCli *rpc.Client
 		)
 	}
 
-	// Journal exists — verify chain.
 	count, _, err := journal.VerifyAll(jp)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: verify journal: %w", err)
@@ -216,7 +214,7 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 	}
 	obs := tail.Observability
 
-	// Pass 1: parse and validate every F/σ cell WITHOUT mutating state. α is a
+	// Parse and validate every F/σ cell WITHOUT mutating state. α is a
 	// learning rate in a small fixed band and is not byte-scaled, so it is not
 	// range-checked here — but a non-finite α is still rejected below.
 	type cell struct {
@@ -225,9 +223,6 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		val  float64
 	}
 	coeffBound := state.CoeffBound()
-	// The controller stores F/Sigma/Alpha in flat arrays keyed by (verb,axis).
-	// Snapshot the verb set so we can fast-reject cells for verbs that aren't
-	// configured for this run.
 	knownVerbs := state.FSnapshot()
 	var fCells, sigmaCells, alphaCells []cell
 	for k, v := range obs.CoeffsAfter {
@@ -276,8 +271,6 @@ func hydrateStateFromTail(state *controller.State, tail *orchpb.Record) hydratio
 		alphaCells = append(alphaCells, cell{verb, ax, v})
 	}
 
-	// Pass 2: every cell validated — commit them to state via the
-	// (verb,axis)-keyed setters.
 	for _, fc := range fCells {
 		state.SetF(fc.verb, fc.ax, fc.val)
 		res.CoeffCells++
@@ -300,15 +293,14 @@ func splitFlatKey(k string) (string, controller.Axis, bool) {
 	for i := len(k) - 1; i >= 0; i-- {
 		if k[i] == '.' {
 			verb := k[:i]
-			ax := controller.Axis(k[i+1:])
-			switch ax {
-			case controller.AxisAccounts, controller.AxisStorage, controller.AxisCode:
-				return verb, ax, true
+			ax, ok := controller.ParseAxis(k[i+1:])
+			if !ok {
+				return "", 0, false
 			}
-			return "", "", false
+			return verb, ax, true
 		}
 	}
-	return "", "", false
+	return "", 0, false
 }
 
 // reconcilePending inspects a pending-batch sidecar. If the chain advanced

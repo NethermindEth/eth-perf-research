@@ -68,11 +68,9 @@ func TestSlotCountChangeDelta(t *testing.T) {
 	}
 }
 
-// TestDecodeUint64Lenient_SingleByte is the regression test for the
-// 2026-05-28 drift bug: go-ethereum's RLP returns Kind=Byte (not String)
-// for single-byte integers 0x00-0x7f, and the old decoder rejected those
-// with "not a string-encoded integer", causing the tailer to skip every
-// block whose StorageTrieBytesDelta (or any delta field) landed in [1,127].
+// TestDecodeUint64Lenient_SingleByte guards the SplitString contract: go-ethereum
+// returns Kind=Byte for single-byte integers 0x00-0x7f, so checking kind==String
+// would silently reject deltas in [1,127].
 func TestDecodeUint64Lenient_SingleByte(t *testing.T) {
 	cases := []struct {
 		name string
@@ -98,9 +96,8 @@ func TestDecodeUint64Lenient_SingleByte(t *testing.T) {
 	}
 }
 
-// TestDecodeUint64Lenient_Negative confirms Nethermind's 8-byte
-// two's-complement encoding of negative longs round-trips to the right
-// signed value after the int64 cast the caller applies.
+// TestDecodeUint64Lenient_Negative confirms Nethermind's 8-byte two's-complement
+// encoding of negative longs round-trips after the int64 cast the caller applies.
 func TestDecodeUint64Lenient_Negative(t *testing.T) {
 	// -1 as 8-byte big-endian two's complement, RLP string of length 8.
 	rlp := []byte{0x88, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}

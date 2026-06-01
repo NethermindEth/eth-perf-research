@@ -1,11 +1,5 @@
 package controller
 
-// The cold-start per-tx gas table and the unknown-verb fallback used to be
-// package-level constants here; they now live in config.RunConfig
-// (Control.BaseGasPerVerb / Control.DefaultBaseGasPerVerb) and are read off the
-// State's resolved cfg. config.Defaults() carries the historical table, so the
-// cold-start behaviour is unchanged.
-//
 // baselineGasPerVerb returns the cold-start gas estimate for verb, defaulting
 // to cfg.Control.DefaultBaseGasPerVerb for unknown verbs and clamping zero to
 // the default (so a misconfigured table entry can't divide by zero downstream).

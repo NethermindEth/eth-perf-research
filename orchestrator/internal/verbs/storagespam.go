@@ -6,23 +6,19 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// storageSpamGasToBurn is the gasLimit argument passed to setRandomForGas.
-// EELS build_storagespam_transactions (helpers.py:1060) defaults
-// gas_units_to_burn to 2_000_000 and sizes each exec tx at
+// storageSpamGasToBurn is the gasLimit argument passed to setRandomForGas
+// (EELS default gas_units_to_burn). Each exec tx is sized at
 // gas_units_to_burn + 50_000.
 const storageSpamGasToBurn = 2_000_000
 
-// storageSpamExecGas is the exec-tx gas limit: gas_units_to_burn + 50_000,
-// matching helpers.py:1130 (exec_gas = gas_units_to_burn + 50_000).
+// storageSpamExecGas is the exec-tx gas limit: gas_units_to_burn + 50_000.
 const storageSpamExecGas = storageSpamGasToBurn + 50_000
 
 // verbStorageSpam builds a setRandomForGas(uint256 gasLimit, uint256 txid)
-// call against the deployed StorageSpam contract. Spamoor's sendTx passes
-// txid = txIdx (storagespam.go: SetRandomForGas(..., big.NewInt(int64(txIdx))));
-// the contract mixes txid into the storage-slot keccak, so a distinct txid per
-// tx writes a distinct slot window — this is what actually bloats the storage
-// trie. The orchestrator therefore threads the per-tx index into the txid
-// word rather than the stub-era constant zero.
+// call against the deployed StorageSpam contract. The contract mixes txid into
+// the storage-slot keccak, so a distinct txid per tx writes a distinct slot
+// window — threading the per-tx index into the txid word is what actually
+// bloats the storage trie.
 type verbStorageSpam struct{}
 
 func (verbStorageSpam) Name() string { return "storagespam" }

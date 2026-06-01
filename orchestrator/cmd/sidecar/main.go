@@ -1,4 +1,4 @@
-// sidecar — v19 external state-composition tracker.
+// sidecar — external state-composition tracker.
 //
 // One binary, four modes:
 //
@@ -99,11 +99,6 @@ func run(ctx context.Context, cfg config.Config, logger zerolog.Logger) error {
 	metricsSrv := startMetrics(cfg.MetricsListenAddr, logger)
 	defer shutdownHTTP(metricsSrv)
 
-	// Register the `nethermind_state_comp_*` gauges so the legacy bloatnet
-	// Grafana dashboard (originally written against the in-process NM
-	// plugin) keeps working unchanged. The refresh loop in each long-lived
-	// mode below feeds it from the tracker. Bootstrap mode skips the loop
-	// because it exits before any tracker is exposed.
 	promExporter := promexport.Register(nil)
 
 	switch cfg.Mode {
@@ -119,10 +114,6 @@ func run(ctx context.Context, cfg config.Config, logger zerolog.Logger) error {
 		return fmt.Errorf("unknown mode %q", cfg.Mode)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// MODE: bootstrap (one-shot scan → snapshot.bin → exit).
-// ---------------------------------------------------------------------------
 
 func runBootstrap(ctx context.Context, cfg config.Config, logger zerolog.Logger, machine *state.Machine) error {
 	machine.Advance(state.PhaseBootstrap)
@@ -159,10 +150,6 @@ func runBootstrap(ctx context.Context, cfg config.Config, logger zerolog.Logger,
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// MODE: serve (RPC only, read-only over existing snapshot).
-// ---------------------------------------------------------------------------
-
 func runServe(ctx context.Context, cfg config.Config, logger zerolog.Logger, machine *state.Machine, prom *promexport.Metrics) error {
 	var codes tracker.CodeStore
 	if cfg.CodeStoreDir != "" {
@@ -197,10 +184,6 @@ func runServe(ctx context.Context, cfg config.Config, logger zerolog.Logger, mac
 	return ctx.Err()
 }
 
-// ---------------------------------------------------------------------------
-// MODE: tail (long-running tracker; no RPC).
-// ---------------------------------------------------------------------------
-
 func runTail(ctx context.Context, cfg config.Config, logger zerolog.Logger, machine *state.Machine, prom *promexport.Metrics) error {
 	var codes tracker.CodeStore
 	if cfg.CodeStoreDir != "" {
@@ -229,12 +212,7 @@ func runTail(ctx context.Context, cfg config.Config, logger zerolog.Logger, mach
 	return runErr
 }
 
-// ---------------------------------------------------------------------------
-// MODE: all (production).
-// ---------------------------------------------------------------------------
-
 func runAll(ctx context.Context, cfg config.Config, logger zerolog.Logger, machine *state.Machine, prom *promexport.Metrics) error {
-	// 1. If a snapshot exists, restore it. Otherwise bootstrap-scan.
 	var t *tracker.Tracker
 	if _, err := snapshot.ReadHeader(cfg.SnapshotDir); err == nil {
 		// If the operator configured a persistent codestore, reopen it
@@ -279,9 +257,6 @@ func runAll(ctx context.Context, cfg config.Config, logger zerolog.Logger, machi
 		}
 	}
 
-	// 2. Open the BlockDiffs DB for tail. The Nethermind StateDiffsWriter
-	// plugin writes blockDiffs as a standalone RocksDB (datadir/blockDiffs)
-	// rather than a CF inside the FlatDb, so this is a separate open.
 	tailHandle, err := openTailDB(cfg, logger)
 	if err != nil {
 		return err
@@ -324,10 +299,6 @@ func writeShutdownSnapshot(cfg config.Config, t *tracker.Tracker, logger zerolog
 	logger.Info().Str("path", path).Msg("shutdown snapshot written")
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 // openTailDB opens the database the tailer reads from. By default the
 // Nethermind StateDiffsWriter plugin keeps blockDiffs as a standalone RocksDB
 // at <datadir>/blockDiffs/. The config layer infers the path from --db when
@@ -348,9 +319,8 @@ func openTailDB(cfg config.Config, logger zerolog.Logger) (*db.Handle, error) {
 			return nil, fmt.Errorf("stat blockdiffs db at %s: %w", cfg.BlockDiffsDB, err)
 		}
 		if !exists {
-			// Path was inferred from --db AND the operator did not pass it
-			// explicitly — most likely a pre-Phase-2 deployment, fine to
-			// idle on the FlatDb CF until the plugin produces diffs.
+			// Inferred path but not present — most likely a pre-Phase-2
+			// deployment; idle on the FlatDb CF until the plugin produces diffs.
 			inferred := config.InferBlockDiffsDBPath(cfg.DBPath)
 			if cfg.BlockDiffsDB == inferred {
 				logger.Info().Str("path", cfg.BlockDiffsDB).
@@ -407,9 +377,7 @@ func openFlatDB(cfg config.Config, logger zerolog.Logger) (*db.Handle, error) {
 		return nil, fmt.Errorf("open flatdb: %w", err)
 	}
 	if h.BlockDiffsCF == nil {
-		// Pre-Phase-2 layout (or Phase-2 plugin hasn't produced any diffs
-		// yet). Either way, not an error: serve baseline-only until the
-		// standalone BlockDiffs DB shows up.
+		// Not an error: serve baseline-only until the standalone BlockDiffs DB shows up.
 		logger.Info().Msg("BlockDiffs CF not present in FlatDb; serving baseline only")
 	}
 	return h, nil

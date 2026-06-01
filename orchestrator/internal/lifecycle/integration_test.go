@@ -20,10 +20,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads"
 )
+
+// integrationRunConfig loads the resolved RunConfig from targetPath and applies
+// the fast-sensor + ephemeral-metrics-addr overrides the integration tests need.
+// These three values live on config.RunConfig.Run, not on lifecycle.Config.
+func integrationRunConfig(t *testing.T, targetPath, metricsAddr string) config.RunConfig {
+	t.Helper()
+	rc, err := config.Load(targetPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	rc.Run.SensorPollIntervalMS = 10
+	rc.Run.SensorDeadlineMS = 3000
+	rc.Run.MetricsAddr = metricsAddr
+	return rc
+}
 
 // hardhat default deploy key (well-known test key, not secret).
 const deployKey = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
@@ -64,16 +80,14 @@ func TestLifecycleIntegration(t *testing.T) {
 	defer cancel()
 
 	cfg := Config{
-		RPCURL:             nm.srv.URL,
-		StateDir:           stateDir,
-		TargetYAMLPath:     targetPath,
-		GenesisSHA256:      genesisHash,
-		MaxBatches:         5,
-		DeployPrivateKey:   deployKey,
-		SensorPollInterval: 10 * time.Millisecond,
-		SensorDeadline:     3 * time.Second,
-		Verbs:              []string{"eoatx"},
-		MetricsAddr:        metricsAddr,
+		RPCURL:           nm.srv.URL,
+		StateDir:         stateDir,
+		TargetYAMLPath:   targetPath,
+		GenesisSHA256:    genesisHash,
+		MaxBatches:       5,
+		DeployPrivateKey: deployKey,
+		Verbs:            []string{"eoatx"},
+		Run:              integrationRunConfig(t, targetPath, metricsAddr),
 	}
 
 	runStart := time.Now()
@@ -125,10 +139,10 @@ func assertMetricsServerStopped(t *testing.T, addr string) {
 // ── mock NM ──────────────────────────────────────────────────────────────────
 
 type mockNM struct {
-	srv          *httptest.Server
-	mu           sync.Mutex
-	blockNumber  uint64            // increments each testing_commitBlockV1 call
-	statecompCalls uint64          // atomic counter for growing trie sizes
+	srv            *httptest.Server
+	mu             sync.Mutex
+	blockNumber    uint64 // increments each testing_commitBlockV1 call
+	statecompCalls uint64 // atomic counter for growing trie sizes
 }
 
 func newMockNM(t *testing.T) *mockNM {
@@ -232,15 +246,15 @@ func (m *mockNM) handle(w http.ResponseWriter, r *http.Request) {
 
 func (m *mockNM) blockJSON(bn uint64) map[string]any {
 	return map[string]any{
-		"number":       fmt.Sprintf("0x%x", bn),
-		"hash":         blockHashForNumber(bn),
-		"parentHash":   "0x" + strings.Repeat("00", 32),
-		"stateRoot":    "0xabc0000000000000000000000000000000000000000000000000000000000123",
+		"number":        fmt.Sprintf("0x%x", bn),
+		"hash":          blockHashForNumber(bn),
+		"parentHash":    "0x" + strings.Repeat("00", 32),
+		"stateRoot":     "0xabc0000000000000000000000000000000000000000000000000000000000123",
 		"baseFeePerGas": "0x3b9aca00",
-		"gasLimit":     "0xee6b2800",
-		"gasUsed":      "0x0",
-		"timestamp":    "0x671d3f00",
-		"transactions": []any{},
+		"gasLimit":      "0xee6b2800",
+		"gasUsed":       "0x0",
+		"timestamp":     "0x671d3f00",
+		"transactions":  []any{},
 	}
 }
 
@@ -341,16 +355,14 @@ func TestRunLoop_NoNonceGaps(t *testing.T) {
 	const wantBatches = 50
 
 	cfg := Config{
-		RPCURL:             nm.srv.URL,
-		StateDir:           stateDir,
-		TargetYAMLPath:     targetPath,
-		GenesisSHA256:      genesisHash,
-		MaxBatches:         wantBatches,
-		DeployPrivateKey:   deployKey,
-		SensorPollInterval: 10 * time.Millisecond,
-		SensorDeadline:     3 * time.Second,
-		Verbs:              []string{"eoatx"},
-		MetricsAddr:        metricsAddr,
+		RPCURL:           nm.srv.URL,
+		StateDir:         stateDir,
+		TargetYAMLPath:   targetPath,
+		GenesisSHA256:    genesisHash,
+		MaxBatches:       wantBatches,
+		DeployPrivateKey: deployKey,
+		Verbs:            []string{"eoatx"},
+		Run:              integrationRunConfig(t, targetPath, metricsAddr),
 	}
 
 	if err := Run(ctx, cfg); err != nil && ctx.Err() == nil {

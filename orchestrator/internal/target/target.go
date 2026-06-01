@@ -52,9 +52,9 @@ func abs(x float64) float64 {
 }
 
 type Watcher struct {
-	fw       *fsnotify.Watcher
-	cancel   context.CancelFunc
-	done     chan struct{}
+	fw     *fsnotify.Watcher
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // NewWatcher starts an fsnotify watcher on path. debounce is the resolved

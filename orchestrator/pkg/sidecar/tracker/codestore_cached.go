@@ -2,22 +2,15 @@ package tracker
 
 import "sync"
 
-// CachedCodeStore wraps a slower (typically disk-backed) CodeStore with an
-// in-memory map cache that records both presence and value. The sidecar is
-// the only writer to the underlying store, so the cache stays coherent
-// without any cross-process invalidation.
+// CachedCodeStore wraps a disk-backed CodeStore with an in-memory map.
+// The sidecar is the sole writer, so no cross-process invalidation is needed.
 //
-// Why this exists: after Option A (per-block MultiGet+BatchPut) bounded the
-// cgo crossings to 2 per block, the residual cost is still RocksDB lookups
-// inside MultiGet — block-cache hits at ~1 µs, misses at tens of µs. With
-// fresh-deploy bloating workloads, the same hash rarely repeats, so the
-// cache mainly helps by caching the "absent" answer so the second sighting
-// of a hash skips RocksDB entirely.
+// Rationale: MultiGet costs ~1 µs (cache hit) to tens of µs (miss). At
+// bloating cadence the same hash rarely repeats, so the main win is caching
+// "absent" answers to skip RocksDB on second sightings.
 //
-// Memory: unbounded by entry count. At the observed bloating cadence the
-// cache grows ~520 k entries / day at ~80 B each ≈ 40 MB / day. The
-// snapshot loop periodically calls Iterate on the underlying store, not on
-// the cache, so the cache never becomes the source of truth.
+// Memory grows ~40 MB/day at observed bloating rates. Iterate delegates to
+// the underlying store, which is always the source of truth.
 type CachedCodeStore struct {
 	inner CodeStore
 	mu    sync.RWMutex
@@ -58,7 +51,6 @@ func (s *CachedCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, pres
 		return results, present
 	}
 
-	// First pass: serve everything we can from cache, build the miss list.
 	var missIdx []int
 	var missHashes [][32]byte
 	s.mu.RLock()
@@ -77,9 +69,7 @@ func (s *CachedCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, pres
 		return results, present
 	}
 
-	// Second pass: one MultiGet to the inner store for misses, then
-	// populate the cache so the next sighting of any of these hashes
-	// stays in Go memory.
+	// One MultiGet for misses, then cache results.
 	innerEntries, innerPresent := s.inner.MultiGet(missHashes)
 	s.mu.Lock()
 	for j, i := range missIdx {
@@ -117,10 +107,8 @@ func (s *CachedCodeStore) Delete(hash [32]byte) {
 	s.inner.Delete(hash)
 }
 
-// Iterate passes through to the underlying store. The cache is a strict
-// subset of (or equal to) the inner store for present-keyed entries, so
-// callers that need a full walk (snapshot writer, restart rehydration)
-// must hit the source of truth, not the partial cache.
+// Iterate delegates to the underlying store — the cache is a subset,
+// not the source of truth.
 func (s *CachedCodeStore) Iterate(fn func(hash [32]byte, e codeEntry) bool) error {
 	return s.inner.Iterate(fn)
 }
@@ -129,8 +117,7 @@ func (s *CachedCodeStore) Len() int64 { return s.inner.Len() }
 
 func (s *CachedCodeStore) Close() error { return s.inner.Close() }
 
-// CacheStats returns the live cache size; used by the metrics endpoint and
-// debug logging when the cache is suspected of unbounded growth.
+// CacheStats returns the live cache size for debug logging.
 func (s *CachedCodeStore) CacheStats() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

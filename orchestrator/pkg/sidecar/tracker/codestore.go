@@ -46,9 +46,6 @@ type CodeStore interface {
 	Close() error
 }
 
-// newMemCodeStore is the default in-memory implementation. Used by tests and
-// by the production tracker until ReplaceCodeStore swaps in a disk-backed
-// store during bootstrap.
 func newMemCodeStore() *memCodeStore {
 	return &memCodeStore{m: make(map[[32]byte]codeEntry, 1<<10)}
 }

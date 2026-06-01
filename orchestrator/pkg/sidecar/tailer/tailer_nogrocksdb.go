@@ -37,7 +37,7 @@ func (l *Tailer) Run(ctx context.Context) error {
 // LastApplied returns the highest block number applied so far.
 func (l *Tailer) LastApplied() int64 { return l.lastApplied }
 
-// EncodeKey is identical to the real implementation; tests use it.
+// EncodeKey mirrors the real implementation for test use.
 func EncodeKey(blockNumber uint64) []byte {
 	out := make([]byte, 8)
 	binary.BigEndian.PutUint64(out, blockNumber)

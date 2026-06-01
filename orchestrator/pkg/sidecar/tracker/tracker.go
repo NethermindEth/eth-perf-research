@@ -25,14 +25,12 @@ import (
 type Tracker struct {
 	shards [ShardCount]*shard
 
-	// codes is the CodeStore shared by every shard. Owned by the tracker
-	// (it manages Close); set by New (memCodeStore default) or replaced by
-	// UseCodeStore before any diff applies.
+	// codes is the CodeStore shared across shards. Set by New (in-memory default)
+	// or swapped via UseCodeStore before any diffs are applied.
 	codes CodeStore
 
-	// Scan-only counters (set by the bootstrap scanner once, surfaced
-	// verbatim by the RPC). Stored as atomics so /lite can read them
-	// without grabbing every shard lock.
+	// Scan-only counters: set once by the bootstrap scanner; atomics so /lite
+	// can read them without grabbing every shard lock.
 	accountsTotal         atomic.Int64
 	emptyAccounts         atomic.Int64
 	accountTrieBranches   atomic.Int64
@@ -44,10 +42,8 @@ type Tracker struct {
 	storageTrieLeaves     atomic.Int64
 	storageTrieBytes      atomic.Int64
 
-	// Calibration ratios captured at bootstrap end: bytes-per-account-trie-
-	// record and bytes-per-storage-slot. Used by ApplyBlockDiff to estimate
-	// tier-2 byte deltas from the diff stream so accountTrieBytes/
-	// storageTrieBytes stay live between full re-scans. Set by SetScanCounters.
+	// Calibration ratios (bytes-per-account, bytes-per-slot) captured at
+	// bootstrap end; used to estimate tier-2 deltas from the diff stream.
 	bytesPerAccount atomic.Int64
 	bytesPerSlot    atomic.Int64
 
@@ -60,19 +56,16 @@ type Tracker struct {
 	stateRoot atomic.Value // [32]byte (stored as value to avoid lock)
 }
 
-// SlotHistogramLength must match Nethermind.StateComposition.Data.CumulativeTrieStats.SlotHistogramLength.
+// SlotHistogramLength matches Nethermind.StateComposition.Data.CumulativeTrieStats.SlotHistogramLength.
 const SlotHistogramLength = 16
 
-// New constructs an empty tracker with all shards initialised and an in-memory
-// CodeStore as default. Production code paths that need to scale beyond RAM
-// should call UseCodeStore with a disk-backed implementation before seeding.
+// New constructs an empty tracker. For bloatnet scale call UseCodeStore with a
+// disk-backed implementation before seeding.
 func New() *Tracker {
 	return NewWithCodeStore(newMemCodeStore())
 }
 
-// NewWithCodeStore is like New but installs the supplied CodeStore as the
-// per-codehash backing. Used by the bootstrap path to wire in the on-disk
-// store before SeedCodesStreaming runs.
+// NewWithCodeStore is like New but installs the supplied CodeStore as the backing.
 func NewWithCodeStore(codes CodeStore) *Tracker {
 	t := &Tracker{codes: codes}
 	for i := 0; i < ShardCount; i++ {
@@ -82,10 +75,8 @@ func NewWithCodeStore(codes CodeStore) *Tracker {
 	return t
 }
 
-// UseCodeStore swaps the active CodeStore. The previous store is NOT closed
-// — the caller owns its lifetime. Must be called before any diffs are
-// applied, otherwise existing in-memory counters will not reflect the
-// re-pointed store.
+// UseCodeStore swaps the active CodeStore. Must be called before any diffs are
+// applied. The previous store is not closed; the caller owns its lifetime.
 func (t *Tracker) UseCodeStore(c CodeStore) {
 	t.codes = c
 	for i := 0; i < ShardCount; i++ {
@@ -93,23 +84,18 @@ func (t *Tracker) UseCodeStore(c CodeStore) {
 	}
 }
 
-// CodeStore exposes the active code-store implementation for callers that
-// need direct iteration (e.g. snapshot writers).
+// CodeStore returns the active code-store implementation.
 func (t *Tracker) CodeStore() CodeStore { return t.codes }
 
-// CodesAreExternal reports whether the active CodeStore is disk-backed
-// (i.e. survives process restart on its own). When true the snapshot writer
-// may skip serialising per-codehash records because the cold tier is the
-// authoritative source. The in-memory store returns false because its
-// contents are lost when the process exits.
+// CodesAreExternal reports whether the active CodeStore survives process restart
+// (disk-backed). When true the snapshot writer skips per-codehash records.
 func (t *Tracker) CodesAreExternal() bool {
 	_, isMem := t.codes.(*memCodeStore)
 	return t.codes != nil && !isMem
 }
 
-// ApplyCodeChange routes a CodeHashChange to its owning shards. Old and new
-// hashes are routed independently because they may live in different shards.
-// Refcount lookups are keyed by codeHash, not by address.
+// ApplyCodeChange routes old and new hashes to their respective shards
+// (they may differ). Refcount lookups are keyed by codeHash, not address.
 func (t *Tracker) ApplyCodeChange(addr, oldHash, newHash [32]byte, newSize uint64) {
 	if oldHash != zeroHash {
 		t.shards[shardOf(oldHash)].applyCodeRemove(oldHash)
@@ -137,10 +123,8 @@ func (t *Tracker) ApplySlotChange(addr [32]byte, oldCount, newCount uint64) {
 func (t *Tracker) ApplyBlockDiff(rec rlp.BlockDiffRecord) {
 	var slotDelta int64
 	var accountAddedDelta int64
-	// Code changes fold through the batched MultiGet+BatchPut path so the
-	// per-block cgo crossings stay bounded at 2 regardless of code-change
-	// count. accountAddedDelta is tallied here so a future change to the
-	// batched routine can't silently miss the account-creation signal.
+	// Count new accounts before the batched code-change path; keeps the signal
+	// visible if the batched routine is later refactored.
 	for _, c := range rec.CodeHashChanges {
 		if c.OldHash == zeroHash && c.NewHash != zeroHash {
 			accountAddedDelta++
@@ -196,11 +180,9 @@ func (t *Tracker) SetScanCounters(c ScanCounters) {
 	t.storageTrieExtensions.Store(c.StorageTrieExtensions)
 	t.storageTrieLeaves.Store(c.StorageTrieLeaves)
 	t.storageTrieBytes.Store(c.StorageTrieBytes)
-	// Calibration: bytes-per-record ratios so ApplyBlockDiff can estimate
-	// tier-2 byte deltas without an NM-side plumbing change. Bootstrap
-	// produces accurate ratios; bloating may drift them (e.g. fresh EOAs
-	// have minimal storage), but over short windows the estimate is good
-	// enough for the controller's gradient.
+	// Calibrate bytes-per-record so ApplyBlockDiff can estimate tier-2 deltas.
+	// Bootstrap values are accurate; bloating may drift them but the estimate
+	// is good enough for the controller gradient.
 	if c.AccountsTotal > 0 {
 		t.bytesPerAccount.Store(c.AccountTrieBytes / c.AccountsTotal)
 	}
@@ -220,7 +202,7 @@ func (t *Tracker) SetScanCounters(c ScanCounters) {
 	}
 }
 
-// ScanCounters is the seed payload the bootstrap scanner hands to the tracker.
+// ScanCounters is the seed payload from the bootstrap scanner.
 type ScanCounters struct {
 	BlockNumber           int64
 	StateRoot             [32]byte
@@ -236,8 +218,6 @@ type ScanCounters struct {
 	StorageTrieBytes      int64
 	SlotHistogram         []int64
 
-	// Also seeds the per-codeHash refcounts so contractsTotal /
-	// codeBytesTotal / uniqueCodeHashes are non-zero before any diffs flow.
 	CodeSeed []CodeSeed
 	SlotSeed []SlotSeed
 }
@@ -256,13 +236,10 @@ type SlotSeed struct {
 	SlotCount     uint64
 }
 
-// SeedFromScan applies the per-key seeds discovered during bootstrap. Must be
-// called before the tracker is exposed to the tailer.
-//
-// This is the in-RAM seed path used by tests and small deployments. At
-// bloatnet scale (1.4 B+ codehashes) callers must instead use
-// SeedCodesStreaming + SeedSlotsStreaming so the per-key data lands in the
-// (disk-backed) CodeStore without first materialising as a Go slice.
+// SeedFromScan applies per-key seeds from bootstrap. Must be called before
+// the tracker is exposed to the tailer. At bloatnet scale (1.4 B+ codehashes)
+// use SeedOneCode/SeedOneSlot so data lands in the disk-backed CodeStore
+// without materialising a full Go slice.
 func (t *Tracker) SeedFromScan(codes []CodeSeed, slots []SlotSeed) {
 	for _, cs := range codes {
 		t.SeedOneCode(cs)
@@ -272,10 +249,8 @@ func (t *Tracker) SeedFromScan(codes []CodeSeed, slots []SlotSeed) {
 	}
 }
 
-// SeedOneCode applies a single CodeSeed to its owning shard and the active
-// CodeStore. Equivalent to SeedFromScan with a one-element slice. Exposed so
-// the bootstrap merge-join can stream records straight into the tracker
-// without ever materialising a []CodeSeed in memory.
+// SeedOneCode applies a single CodeSeed, letting the bootstrap merge-join
+// stream records without ever materialising a []CodeSeed.
 func (t *Tracker) SeedOneCode(cs CodeSeed) {
 	idx := shardOf(cs.CodeHash)
 	sh := t.shards[idx]
@@ -287,20 +262,17 @@ func (t *Tracker) SeedOneCode(cs CodeSeed) {
 	sh.mu.Unlock()
 }
 
-// ShardCodeCounter is the per-shard subset of code-related counters needed
+// ShardCodeCounter is the per-shard code counters carried in the snapshot header
 // to skip RebuildCountersFromCodeStore on restart. Storage-side counters
-// (storageSlotsTotal, contractsWithStorage, slot map) re-populate naturally
-// via SeedOneSlot replay from snapshot.bin, so they are not carried here.
+// repopulate naturally via SeedOneSlot replay.
 type ShardCodeCounter struct {
 	UniqueCodeHashes int64
 	CodeBytesTotal   int64
 	ContractsTotal   int64
 }
 
-// ExportShardCodeCounters returns one ShardCodeCounter per shard, in shard
-// index order. The slice is freshly allocated; modifying it does not touch
-// tracker state. Read under per-shard RLock to ensure each shard's three
-// counters are mutually consistent.
+// ExportShardCodeCounters returns one ShardCodeCounter per shard in index order.
+// Read under per-shard RLock to ensure the three counters are mutually consistent.
 func (t *Tracker) ExportShardCodeCounters() []ShardCodeCounter {
 	out := make([]ShardCodeCounter, ShardCount)
 	for i := 0; i < ShardCount; i++ {
@@ -316,11 +288,9 @@ func (t *Tracker) ExportShardCodeCounters() []ShardCodeCounter {
 	return out
 }
 
-// SetShardCodeCounters installs per-shard code counters without walking the
-// CodeStore. Used by snapshot.RestoreInto when the snapshot carries them
-// (schema v2+), eliminating the multi-minute RebuildCountersFromCodeStore
-// pass at restart. Length must equal ShardCount; mismatched input is a
-// no-op so a corrupted/legacy snapshot can fall back to the rebuild path.
+// SetShardCodeCounters installs per-shard counters from the snapshot header
+// (schema v2+), skipping the RebuildCountersFromCodeStore pass on restart.
+// Mismatched length is a no-op so legacy snapshots fall back to rebuild.
 func (t *Tracker) SetShardCodeCounters(c []ShardCodeCounter) bool {
 	if len(c) != ShardCount {
 		return false
@@ -336,15 +306,8 @@ func (t *Tracker) SetShardCodeCounters(c []ShardCodeCounter) bool {
 	return true
 }
 
-// RebuildCountersFromCodeStore walks the active CodeStore and rebuilds the
-// per-shard aggregate code counters (uniqueCodeHashes, codeBytesTotal,
-// contractsTotal) without touching the store. Used by snapshot.RestoreInto
-// when the writer marked codes as external — the codestore is already on
-// disk, but the in-memory counters in the new tracker start at zero and
-// need to be reconciled against it.
-//
-// Callers must ensure no diffs are being applied concurrently; we take
-// every shard's mu in turn to keep the per-hash sums consistent.
+// RebuildCountersFromCodeStore walks the active CodeStore and rebuilds per-shard
+// aggregate counters. Callers must ensure no diffs are applied concurrently.
 func (t *Tracker) RebuildCountersFromCodeStore() error {
 	if t.codes == nil {
 		return nil
@@ -361,8 +324,7 @@ func (t *Tracker) RebuildCountersFromCodeStore() error {
 	})
 }
 
-// SeedOneSlot applies a single SlotSeed to its owning shard. Records with
-// SlotCount == 0 are skipped (no on-disk presence required).
+// SeedOneSlot applies a single SlotSeed. Zero-count seeds are skipped.
 func (t *Tracker) SeedOneSlot(ss SlotSeed) {
 	if ss.SlotCount == 0 {
 		return
@@ -400,8 +362,7 @@ type Snapshot struct {
 	SlotHistogram [SlotHistogramLength]int64
 }
 
-// SnapshotCounters returns the merged counters across all shards plus the
-// scanner-seeded tier-2 values. O(ShardCount) — never walks any per-key map.
+// SnapshotCounters returns merged counters across all shards. O(ShardCount).
 func (t *Tracker) SnapshotCounters() Snapshot {
 	var agg shardCounters
 	for i := 0; i < ShardCount; i++ {
@@ -449,23 +410,16 @@ func (t *Tracker) SetLastBlock(block int64, root [32]byte) {
 	t.stateRoot.Store(root)
 }
 
-// AdvanceLastBlock monotonically bumps the tracker's notion of the highest
-// observed block number WITHOUT applying any counter deltas. It exists for
-// the tailer's decode-failure path: when a BlockDiffs record can't be
-// decoded the tailer still needs the tracker's LastBlock to advance past
-// the failed block, otherwise sensor consumers (statecomp_lite) deadlock
-// when the failed block is also the chain head.
-//
-// The state root is left untouched — it remains the root of the last
-// successfully applied block, which is the safest pre-existing invariant.
+// AdvanceLastBlock monotonically bumps lastBlock without touching counters.
+// Used by the tailer's decode-failure path so statecomp_lite doesn't stall
+// when a failed block is the current chain head. State root is left untouched.
 func (t *Tracker) AdvanceLastBlock(block int64) {
 	if block > t.lastBlock.Load() {
 		t.lastBlock.Store(block)
 	}
 }
 
-// ExportCodes streams every code-hash entry through fn. Returning false from
-// fn aborts the walk. Memory: O(1) per call.
+// ExportCodes streams every code-hash entry through fn. Returning false aborts.
 func (t *Tracker) ExportCodes(fn func(CodeSeed) bool) error {
 	if t.codes == nil {
 		return nil
@@ -475,7 +429,7 @@ func (t *Tracker) ExportCodes(fn func(CodeSeed) bool) error {
 	})
 }
 
-// ExportSlots streams every slot-count entry through fn. Memory: O(1).
+// ExportSlots streams every slot-count entry through fn. Returning false aborts.
 func (t *Tracker) ExportSlots(fn func(SlotSeed) bool) {
 	for i := 0; i < ShardCount; i++ {
 		sh := t.shards[i]
@@ -490,10 +444,8 @@ func (t *Tracker) ExportSlots(fn func(SlotSeed) bool) {
 	}
 }
 
-// SlotEntryCount returns the total number of (address → slotCount) entries
-// across all shards. O(ShardCount) — sums len() of each shard's slot map
-// under its RLock rather than iterating every entry. Lets the snapshot
-// writer emit the section length prefix without walking the slot map twice.
+// SlotEntryCount returns the total number of slot-map entries across all shards,
+// using O(ShardCount) len() calls rather than full iteration.
 func (t *Tracker) SlotEntryCount() int64 {
 	var n int64
 	for i := 0; i < ShardCount; i++ {
@@ -505,8 +457,7 @@ func (t *Tracker) SlotEntryCount() int64 {
 	return n
 }
 
-// Close releases resources owned by the tracker (notably the CodeStore's disk
-// handles if it is backed by RocksDB). Safe to call multiple times.
+// Close releases tracker resources. Safe to call multiple times.
 func (t *Tracker) Close() error {
 	if t.codes != nil {
 		err := t.codes.Close()

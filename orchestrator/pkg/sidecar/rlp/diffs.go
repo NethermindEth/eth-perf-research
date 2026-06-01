@@ -53,12 +53,11 @@ func (s SlotCountChange) Delta() int64 {
 	return int64(s.NewCount) - int64(s.OldCount)
 }
 
-// BlockDiffRecord is the value half of the BlockDiffs CF entry.
+// BlockDiffRecord is the value half of a BlockDiffs CF entry.
 // AccountTrieBytesDelta / StorageTrieBytesDelta / AccountsAddedDelta are
-// trailing additive fields (NM plugin PR-A wire-format v2). Legacy
-// payloads end after SlotCountChanges; the decoder defaults the trailing
-// trio to 0 in that case. Signed: net new bytes / accounts (negative on
-// SELFDESTRUCT pre-Cancun).
+// trailing additive fields (wire-format v2). Legacy payloads end after
+// SlotCountChanges; missing trailing fields default to 0.
+// Signed: net new bytes/accounts (negative on SELFDESTRUCT pre-Cancun).
 type BlockDiffRecord struct {
 	BlockNumber           uint64
 	StateRoot             [32]byte
@@ -79,12 +78,9 @@ func EncodeBlockDiff(rec BlockDiffRecord) ([]byte, error) {
 	return gethrlp.EncodeToBytes(toWire(rec))
 }
 
-// DecodeBlockDiff parses an RLP-encoded BlockDiffRecord (the CF value).
-// Tolerates legacy payloads (4 fields, schema v1) and PR-A v2 payloads
-// (7 fields with the trailing trio). Missing trailing fields default to 0.
-//
-// Uses rlp.SplitList + rlp.Split which iterate the outer-list items by byte
-// boundary — robust to extra trailing fields without explicit ListEnd.
+// DecodeBlockDiff parses an RLP-encoded BlockDiffRecord.
+// Tolerates legacy payloads (4 fields) and v2 payloads (7 fields).
+// Uses rlp.Split to iterate by byte boundary — robust to extra trailing fields.
 func DecodeBlockDiff(buf []byte) (BlockDiffRecord, error) {
 	listKind, listContent, _, err := gethrlp.Split(buf)
 	if err != nil {
@@ -146,20 +142,15 @@ func DecodeBlockDiff(buf []byte) (BlockDiffRecord, error) {
 	return rec, nil
 }
 
-// decodeUint64Lenient reads an RLP integer payload into a uint64, accepting
-// non-canonical encodings (e.g. 8-byte big-endian regardless of value size,
-// which is how Nethermind's RlpStream.Encode(long) writes negative values
-// as two's-complement). The bit pattern is preserved verbatim so the caller
-// can int64-cast to recover the signed value.
+// decodeUint64Lenient reads an RLP integer into a uint64, accepting non-canonical
+// encodings (e.g. 8-byte big-endian two's-complement as written by Nethermind's
+// RlpStream.Encode(long) for negative values). The caller int64-casts the result.
 //
-// Uses gethrlp.SplitString, NOT Split: go-ethereum's RLP returns Kind=Byte
-// (not String) for single-byte values 0x00-0x7f. A previous version checked
-// `kind != String` and so rejected every delta in [1,127] with "not a
-// string-encoded integer" — those blocks were silently skipped by the
-// tailer, dropping their byte deltas and drifting the incremental tracker
-// away from ground truth (only a full bootstrap rescan corrected it).
-// SplitString accepts both Byte and String content and rejects only List,
-// which is exactly the lenient contract we need.
+// Must use gethrlp.SplitString, NOT Split: go-ethereum returns Kind=Byte (not
+// String) for single-byte values 0x00-0x7f. Checking kind==String would reject
+// every delta in [1,127], silently dropping those byte deltas and drifting
+// the tracker — only a full bootstrap rescan could correct it. SplitString
+// accepts both Byte and String and rejects only List.
 func decodeUint64Lenient(itemRLP []byte) (uint64, error) {
 	content, _, err := gethrlp.SplitString(itemRLP)
 	if err != nil {
@@ -175,8 +166,8 @@ func decodeUint64Lenient(itemRLP []byte) (uint64, error) {
 	return v, nil
 }
 
-// splitAll iterates the items in an RLP list payload and returns their raw
-// (kind+content) encodings as a slice of byte-spans.
+// splitAll iterates items in an RLP list payload and returns their raw
+// encodings as a slice of byte-spans.
 func splitAll(payload []byte) ([][]byte, error) {
 	var out [][]byte
 	for len(payload) > 0 {
@@ -297,8 +288,8 @@ func decodeSlotChangesPayload(itemRLP []byte) ([]SlotCountChange, error) {
 	return out, nil
 }
 
-// --- Internal wire structs (the go-ethereum rlp package needs []byte fields,
-//     not [32]byte arrays, to round-trip canonically). ---
+// Wire structs use []byte rather than [32]byte because go-ethereum's rlp
+// encoder only handles byte slices canonically.
 
 type codeHashChangeWire struct {
 	OldHash     []byte
@@ -390,9 +381,8 @@ func fromWire(w blockDiffWire) (BlockDiffRecord, error) {
 	return rec, nil
 }
 
-// assertHashLen permits a zero-length string (canonical RLP encoding of the
-// all-zero NoCode sentinel) and a full 32-byte hash. Anything else is data
-// corruption — bubble it up so the tailer can refuse to apply.
+// assertHashLen permits zero length (canonical RLP of the all-zero NoCode
+// sentinel) and a full 32-byte hash; anything else is data corruption.
 func assertHashLen(b []byte, name string) error {
 	if len(b) == 0 || len(b) == 32 {
 		return nil
@@ -400,9 +390,7 @@ func assertHashLen(b []byte, name string) error {
 	return fmt.Errorf("%s: invalid length %d, want 0 or 32", name, len(b))
 }
 
-// DecodeBlockDiffStream decodes a single record from an io.Reader. Used by
-// snapshot.Reader on the side; kept here so the canonical RLP layout lives
-// in one file.
+// DecodeBlockDiffStream decodes a single record from an io.Reader.
 func DecodeBlockDiffStream(r io.Reader) (BlockDiffRecord, error) {
 	var w blockDiffWire
 	if err := gethrlp.Decode(r, &w); err != nil {

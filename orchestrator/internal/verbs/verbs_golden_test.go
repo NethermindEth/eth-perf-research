@@ -18,10 +18,8 @@ import (
 // regenerate the vectors after a deliberate verb change.
 var updateGolden = flag.Bool("update", false, "regenerate testdata/golden.json from current verb output")
 
-// goldenEntry is one tx template vector. Since the verbs are now native Go (no
-// Python oracle), golden.json is the corrected, verb-derived expectation set;
-// the differential test pins To/Value/Data/Gas so any later verb regression is
-// caught byte-for-byte.
+// goldenEntry is one tx template vector. golden.json pins To/Value/Data/Gas
+// so any later verb regression is caught byte-for-byte.
 type goldenEntry struct {
 	Verb  string `json:"verb"`
 	Idx   uint64 `json:"idx"`
@@ -31,11 +29,8 @@ type goldenEntry struct {
 	Gas   uint64 `json:"gas"`
 }
 
-// goldenContractRegistry returns the fixed contract registry the golden
-// vectors are pinned against. The addresses are deterministic test constants —
-// the bootstrap phase computes the real CreateAddress values at runtime, but
-// the golden test only needs a stable, known mapping so contract-calling verbs
-// resolve a target.
+// goldenContractRegistry returns a stable contract registry for golden
+// tests so contract-calling verbs can resolve a target address.
 func goldenContractRegistry() *ContractRegistry {
 	reg := NewContractRegistry()
 	reg.Set(ContractStorageSpam, common.HexToAddress("0x00000000000000000000000000000000c0117ac1"))
@@ -45,13 +40,9 @@ func goldenContractRegistry() *ContractRegistry {
 	return reg
 }
 
-// goldenBuildCtx is the fixed build context the golden vectors use: base
-// address = 0, revision = 1, stride = 1<<40, salt base = 0, the well-known lab
-// signer address, and the fixed contract registry.
+// goldenBuildCtx is the fixed build context used by the golden vectors.
 func goldenBuildCtx() BuildCtx {
 	return BuildCtx{
-		ChainID:       big.NewInt(1337),
-		SignerAddr:    common.HexToAddress("0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A"),
 		BaseAddress:   make([]byte, 20),
 		Revision:      1,
 		AddressStride: 1 << 40,
@@ -168,7 +159,6 @@ func TestVerbsGolden(t *testing.T) {
 				t.Fatalf("BuildTx(%d): %v", e.Idx, err)
 			}
 
-			// To: "" => nil pointer (contract creation).
 			wantTo := mustDecodeHex(t, e.To)
 			if len(wantTo) == 0 {
 				if tx.To != nil {
@@ -183,7 +173,6 @@ func TestVerbsGolden(t *testing.T) {
 				}
 			}
 
-			// Value.
 			wantValue := new(big.Int).SetUint64(e.Value)
 			gotValue := tx.Value
 			if gotValue == nil {
@@ -193,13 +182,11 @@ func TestVerbsGolden(t *testing.T) {
 				t.Fatalf("Value: want %s, got %s", wantValue, gotValue)
 			}
 
-			// Data — the byte-equality assertion that matters most.
 			wantData := mustDecodeHex(t, e.Data)
 			if !bytesEqual(tx.Data, wantData) {
 				t.Fatalf("Data mismatch:\n want %x\n  got %x", wantData, tx.Data)
 			}
 
-			// Gas.
 			if tx.Gas != e.Gas {
 				t.Fatalf("Gas: want %d, got %d", e.Gas, tx.Gas)
 			}

@@ -92,7 +92,6 @@ func TestAtomicWrite(t *testing.T) {
 		t.Fatalf("first write: %v", err)
 	}
 
-	// Second write must replace the first atomically (no .new leftover).
 	tr2 := tracker.New()
 	tr2.SetScanCounters(tracker.ScanCounters{BlockNumber: 2, AccountsTotal: 9})
 	if _, err := Write(dir, tr2); err != nil {

@@ -15,9 +15,6 @@ func TestDefaultsMatchHistoricalConstants(t *testing.T) {
 	ck := d.Control
 	checkF(t, "epsilon", ck.Epsilon, 0.5)
 	checkF(t, "tolerance_floor", ck.ToleranceFloor, 0.005)
-	if !ck.BytesPerGasTieBreak {
-		t.Errorf("bytes_per_gas_tie_break = false, want true")
-	}
 	checkF(t, "gas_fill_fraction", ck.GasFillFraction, 0.90)
 	checkF(t, "gas_cap_fraction", ck.GasCapFraction, 0.95)
 	checkI(t, "nmax_hard_ceil", ck.NMaxHardCeil, 64000)
@@ -77,9 +74,6 @@ func TestDefaultsMatchHistoricalConstants(t *testing.T) {
 	}
 
 	r := d.Run
-	if r.TotalBatchBytes != 2*1024*1024 {
-		t.Errorf("total_batch_bytes = %d, want %d", r.TotalBatchBytes, 2*1024*1024)
-	}
 	if r.TotalBatchBytesCap != 7680*1024 {
 		t.Errorf("total_batch_bytes_cap = %d, want %d", r.TotalBatchBytesCap, 7680*1024)
 	}
@@ -171,30 +165,21 @@ run:
 
 // TestLoadEnvOverridesYAML verifies an env var takes precedence over a YAML
 // value, which in turn takes precedence over Defaults().
-func TestLoadEnvOverridesYAML(t *testing.T) {
-	yaml := `
-control:
-  ewma_alpha: 0.25
-`
-	path := writeYAML(t, yaml)
-	t.Setenv("ORCH_EWMA_ALPHA", "0.77")
+func TestLoadEWMAAlpha(t *testing.T) {
+	path := writeYAML(t, "control:\n  ewma_alpha: 0.77\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if cfg.Control.EWMAAlpha != 0.77 {
-		t.Errorf("ewma_alpha = %g, want 0.77 (env must override YAML)", cfg.Control.EWMAAlpha)
+		t.Errorf("ewma_alpha = %g, want 0.77 (YAML overlay)", cfg.Control.EWMAAlpha)
 	}
 }
 
-// TestLoadLookaheadDepth verifies the run.lookahead_depth knob: YAML overlay,
-// the ORCH_LOOKAHEAD_DEPTH env override, and the >= 1 range check.
+// TestLoadLookaheadDepth verifies the run.lookahead_depth knob: YAML overlay
+// and the >= 1 range check.
 func TestLoadLookaheadDepth(t *testing.T) {
-	yaml := `
-run:
-  lookahead_depth: 8
-`
-	path := writeYAML(t, yaml)
+	path := writeYAML(t, "run:\n  lookahead_depth: 8\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -203,23 +188,14 @@ run:
 		t.Errorf("lookahead_depth = %d, want 8 (YAML overlay)", cfg.Run.LookaheadDepth)
 	}
 
-	t.Setenv("ORCH_LOOKAHEAD_DEPTH", "2")
-	cfg, err = Load(path)
-	if err != nil {
-		t.Fatalf("Load with env: %v", err)
-	}
-	if cfg.Run.LookaheadDepth != 2 {
-		t.Errorf("lookahead_depth = %d, want 2 (env overrides YAML)", cfg.Run.LookaheadDepth)
-	}
-
-	t.Setenv("ORCH_LOOKAHEAD_DEPTH", "0")
-	if _, err := Load(path); err == nil {
+	bad := writeYAML(t, "run:\n  lookahead_depth: 0\n")
+	if _, err := Load(bad); err == nil {
 		t.Fatal("expected Load to fail on lookahead_depth=0, got nil")
 	}
 }
 
-// TestLoadEpsilon verifies the control.epsilon knob: YAML overlay, the
-// ORCH_EPSILON env override, and the [0, 1] range check.
+// TestLoadEpsilon verifies the control.epsilon knob: YAML overlay and the
+// [0, 1] range check.
 func TestLoadEpsilon(t *testing.T) {
 	path := writeYAML(t, "control:\n  epsilon: 0.3\n")
 	cfg, err := Load(path)
@@ -230,17 +206,8 @@ func TestLoadEpsilon(t *testing.T) {
 		t.Errorf("epsilon = %g, want 0.3 (YAML overlay)", cfg.Control.Epsilon)
 	}
 
-	t.Setenv("ORCH_EPSILON", "0.8")
-	cfg, err = Load(path)
-	if err != nil {
-		t.Fatalf("Load with env: %v", err)
-	}
-	if cfg.Control.Epsilon != 0.8 {
-		t.Errorf("epsilon = %g, want 0.8 (env overrides YAML)", cfg.Control.Epsilon)
-	}
-
-	t.Setenv("ORCH_EPSILON", "1.5")
-	if _, err := Load(path); err == nil {
+	bad := writeYAML(t, "control:\n  epsilon: 1.5\n")
+	if _, err := Load(bad); err == nil {
 		t.Fatal("expected Load to fail on epsilon=1.5, got nil")
 	}
 }
@@ -255,14 +222,6 @@ control:
 	path := writeYAML(t, yaml)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected Load to fail on gas_fill_fraction=1.5, got nil")
-	}
-}
-
-// TestLoadFailsFastOnBadEnv verifies a malformed env override is a hard error.
-func TestLoadFailsFastOnBadEnv(t *testing.T) {
-	t.Setenv("ORCH_RPC_TIMEOUT_S", "not-a-number")
-	if _, err := Load(""); err == nil {
-		t.Fatal("expected Load to fail on malformed ORCH_RPC_TIMEOUT_S, got nil")
 	}
 }
 

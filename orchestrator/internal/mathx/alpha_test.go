@@ -5,9 +5,21 @@ import (
 	"testing"
 )
 
-// dt is the default adaptive-α tuning, used throughout the tests so each case
-// exercises the historical constant values.
-var dt = DefaultTuning()
+// dt is the adaptive-α tuning used throughout the tests so each case exercises
+// the historical constant values. CoeffBound (1e6) sits ~285x above the largest
+// legitimate reference-F seed (3500) yet far below observed garbage (6.48e13),
+// so it never clamps a real measurement but always catches divergence.
+var dt = Tuning{
+	AMin:           0.02,
+	AMax:           0.30,
+	C:              0.08,
+	K:              25.0,
+	SigmaFloor:     1.0,
+	Eps:            1000.0,
+	SigmaEWMADecay: 0.9,
+	AlphaEWMADecay: 0.7,
+	CoeffBound:     1e6,
+}
 
 func TestUpdateCoeff(t *testing.T) {
 	const tol = 1e-12
@@ -142,13 +154,13 @@ func TestClampCoeff(t *testing.T) {
 		in, want float64
 	}{
 		{0, 0},
-		{3500, 3500},       // largest real reference-F seed — untouched
-		{-180, -180},       // storagerefundtx negative seed — sign kept
-		{cb, cb},           // exactly at bound
-		{cb * 2, cb},       // above bound — clamped
-		{-cb * 2, -cb},     // below -bound — clamped, sign kept
-		{6.48e13, cb},      // the production garbage value
-		{math.Inf(1), 0},   // non-finite collapses to 0
+		{3500, 3500},     // largest real reference-F seed — untouched
+		{-180, -180},     // storagerefundtx negative seed — sign kept
+		{cb, cb},         // exactly at bound
+		{cb * 2, cb},     // above bound — clamped
+		{-cb * 2, -cb},   // below -bound — clamped, sign kept
+		{6.48e13, cb},    // the production garbage value
+		{math.Inf(1), 0}, // non-finite collapses to 0
 		{math.Inf(-1), 0},
 		{math.NaN(), 0},
 	}
@@ -168,7 +180,7 @@ func TestClampSigma(t *testing.T) {
 		{0, sf},  // below floor
 		{-5, sf}, // negative collapses to floor
 		{100, 100},
-		{cb * 3, cb}, // above bound
+		{cb * 3, cb},  // above bound
 		{4.15e14, cb}, // the production garbage σ
 		{math.NaN(), sf},
 		{math.Inf(1), sf},

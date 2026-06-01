@@ -47,9 +47,8 @@ type ContractSpec struct {
 // contractCatalog returns the deterministic, ordered list of contracts the
 // bootstrap phase deploys. Order is fixed so CreateAddress nonce arithmetic is
 // reproducible across runs. The gas burner init code is assembled at call time
-// from the geas templates (gasBurnerCreationCode). deployGas is the resolved
-// RunConfig per-CREATE-tx gas limit (config.Defaults() holds the historical
-// 2_000_000).
+// from the geas templates (gasBurnerCreationCode). deployGas is the per-CREATE-tx
+// gas limit from RunConfig.
 func contractCatalog(deployGas uint64) []ContractSpec {
 	return []ContractSpec{
 		{Name: ContractStorageSpam, InitCode: mustHex(storageSpamInitHex), Gas: deployGas},
@@ -117,8 +116,8 @@ func (r *ContractRegistry) Names() []ContractName {
 //   - gasburnertx      → GasBurner       (geas gas-burner)
 //   - calltx           → StorageSpam     (getStorage — non-reverting touch)
 //   - erc20_bloater    → StorageSpam     (setRandomForGas — bulk storage write;
-//                                         shares StorageSpam with storagespam,
-//                                         it has no dedicated Spamoor contract)
+//     shares StorageSpam with storagespam,
+//     it has no dedicated Spamoor contract)
 //
 // uniswap_swaps is absent: it targets a fixed router placeholder address that
 // the bootstrap deployer cannot CREATE (verbTarget is never called for it).

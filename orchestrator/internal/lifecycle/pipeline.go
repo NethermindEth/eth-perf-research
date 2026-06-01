@@ -13,11 +13,6 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/target"
 )
 
-// The planner idle backoff, dispatch-skip-streak halt and rejection-streak
-// halt were package-level constants here; they now live in
-// config.RunConfig.Run and are read off cfg.Run (the resolved RunConfig
-// carried on Config). config.Defaults() holds the historical values.
-
 // pipeline holds the state shared between the planner and committer goroutines
 // of the depth-1 build-ahead loop.
 //
@@ -101,7 +96,6 @@ func (p *pipeline) planner(
 	consecutiveDispatchSkips := 0
 
 	for {
-		// 1. Respect cancellation, then drain target reloads.
 		select {
 		case <-loopCtx.Done():
 			p.setTerm(terminationSignal)
@@ -125,7 +119,7 @@ func (p *pipeline) planner(
 		default:
 		}
 
-		// 2. Termination predicates — checked BEFORE claiming a batchID so we
+		// Termination predicates — checked BEFORE claiming a batchID so we
 		// never burn an id on a batch we won't dispatch. obs lags by up to one
 		// batch (the committer may not have folded in the latest commit yet);
 		// that is acceptable for these coarse stop conditions.
@@ -147,7 +141,6 @@ func (p *pipeline) planner(
 			return
 		}
 
-		// 3. Pick + build + sign.
 		db, err := dispatchBatch(loopCtx, deps, batchID, obs)
 		if err != nil {
 			if loopCtx.Err() != nil {
@@ -183,8 +176,8 @@ func (p *pipeline) planner(
 			continue
 		}
 
-		// 4. Hand the prepared batch to the committer. The depth-1 buffer lets
-		// the next iteration's build+sign overlap the committer's work.
+		// The depth-1 buffer lets build+sign of the next batch overlap the
+		// committer's work for this one.
 		select {
 		case <-loopCtx.Done():
 			p.setTerm(terminationSignal)

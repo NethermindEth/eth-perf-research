@@ -27,23 +27,23 @@ func newRPCBlockFetcher(client *rpc.Client) *rpcBlockFetcher {
 
 // wireBlock is the full eth_getBlockByNumber view we need to rebuild a payload.
 type wireBlock struct {
-	Number           string          `json:"number"`
-	Hash             string          `json:"hash"`
-	ParentHash       string          `json:"parentHash"`
-	Miner            string          `json:"miner"`
-	StateRoot        string          `json:"stateRoot"`
-	ReceiptsRoot     string          `json:"receiptsRoot"`
-	LogsBloom        string          `json:"logsBloom"`
-	MixHash          string          `json:"mixHash"`
-	GasLimit         string          `json:"gasLimit"`
-	GasUsed          string          `json:"gasUsed"`
-	Timestamp        string          `json:"timestamp"`
-	ExtraData        string          `json:"extraData"`
-	BaseFeePerGas    string          `json:"baseFeePerGas"`
-	BlobGasUsed      string          `json:"blobGasUsed"`
-	ExcessBlobGas    string          `json:"excessBlobGas"`
-	Transactions     []string        `json:"transactions"`
-	Withdrawals      json.RawMessage `json:"withdrawals"`
+	Number        string          `json:"number"`
+	Hash          string          `json:"hash"`
+	ParentHash    string          `json:"parentHash"`
+	Miner         string          `json:"miner"`
+	StateRoot     string          `json:"stateRoot"`
+	ReceiptsRoot  string          `json:"receiptsRoot"`
+	LogsBloom     string          `json:"logsBloom"`
+	MixHash       string          `json:"mixHash"`
+	GasLimit      string          `json:"gasLimit"`
+	GasUsed       string          `json:"gasUsed"`
+	Timestamp     string          `json:"timestamp"`
+	ExtraData     string          `json:"extraData"`
+	BaseFeePerGas string          `json:"baseFeePerGas"`
+	BlobGasUsed   string          `json:"blobGasUsed"`
+	ExcessBlobGas string          `json:"excessBlobGas"`
+	Transactions  []string        `json:"transactions"`
+	Withdrawals   json.RawMessage `json:"withdrawals"`
 }
 
 type wireWithdrawal struct {
@@ -63,6 +63,24 @@ func (f *rpcBlockFetcher) HeadBlock(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("heal: parse head: %w", err)
 	}
 	return n, nil
+}
+
+func (f *rpcBlockFetcher) BlockHashAt(ctx context.Context, blockNumber uint64) (common.Hash, error) {
+	tag := fmt.Sprintf("0x%x", blockNumber)
+	var raw json.RawMessage
+	if err := f.client.Call(ctx, "eth_getBlockByNumber", []any{tag, false}, &raw); err != nil {
+		return common.Hash{}, fmt.Errorf("heal: eth_getBlockByNumber(%d): %w", blockNumber, err)
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return common.Hash{}, fmt.Errorf("heal: block %d not found", blockNumber)
+	}
+	var wb struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(raw, &wb); err != nil {
+		return common.Hash{}, fmt.Errorf("heal: decode block %d hash: %w", blockNumber, err)
+	}
+	return common.HexToHash(wb.Hash), nil
 }
 
 func (f *rpcBlockFetcher) PayloadAt(ctx context.Context, blockNumber uint64) (*payloads.ExecutionPayloadV3, error) {
@@ -97,7 +115,7 @@ func (f *rpcBlockFetcher) PayloadAt(ctx context.Context, blockNumber uint64) (*p
 }
 
 // wireBlockToPayload converts a decoded RPC block + materialised raw txs into
-// a canonical ExecutionPayloadV3. Pure function; no I/O.
+// a canonical ExecutionPayloadV3.
 func wireBlockToPayload(wb *wireBlock, txs [][]byte) (*payloads.ExecutionPayloadV3, error) {
 	number, err := parseHexUint64(wb.Number)
 	if err != nil {

@@ -72,7 +72,7 @@ func OpenRocksCodeStore(dir string) (*RocksCodeStore, error) {
 	}
 
 	wo := grocksdb.NewDefaultWriteOptions()
-	wo.DisableWAL(false) // tail-mode default: durability over speed
+	wo.DisableWAL(false) // tail-mode: keep WAL for durability
 	ro := grocksdb.NewDefaultReadOptions()
 	ro.SetFillCache(true)
 
@@ -85,9 +85,7 @@ func OpenRocksCodeStore(dir string) (*RocksCodeStore, error) {
 		ro:    ro,
 		path:  dir,
 	}
-	// Best-effort initial count via the live-files property. Iterating every
-	// row at open time defeats the point of being on-disk; the count is a
-	// debug aid only.
+	// Best-effort count via the live-files property (debug aid only).
 	if props := db.GetProperty("rocksdb.estimate-num-keys"); props != "" {
 		var n int64
 		_, _ = fmt.Sscanf(props, "%d", &n)
@@ -96,7 +94,6 @@ func OpenRocksCodeStore(dir string) (*RocksCodeStore, error) {
 	return s, nil
 }
 
-// encodeEntry packs (codeSize, refcount) into the 12-byte value layout.
 func encodeCodeEntry(e codeEntry) [12]byte {
 	var buf [12]byte
 	binary.BigEndian.PutUint64(buf[0:8], e.CodeSize)
@@ -114,7 +111,6 @@ func decodeCodeEntry(b []byte) (codeEntry, bool) {
 	}, true
 }
 
-// Get returns the stored entry for hash, or (zero, false) if absent.
 func (s *RocksCodeStore) Get(hash [32]byte) (codeEntry, bool) {
 	slice, err := s.db.Get(s.ro, hash[:])
 	if err != nil {
@@ -127,11 +123,9 @@ func (s *RocksCodeStore) Get(hash [32]byte) (codeEntry, bool) {
 	return decodeCodeEntry(slice.Data())
 }
 
-// Put stores (or overwrites) the entry for hash. On any RocksDB error
-// (disk-full, hardware) the process exits with log.Fatal — silent
-// divergence between the cold tier and in-RAM counters would corrupt
-// every downstream metric. Failing fast lets the orchestrator/operator
-// react before bad numbers propagate.
+// Put stores (or overwrites) the entry for hash. On any RocksDB error the
+// process exits with log.Fatal — silent divergence between disk and RAM
+// counters would corrupt every downstream metric.
 func (s *RocksCodeStore) Put(hash [32]byte, e codeEntry) {
 	v := encodeCodeEntry(e)
 	if err := s.db.Put(s.wo, hash[:], v[:]); err != nil {
@@ -139,18 +133,8 @@ func (s *RocksCodeStore) Put(hash [32]byte, e codeEntry) {
 	}
 }
 
-// MultiGet reads N hashes in one cgo call. The keys are passed as a single
-// [][]byte to grocksdb's MultiGet, which internally parallelises the
-// per-file lookups. At our bloating cadence (thousands of code-hash changes
-// per block) this collapses ~2N cgo crossings into 1 and was the bottleneck
-// identified by the 2026-05-27 pprof (75% of sidecar CPU in cgocall).
-//
-// The intermediate keys slice (and its element pointers into hashes[i][:])
-// is reused across calls via rocksScratchPool — same alloc-avoidance trick
-// as applyCodeChangesBatched, which pprof showed cut sidecar alloc_space
-// by ~11×. The grocksdb MultiGet receives a fresh []byte slice header per
-// element either way; pooling at least eliminates the outer [][]byte
-// reallocation per block.
+// MultiGet reads N hashes in one cgo call, collapsing ~2N crossings into 1.
+// The keys slice is pooled via rocksScratchPool to avoid per-block allocation.
 func (s *RocksCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, present []bool) {
 	results = make([]codeEntry, len(hashes))
 	present = make([]bool, len(hashes))
@@ -166,9 +150,7 @@ func (s *RocksCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, prese
 	sc.keys = keys[:0]
 	releaseRocksScratch(sc)
 	if err != nil {
-		// MultiGet returns at most one error covering the whole batch.
-		// Behave as if every entry were absent — the caller will fall back
-		// to fresh-entry semantics, which is safe.
+		// One error covers the whole batch; treat all as absent (fresh-entry semantics).
 		return results, present
 	}
 	for i, sl := range slices {
@@ -183,11 +165,7 @@ func (s *RocksCodeStore) MultiGet(hashes [][32]byte) (results []codeEntry, prese
 	return results, present
 }
 
-// BatchPut writes all (hash, entry) pairs through one RocksDB WriteBatch.
-// Pairs with MultiGet to bound the per-block cgo cost to two crossings
-// regardless of how many code-hash changes a block carries. The WriteBatch
-// is pooled (Clear()ed on release) so per-block calls don't allocate a
-// fresh grocksdb.WriteBatch every time.
+// BatchPut writes all pairs through one WriteBatch (pooled to avoid per-block allocation).
 func (s *RocksCodeStore) BatchPut(hashes [][32]byte, entries []codeEntry) {
 	if len(hashes) == 0 {
 		return
@@ -203,15 +181,13 @@ func (s *RocksCodeStore) BatchPut(hashes [][32]byte, entries []codeEntry) {
 	}
 }
 
-// Delete removes the entry for hash (no-op if absent). See Put for the
-// fail-fast rationale.
+// Delete removes the entry (no-op if absent). See Put for the fail-fast rationale.
 func (s *RocksCodeStore) Delete(hash [32]byte) {
 	if err := s.db.Delete(s.wo, hash[:]); err != nil {
 		log.Fatalf("codestore delete: %v", err)
 	}
 }
 
-// Iterate calls fn for every entry. Returns the first iterator error, if any.
 func (s *RocksCodeStore) Iterate(fn func(hash [32]byte, e codeEntry) bool) error {
 	ro := grocksdb.NewDefaultReadOptions()
 	ro.SetFillCache(false)
@@ -242,18 +218,11 @@ func (s *RocksCodeStore) Iterate(fn func(hash [32]byte, e codeEntry) bool) error
 // Len returns the approximate entry count.
 func (s *RocksCodeStore) Len() int64 { return s.count.Load() }
 
-// addCount is called by the streaming bootstrap ingest to maintain Len()
-// without an iterator pass.
 func (s *RocksCodeStore) addCount(delta int64) { s.count.Add(delta) }
 
-// SetBulkMode toggles WAL durability on Put/Delete. Bulk mode (WAL disabled)
-// is appropriate during bootstrap merge-join where we write ~1.4 B records
-// in a single pass and a crash means restarting the entire scan anyway. Tail
-// mode must keep WAL enabled so a single missed code-hash change is not
-// silently lost across a SIGKILL.
-//
-// Callers must flush via FlushAfterBulk before switching back to durable
-// mode so any in-memory writes settle to SST.
+// SetBulkMode disables/enables WAL. Disable during bootstrap (crash → full
+// rescan anyway); enable for tail mode (every missed change is permanent).
+// Call FlushAfterBulk before switching back to durable mode.
 func (s *RocksCodeStore) SetBulkMode(bulk bool) {
 	if s == nil || s.wo == nil {
 		return
@@ -261,8 +230,7 @@ func (s *RocksCodeStore) SetBulkMode(bulk bool) {
 	s.wo.DisableWAL(bulk)
 }
 
-// FlushAfterBulk forces any pending writes to flush to SST. Pair with
-// SetBulkMode(false) at the end of bootstrap before tail begins.
+// FlushAfterBulk flushes pending writes to SST. Call at the end of bootstrap.
 func (s *RocksCodeStore) FlushAfterBulk() error {
 	if s == nil || s.db == nil {
 		return nil
@@ -273,7 +241,7 @@ func (s *RocksCodeStore) FlushAfterBulk() error {
 	return s.db.Flush(fo)
 }
 
-// Close releases the underlying DB handle and supporting structures.
+// Close releases the DB handle and supporting structures.
 func (s *RocksCodeStore) Close() error {
 	if s.db != nil {
 		s.db.Close()
@@ -302,9 +270,8 @@ func (s *RocksCodeStore) Close() error {
 	return nil
 }
 
-// BatchIngest provides an efficient bulk-load path used by the bootstrap
-// merge-join. Caller streams entries via Add; the batch flushes to RocksDB
-// every batchSize records and finally on Close.
+// BatchIngest is a bulk-load path: Add streams entries; batch flushes every
+// batchSize records and on Close.
 type BatchIngest struct {
 	store     *RocksCodeStore
 	wb        *grocksdb.WriteBatch
@@ -313,8 +280,7 @@ type BatchIngest struct {
 	added     int64
 }
 
-// NewBatchIngest opens a batched writer. batchSize == 0 picks a sensible
-// default (8192 records ≈ 384 KB per batch given the 44 B record).
+// NewBatchIngest opens a batched writer. batchSize == 0 picks the default (8192).
 func (s *RocksCodeStore) NewBatchIngest(batchSize int) *BatchIngest {
 	if batchSize <= 0 {
 		batchSize = 8192
@@ -326,7 +292,7 @@ func (s *RocksCodeStore) NewBatchIngest(batchSize int) *BatchIngest {
 	}
 }
 
-// Add queues one (hash, entry) Put. Returns an error if a flush fails.
+// Add queues one (hash, entry) Put. Flushes automatically when batchSize is reached.
 func (b *BatchIngest) Add(hash [32]byte, e codeEntry) error {
 	v := encodeCodeEntry(e)
 	b.wb.Put(hash[:], v[:])
@@ -350,8 +316,7 @@ func (b *BatchIngest) flush() error {
 	return nil
 }
 
-// Close flushes any remaining batch and releases resources. Updates the
-// store's Len() with the total added.
+// Close flushes any remaining entries and updates Len().
 func (b *BatchIngest) Close() error {
 	defer b.wb.Destroy()
 	if err := b.flush(); err != nil {
@@ -361,6 +326,5 @@ func (b *BatchIngest) Close() error {
 	return nil
 }
 
-// Added returns the number of entries enqueued via Add (regardless of flush
-// state). Useful for progress reporting from the caller.
+// Added returns the total entries enqueued, regardless of flush state.
 func (b *BatchIngest) Added() int64 { return b.added }

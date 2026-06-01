@@ -1,12 +1,11 @@
 //go:build !nogrocksdb
 
-// Package scanner ports Prototype A's bootstrap scanner into a reusable module.
+// Package scanner implements the bootstrap scanner.
 //
-// The scanner walks the FlatDb's StateNodes + StorageNodes column families
-// once, classifies every node, decodes account leaves, and emits a fully
-// seeded Tracker plus tier-2 scan counters. Memory: O(unique-code-hashes +
-// unique-contracts) — backed by on-disk spill files so the process RSS stays
-// bounded even on the bloatnet's 1.4 TB FlatDb.
+// Walks the FlatDb StateNodes + StorageNodes CFs once, classifies every node,
+// decodes account leaves, and emits a fully seeded Tracker plus tier-2 counters.
+// Memory is O(unique-code-hashes + unique-contracts) — bounded by on-disk spill
+// files regardless of FlatDb size.
 package scanner
 
 import (
@@ -84,10 +83,8 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 	st := newStats()
 	tracker0 := tracker.New()
 
-	// Swap the default in-memory CodeStore for the disk-backed one when the
-	// operator points us at a roomy volume. This is the load-bearing step
-	// for bloatnet bootstraps: 1.4 B codehashes × 12 B (refcount + size)
-	// ≈ 16 GB on-disk, but only a few hundred MB resident at any time.
+	// Use the disk-backed CodeStore when a CodeStoreDir is set: 1.4 B codehashes
+	// × 12 B ≈ 16 GB on-disk but only a few hundred MB resident at any time.
 	var rocksStore *tracker.RocksCodeStore
 	if opts.CodeStoreDir != "" {
 		store, oerr := tracker.OpenRocksCodeStore(opts.CodeStoreDir)
@@ -96,10 +93,8 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 		}
 		tracker0.UseCodeStore(store)
 		rocksStore = store
-		// Disable WAL during the merge-join: a bootstrap crash forces a
-		// rescan anyway, so per-record fsync cost is pure waste here. We
-		// flip durability back on at the end of seed ingest and flush
-		// memtables to SST before tail starts.
+		// Disable WAL during bootstrap: a crash forces a full rescan anyway,
+		// so per-record fsync overhead is wasted. Flip back before tail starts.
 		store.SetBulkMode(true)
 	}
 
@@ -131,23 +126,17 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 	wg.Wait()
 	close(progressDone)
 
-	// Aggregate per-contract slot counts and slot-count histogram from the
-	// disk spill — bounded memory regardless of contract count.
 	hist, contractsWithStorage, slotSeeds, err := aggregateHistogram(addrSpill.path, log)
 	if err != nil {
 		return Result{}, fmt.Errorf("histogram aggregation: %w", err)
 	}
 
-	// Resolve code sizes from the Code DB via streaming dedup. Constant
-	// memory regardless of unique-codehash cardinality — the old in-memory
-	// loadUniqueSorted path OOMed at bloatnet scale (~1.37 B unique entries).
 	if err := codeHashSpill.flush(); err != nil {
 		log.Warn().Err(err).Msg("codehash spill flush")
 	}
 	var codeBytes int64
 	var uniqueCodeHashes int64
 
-	// Stream seeds straight into the tracker; never materialise a []CodeSeed.
 	codeSink := func(cs tracker.CodeSeed) error {
 		tracker0.SeedOneCode(cs)
 		return nil
@@ -178,9 +167,8 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 		}
 		_ = hitsCount
 	} else {
-		// SkipCode (or no CodeDB): we still need to know the unique cardinality
-		// and emit refcount=1 seeds so contractsTotal == accounts with code.
-		// Drain the dedup DB without doing the codeDB merge-join.
+		// No CodeDB: drain dedup to get unique-cardinality and emit
+		// refcount=1 seeds so contractsTotal == accounts with code.
 		dedupDir := opts.DedupDir
 		if dedupDir == "" {
 			dedupDir = filepath.Join(spillDir, "codehash-dedup")
@@ -192,16 +180,12 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 		uniqueCodeHashes = uniq
 	}
 
-	// Slot seeds remain in-memory: cardinality is bounded by unique
-	// contracts (~25 M at 10× state) and the tracker holds them per-shard,
-	// which fits in ~2 GB. If that ceiling ever bites we add a SlotStore
-	// analogous to CodeStore.
+	// Slot seeds are kept in-memory: ~25 M at 10× state fits in ~2 GB.
 	for _, ss := range slotSeeds {
 		tracker0.SeedOneSlot(ss)
 	}
 
-	// Flip the codestore back to durable mode and force-flush so the cold
-	// tier is on-disk before the tracker is exposed to the tailer.
+	// Re-enable WAL and flush so all entries are on-disk before tail starts.
 	if rocksStore != nil {
 		rocksStore.SetBulkMode(false)
 		if ferr := rocksStore.FlushAfterBulk(); ferr != nil {
@@ -210,7 +194,7 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 	}
 
 	counters := tracker.ScanCounters{
-		BlockNumber:           0, // metadata-derived block number TBD
+		BlockNumber:           0,
 		AccountsTotal:         st.accountsTotal.Load(),
 		EmptyAccounts:         st.emptyAccounts.Load(),
 		AccountTrieBranches:   st.accountFull.Load(),
@@ -224,10 +208,7 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 		SlotHistogram:         hist[:],
 	}
 	_ = contractsWithStorage
-	_ = codeBytes // counters carried by per-shard refcount × CodeSize
-
-	// Best-effort: stamp metadata before applying counters so the seeded
-	// codeBytesTotal reflects bytes the code-DB returned.
+	_ = codeBytes // carried by per-shard refcount × CodeSize
 	tracker0.SetScanCounters(counters)
 	_ = uniqueCodeHashes
 
@@ -241,24 +222,18 @@ func Run(ctx context.Context, h *db.Handle, opts Options, log zerolog.Logger) (R
 	}, nil
 }
 
-// --- internal helpers ---
-
 type stats struct {
-	accountFull      atomic.Int64
-	accountShort     atomic.Int64
-	accountValue     atomic.Int64
-	accountBytes     atomic.Int64
-	accountsTotal    atomic.Int64
-	contractsTotal   atomic.Int64
-	emptyAccounts    atomic.Int64
-	accountMalformed atomic.Int64
+	accountFull   atomic.Int64
+	accountShort  atomic.Int64
+	accountValue  atomic.Int64
+	accountBytes  atomic.Int64
+	accountsTotal atomic.Int64
+	emptyAccounts atomic.Int64
 
-	storageFull       atomic.Int64
-	storageShort      atomic.Int64
-	storageValue      atomic.Int64
-	storageBytes      atomic.Int64
-	storageSlotsTotal atomic.Int64
-	storageNoAttrib   atomic.Int64
+	storageFull  atomic.Int64
+	storageShort atomic.Int64
+	storageValue atomic.Int64
+	storageBytes atomic.Int64
 }
 
 func newStats() *stats { return &stats{} }
@@ -282,15 +257,14 @@ func runProgress(ctx context.Context, st *stats, log zerolog.Logger, done <-chan
 				Int64("account_nodes", accNodes).
 				Int64("storage_nodes", stoNodes).
 				Int64("accounts", st.accountsTotal.Load()).
-				Int64("contracts", st.contractsTotal.Load()).
-				Int64("slots", st.storageSlotsTotal.Load()).
 				Msg("scanner progress")
 		}
 	}
 }
 
 func scanAccountCF(ctx context.Context, gdb *grocksdb.DB, cf *grocksdb.ColumnFamilyHandle,
-	st *stats, codeHashes *spillFile) {
+	st *stats, codeHashes *spillFile,
+) {
 	ro := db.NewScanReadOptions()
 	defer ro.Destroy()
 	it := gdb.NewIteratorCF(ro, cf)
@@ -313,26 +287,22 @@ func scanAccountCF(ctx context.Context, gdb *grocksdb.DB, cf *grocksdb.ColumnFam
 			st.accountValue.Add(1)
 			st.accountsTotal.Add(1)
 			info, ok := rlppkg.DecodeAccount(leafVal)
-			if !ok {
-				st.accountMalformed.Add(1)
-			} else {
+			if ok {
 				if info.IsEmpty {
 					st.emptyAccounts.Add(1)
 				}
 				if info.HasCode {
-					st.contractsTotal.Add(1)
 					_ = codeHashes.appendHash(info.CodeHash)
 				}
 			}
-		default:
-			st.accountMalformed.Add(1)
 		}
 		v.Free()
 	}
 }
 
 func scanStorageCF(ctx context.Context, gdb *grocksdb.DB, cf *grocksdb.ColumnFamilyHandle,
-	st *stats, addrs *spillFile) {
+	st *stats, addrs *spillFile,
+) {
 	ro := db.NewScanReadOptions()
 	defer ro.Destroy()
 	it := gdb.NewIteratorCF(ro, cf)
@@ -355,16 +325,13 @@ func scanStorageCF(ctx context.Context, gdb *grocksdb.DB, cf *grocksdb.ColumnFam
 			st.storageShort.Add(1)
 		case rlppkg.NodeLeaf:
 			st.storageValue.Add(1)
-			st.storageSlotsTotal.Add(1)
 			if len(key) == FlatInTrieStorageKeyLen {
-				// Reconstruct the truncated 20-byte address hash and pad to
-				// the [32]byte form the tracker expects.
+				// FlatDb storage key is a truncated address hash; reconstruct
+				// the 32-byte form the tracker expects.
 				var padded [32]byte
 				copy(padded[0:4], key[0:4])
 				copy(padded[4:20], key[12:28])
 				_ = addrs.appendHash(padded)
-			} else {
-				st.storageNoAttrib.Add(1)
 			}
 		}
 		k.Free()
@@ -372,13 +339,10 @@ func scanStorageCF(ctx context.Context, gdb *grocksdb.DB, cf *grocksdb.ColumnFam
 	}
 }
 
-// --- spill file (32-byte records) ---
-
 type spillFile struct {
-	f     *os.File
-	buf   []byte
-	path  string
-	count int64
+	f    *os.File
+	buf  []byte
+	path string
 }
 
 func openSpillFile(dir, prefix string) (*spillFile, error) {
@@ -399,7 +363,6 @@ func (s *spillFile) appendHash(h [32]byte) error {
 		s.buf = s.buf[:0]
 	}
 	s.buf = append(s.buf, h[:]...)
-	s.count++
 	return nil
 }
 
@@ -422,12 +385,11 @@ func (s *spillFile) cleanup() {
 	_ = os.Remove(s.path)
 }
 
-// aggregateHistogram reads the per-slot address spill, computes the bucketed
-// histogram of contracts-by-slot-count, and produces the slot seeds the
-// tracker needs. Memory is bounded by the count of unique addresses per
-// nibble-pass (16 passes over the spill).
+// aggregateHistogram reads the address spill and builds the contracts-by-slot-count
+// histogram in 16 nibble-keyed passes so memory is bounded per pass.
 func aggregateHistogram(path string, log zerolog.Logger) (
-	hist [16]int64, contractsWithStorage int64, seeds []tracker.SlotSeed, err error) {
+	hist [16]int64, contractsWithStorage int64, seeds []tracker.SlotSeed, err error,
+) {
 	f, err := os.Open(path)
 	if err != nil {
 		return hist, 0, nil, err
@@ -487,8 +449,6 @@ func log2Bucket(slotCount int64) int {
 	return bucket
 }
 
-// buildCodeOpts builds the RocksDB Options + Cache used to open the Code DB
-// for read-only iteration during the streaming dedup merge-join.
 func buildCodeOpts(blockCacheMiB int, useMmap bool) (*grocksdb.Options, *grocksdb.Cache) {
 	if blockCacheMiB <= 0 {
 		blockCacheMiB = 128
@@ -504,17 +464,10 @@ func buildCodeOpts(blockCacheMiB int, useMmap bool) (*grocksdb.Options, *grocksd
 	return opts, cache
 }
 
-// drainDedupSeedsStreaming streams the codehash spill through the dedup
-// RocksDB and pushes one CodeSeed (refcount=1, codeSize=0) per unique
-// codehash to sink as soon as it is read from the dedup DB iterator. Used
-// by the --skip-code path so the tracker still observes the correct
-// uniqueCodeHashes cardinality even without the Code DB lookup.
-//
-// Memory is bounded by the dedup DB's write-buffer × maxWriteBufferNumber,
-// not by the number of unique entries. No []CodeSeed slice is ever
-// materialised — the earlier slice-building wrapper was removed because
-// at bloatnet scale (~1.37 B unique codehashes) the slice alone took
-// ~60 GB and OOM'd the bootstrap.
+// drainDedupSeedsStreaming streams the codehash spill through a dedup RocksDB
+// and pushes one CodeSeed (refcount=1, codeSize=0) per unique codehash to sink.
+// Used by the --skip-code path so uniqueCodeHashes cardinality stays correct.
+// Memory is bounded by write-buffer × maxWriteBufferNumber.
 func drainDedupSeedsStreaming(
 	spillPath, dedupDir string,
 	log zerolog.Logger,

@@ -86,7 +86,6 @@ func Write(dir string, t *tracker.Tracker) (string, error) {
 	if err := writeFile(tmp, t); err != nil {
 		return "", err
 	}
-	// fsync the temp file's directory entry before rename.
 	if err := os.Rename(tmp, final); err != nil {
 		_ = os.Remove(tmp)
 		return "", fmt.Errorf("rename snapshot: %w", err)
@@ -122,12 +121,8 @@ func writeFile(path string, t *tracker.Tracker) (err error) {
 		return fmt.Errorf("write magic: %w", err)
 	}
 
-	// SpeedFastest: snapshot.bin is used only for restart rehydration, never
-	// shipped or stored long-term, so the ~30 % size penalty vs SpeedDefault
-	// is worth trading for the ~3× encoding-CPU win. The 2026-05-27 sidecar
-	// pprof had 34 % CPU in zstd.(*doubleFastEncoder).Encode at SpeedDefault;
-	// SpeedFastest uses the cheaper fastEncoder. Accuracy is unaffected —
-	// zstd is lossless at every level.
+	// SpeedFastest: snapshot.bin is never shipped long-term; the ~30% size
+	// penalty is worth the ~3× CPU reduction for this restart-only blob.
 	enc, err := zstd.NewWriter(bw, zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		return fmt.Errorf("zstd writer: %w", err)
@@ -177,16 +172,9 @@ func writeFile(path string, t *tracker.Tracker) (err error) {
 }
 
 func writeShards(w io.Writer, t *tracker.Tracker) error {
-	// Streaming write: never materialise a []CodeSeed or []SlotSeed. The
-	// section format is unchanged (varuint count + N×record); we just emit
-	// records as the tracker yields them.
-	//
-	// Code section is skipped entirely when the active CodeStore is disk-
-	// backed: the on-disk store IS the authoritative copy of every code
-	// entry, and rewriting all 1.4 B records into snapshot.bin every 30 s
-	// would saturate disk I/O for no recoverability gain. The reader spots
-	// the CodesExternal header bit and pulls counters straight from the
-	// reopened store instead.
+	// When CodeStore is disk-backed (CodesExternal), skip serialising code
+	// records: 1.4 B entries × 30 s writes would saturate I/O for no gain.
+	// The reader pulls counters from the reopened store via the header bit.
 	external := t.CodesAreExternal()
 	var codeCount int64
 	if !external {
@@ -250,11 +238,8 @@ func writeShards(w io.Writer, t *tracker.Tracker) error {
 	return writeByte(w, secEnd)
 }
 
-// countCodes walks the active CodeStore once just to count entries. For the
-// in-memory store this is O(N) hash-map iteration; for the rocks store this
-// is one full iterator pass over the SST files (typically ~5 s per billion
-// entries because we only need keys). Used by writeShards to emit the
-// section length up-front so readers can pre-size their decode buffers.
+// countCodes iterates the CodeStore once to count entries. Used by writeShards
+// to emit the section length up-front so readers can pre-size decode buffers.
 func countCodes(t *tracker.Tracker) (int64, error) {
 	var n int64
 	err := t.ExportCodes(func(tracker.CodeSeed) bool {

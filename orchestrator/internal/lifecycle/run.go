@@ -15,7 +15,6 @@ package lifecycle
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
@@ -63,14 +63,9 @@ type Config struct {
 
 	// AllowNonZeroFreshHead allows an empty-journal startup against a chain
 	// whose head block != 0. Used by re-baseline runs where the snapshot was
-	// imported from another node. Currently informational; the strict guard
-	// was removed in the v19 lifecycle rewrite — kept on Config so cmd flags
-	// still bind cleanly.
+	// imported from another node. Threaded into resolveStartupMode, where it
+	// ORs with the ORCH_ALLOW_NON_ZERO_FRESH_HEAD env var.
 	AllowNonZeroFreshHead bool
-
-	// DebugPick is a convenience mirror of Run.Control.DebugPick. cmd-side
-	// flag binding writes both fields; the controller reads Run.Control.
-	DebugPick bool
 
 	// Run is the resolved RunConfig. If left zero-valued, Run() resolves it
 	// from TargetYAMLPath + environment via config.Load.
@@ -93,7 +88,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	rc := cfg.Run
 
-	// 1. Acquire lock.
 	lk, err := lock.Acquire(cfg.StateDir)
 	if err != nil {
 		return err
@@ -104,7 +98,6 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	// 2. Load target + reference-F.
 	rawTarget, ctrlTarget, err := loadTarget(cfg.TargetYAMLPath)
 	if err != nil {
 		return err
@@ -114,13 +107,11 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	// 3. Chain identity.
 	chainIdentity, err := computeChainIdentity(cfg.GenesisSHA256, rawTarget.SHA256)
 	if err != nil {
 		return err
 	}
 
-	// 4. RPC client + chain id + head.
 	rpcOpts := []rpc.Option{}
 	if cfg.JWTPath != "" {
 		rpcOpts = append(rpcOpts, rpc.WithJWTFile(cfg.JWTPath))
@@ -157,8 +148,7 @@ func Run(ctx context.Context, cfg Config) error {
 		"gas_limit", head.GasLimit,
 	)
 
-	// 5. Decide fresh vs resume.
-	decision, err := resolveStartupMode(ctx, cfg.StateDir, rpcCli, rc.Run.ResumeReorgTolerance)
+	decision, err := resolveStartupMode(ctx, cfg.StateDir, rpcCli, rc.Run.ResumeReorgTolerance, cfg.AllowNonZeroFreshHead)
 	if err != nil {
 		return err
 	}
@@ -170,7 +160,6 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 
-	// 6. Build signer.
 	deployKey := cfg.DeployPrivateKey
 	if deployKey == "" {
 		deployKey = os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")
@@ -183,7 +172,6 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("lifecycle: signer: %w", err)
 	}
 
-	// 7a. Metrics registry + HTTP server.
 	metricsReg := metrics.New()
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metricsReg.Handler())
@@ -211,9 +199,7 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.Info("lifecycle: metrics server stopped")
 	}()
 
-	// 7. Open sensor, journal writer, payloads writer. Transaction building
-	// is in-process (internal/verbs) — no builder subprocess pool. Every sensor
-	// poll/deadline value comes from the resolved RunConfig.
+	// Transaction building is in-process (internal/verbs) — no builder subprocess pool.
 	sens := sensor.New(sensorRPC,
 		sensor.WithPollInterval(time.Duration(rc.Run.SensorPollIntervalMS)*time.Millisecond),
 		sensor.WithDeadline(time.Duration(rc.Run.SensorDeadlineMS)*time.Millisecond),
@@ -231,10 +217,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	defer pw.Close()
 
-	// 8. Build controller state, hydrating from tail on resume. On resume the
-	// controller's F / σ / α are reconstructed from the journal tail so the
-	// controller does not re-explore the verb mix from scratch every restart;
-	// if the tail carries no coefficients the State keeps its cold-start seed.
+	// On resume the controller's F / σ / α are reconstructed from the journal
+	// tail so the controller does not re-explore the verb mix from scratch every
+	// restart; if the tail carries no coefficients the State keeps its cold-start seed.
 	state := controller.NewState(rc, cfg.Verbs, refF, chainIdentity)
 	if decision.Mode == modeResume && decision.TailRecord != nil {
 		hr := hydrateStateFromTail(state, decision.TailRecord)
@@ -252,41 +237,22 @@ func Run(ctx context.Context, cfg Config) error {
 		slog.Info("lifecycle: controller cold-started from reference-F seed")
 	}
 
-	// 9. Facade context. Base address from $ORCH_BASE_ADDRESS (hex), else zeros.
-	// Initial nonce from $ORCH_INITIAL_ADDRESS_CURSOR override, else queried from RPC.
-	facadeCtx := buildFacadeContext(rawTarget, chainID, head.GasLimit, rc.Run.AddressStride)
-	facadeCtx.SignerAddr = signr.Address()
-	if hex := strings.TrimPrefix(os.Getenv("ORCH_BASE_ADDRESS"), "0x"); hex != "" {
-		b, err := decodeBaseAddress(hex)
-		if err != nil {
-			return fmt.Errorf("lifecycle: ORCH_BASE_ADDRESS: %w", err)
-		}
-		facadeCtx.BaseAddress = b
+	facadeCtx := buildFacadeContext(chainID, head.GasLimit, rc.Run.AddressStride)
+	// The chain's master-signer nonce is authoritative for the address cursor
+	// and survives EL-client crashes / reorgs. Derive it from the chain for both
+	// fresh and resume — a resumed run after an EL restart must pick up the
+	// rolled-back nonce, not the (stale) journal cursor.
+	masterNonce, err := rpcCli.TransactionCount(ctx, signr.Address())
+	if err != nil {
+		return fmt.Errorf("lifecycle: query master nonce: %w", err)
 	}
-	if raw := os.Getenv("ORCH_INITIAL_ADDRESS_CURSOR"); raw != "" {
-		v, err := strconv.ParseUint(raw, 10, 64)
-		if err != nil {
-			return fmt.Errorf("lifecycle: ORCH_INITIAL_ADDRESS_CURSOR: %w", err)
-		}
-		facadeCtx.AddressCursor.Store(v)
-	} else {
-		// The chain's master-signer nonce is authoritative for the address
-		// cursor and survives EL-client crashes / reorgs. Derive it from the
-		// chain for both fresh and resume — a resumed run after an EL restart
-		// must pick up the rolled-back nonce, not the (stale) journal cursor.
-		n, err := rpcCli.TransactionCount(ctx, signr.Address())
-		if err != nil {
-			return fmt.Errorf("lifecycle: query master nonce: %w", err)
-		}
-		facadeCtx.AddressCursor.Store(n)
-		slog.Info("lifecycle: master nonce primed from RPC",
-			"address", signr.Address().Hex(), "nonce", n, "mode", decision.Mode.String())
-	}
+	facadeCtx.AddressCursor.Store(masterNonce)
+	slog.Info("lifecycle: master nonce primed from RPC",
+		"address", signr.Address().Hex(), "nonce", masterNonce, "mode", decision.Mode.String())
 
-	// 10. Initial observation from sensor. Loop until the plugin returns valid
-	// trie stats — during a bootstrap scan, state-comp returns all zeros. The
-	// cycle is sensor → scenario → bloat → sensor, so a blind start (zero stats)
-	// would feed garbage into the controller. Wait for the plugin instead.
+	// Loop until the plugin returns valid trie stats — during a bootstrap scan,
+	// state-comp returns all zeros. A blind start (zero stats) would feed garbage
+	// into the controller.
 	initialSnap, err := waitForValidSensor(ctx, sens,
 		time.Duration(rc.Run.SensorPollGapMS)*time.Millisecond,
 		time.Duration(rc.Run.SensorLogIntervalS)*time.Second)
@@ -297,15 +263,12 @@ func Run(ctx context.Context, cfg Config) error {
 		AccountTrieBytes: initialSnap.AccountTrieBytes,
 		StorageTrieBytes: initialSnap.StorageTrieBytes,
 		CodeBytesTotal:   initialSnap.CodeBytesTotal,
-		BlockNumber:      initialSnap.BlockNumber,
 	}
 
-	// 10a. Seed initial ObservedFlatBytes gauges.
 	metricsReg.ObservedFlatBytes.WithLabelValues("accounts").Set(float64(currentObs.AccountTrieBytes))
 	metricsReg.ObservedFlatBytes.WithLabelValues("storage").Set(float64(currentObs.StorageTrieBytes))
 	metricsReg.ObservedFlatBytes.WithLabelValues("code").Set(float64(currentObs.CodeBytesTotal))
 
-	// 11. Manifest.
 	sessionID := newSessionID()
 	metricsReg.SessionID.WithLabelValues(sessionID).Set(1)
 	manifestPath := cfg.ManifestPath
@@ -317,26 +280,24 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("lifecycle: initial manifest save: %w", err)
 	}
 
-	// 12. Target watcher.
 	targetCh := make(chan *target.Target, 1)
 	watcher, err := target.NewWatcher(ctx, cfg.TargetYAMLPath,
 		time.Duration(rc.Run.TargetWatchDebounceMS)*time.Millisecond,
 		func(t *target.Target) {
-		select {
-		case targetCh <- t:
-		default:
-		}
-	})
+			select {
+			case targetCh <- t:
+			default:
+			}
+		})
 	if err != nil {
 		slog.Warn("lifecycle: target watcher disabled", "err", err)
 	} else {
 		defer watcher.Close()
 	}
 
-	// 13. Prime fee policy once synchronously so the first batch has a valid
-	// max-fee/tip pair before the planner loop runs, then start the background
-	// refresher (single RPC per tick).
-	if _, err := refreshFeePolicy(ctx, rpcCli, facadeCtx, rc.Cost.EthPerGasTarget, rc.Cost.PriorityTipWei); err != nil {
+	// Prime fee policy once synchronously so the first batch has a valid
+	// max-fee/tip pair before the planner loop runs.
+	if err := refreshFeePolicy(ctx, rpcCli, facadeCtx, rc.Cost.EthPerGasTarget, rc.Cost.PriorityTipWei); err != nil {
 		return fmt.Errorf("lifecycle: prime fee policy: %w", err)
 	}
 	feeCtx, feeCancel := context.WithCancel(ctx)
@@ -354,19 +315,22 @@ func Run(ctx context.Context, cfg Config) error {
 		feeWG.Wait()
 	}()
 
-	// 13a. Bootstrap deploy phase. Deploy (or, on resume, re-verify) the
-	// Spamoor scenario contracts the run's verbs require, then thread the
-	// registry into the facade context so contract-calling verbs target the
-	// deployed contracts instead of dead placeholder addresses. The fail-loud
-	// guard inside bootstrapContracts halts the run if any required contract
-	// has no code — the orchestrator must never silently no-op again.
+	// Shared monotonic block-timestamp counter. Seeded with the current chain
+	// head's timestamp so the first orchestrator block's ts > head.ts (Geth and
+	// the normal Engine API require strictly-increasing block timestamps; the
+	// NoValidation testing_commitBlockV1 path does not, which is the bug this
+	// guards against). Bootstrap and the main loop share this one counter.
+	lastBlockTS := new(atomic.Uint64)
+	lastBlockTS.Store(head.Timestamp)
+
 	contractRegistry, err := bootstrapContracts(ctx, &bootstrapDeps{
-		rpc:        rpcCli,
-		signer:     signr,
-		facadeCtx:  facadeCtx,
-		stateDir:   cfg.StateDir,
-		chainID:    chainID,
-		deployGas:  rc.Run.ContractDeployGas,
+		rpc:         rpcCli,
+		signer:      signr,
+		facadeCtx:   facadeCtx,
+		stateDir:    cfg.StateDir,
+		chainID:     chainID,
+		deployGas:   rc.Run.ContractDeployGas,
+		lastBlockTS: lastBlockTS,
 	}, cfg.Verbs)
 	if err != nil {
 		return fmt.Errorf("lifecycle: bootstrap: %w", err)
@@ -389,7 +353,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	state.SetEligibleVerbs(eligibility.eligible)
 
-	// 14. Hot loop.
 	dispatcher := facade.New(signr)
 	deps := &batchDeps{
 		rpc:          rpcCli,
@@ -406,11 +369,11 @@ func Run(ctx context.Context, cfg Config) error {
 		targetDigest: targetSha256Bytes(rawTarget.SHA256),
 		metricsReg:   metricsReg,
 		cfg:          rc,
+		lastBlockTS:  lastBlockTS,
 	}
 
-	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, currentObs, targetCh, rawTarget, mf)
+	termination, finalBlock := runLoop(ctx, cfg, deps, &ctrlTarget, currentObs, targetCh, mf)
 
-	// 16. Finalise manifest.
 	finishISO := time.Now().UTC().Format(time.RFC3339Nano)
 	mf.FinishedAtISO = finishISO
 	mf.Terminated = termination
@@ -464,36 +427,16 @@ func defaultVerbs() []string {
 	}
 }
 
-// decodeBaseAddress parses a 20-byte hex string (0x optional, padded left with zeros).
-func decodeBaseAddress(s string) ([]byte, error) {
-	s = strings.TrimPrefix(s, "0x")
-	if len(s)%2 == 1 {
-		s = "0" + s
-	}
-	raw, err := hex.DecodeString(s)
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > 20 {
-		return nil, fmt.Errorf("base address > 20 bytes (got %d)", len(raw))
-	}
-	out := make([]byte, 20)
-	copy(out[20-len(raw):], raw)
-	return out, nil
-}
-
 // buildFacadeContext creates a fresh facade.Context for this run.
 // AddressCursor / SaltCursor / BlockGasLimit are zero-valued atomics; callers
 // must use the typed Set / Reserve methods to seed/advance them. addressStride
 // is the resolved RunConfig value.
-func buildFacadeContext(t *target.Target, chainID, gasLimit, addressStride uint64) *facade.Context {
+func buildFacadeContext(chainID, gasLimit, addressStride uint64) *facade.Context {
 	c := &facade.Context{
-		BaseAddress:    make([]byte, 20),
-		Revision:       0,
-		AddressStride:  addressStride,
-		ChainID:        chainID,
-		GasLimit:       gasLimit,
-		VerbGasFactors: map[string]float64{},
+		BaseAddress:   make([]byte, 20),
+		Revision:      0,
+		AddressStride: addressStride,
+		ChainID:       chainID,
 	}
 	c.SetBlockGasLimit(gasLimit)
 	return c
@@ -518,7 +461,6 @@ func runLoop(
 	ctrlTarget **controller.Target,
 	currentObs *controller.Observation,
 	targetCh chan *target.Target,
-	rawTarget *target.Target,
 	mf *manifest.Manifest,
 ) (string, *rpc.BlockHeader) {
 	// Depth-1 build-ahead pipeline: planner Picks/builds/signs batch N+1 while
@@ -568,7 +510,7 @@ func refreshTarget(t *target.Target) (*target.Target, *controller.Target, error)
 	if t == nil {
 		return nil, nil, errors.New("lifecycle: nil target")
 	}
-	return t, shareTargetFromTarget(t.Shares, t.TotalBytes, t.SHA256), nil
+	return t, shareTargetFromTarget(t.Shares, t.TotalBytes), nil
 }
 
 // isPartialAcceptanceErr matches NM's testing_commitBlockV1 partial-acceptance

@@ -54,7 +54,6 @@ func TestStatecompLiteSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("result not a map: %v", resp)
 	}
-	// Verify the C#-compatible field names are present.
 	required := []string{
 		"chainHeadBlockNumber", "incrementalBlockNumber", "blocksBehind",
 		"diffsSinceBaseline", "hasIncrementalBaseline", "incrementalEnabled",
@@ -104,17 +103,9 @@ func TestStatecompGetIncludesHistogram(t *testing.T) {
 	}
 }
 
-// TestStatecompGetMatchesLegacyNMShape pins the wire schema the orchestrator's
-// internal/sensor/sensor.go reads: a nested `trieStats` object carrying the
-// three counters the sensor populates Snapshot from, plus a top-level
-// `blockNumber`. If anything below diverges, sensor.go's parseSnapshot will
-// silently start returning zeros — so this test is the regression guard for
-// the v19 Track-D wire-compat fix.
-//
-// Cross-check anchor: Nethermind.StateComposition.Rpc.StateCompositionRpcModule
-// (C# side) returns a StateCompositionReport whose JSON shape is
-// `{ blockNumber, trieStats: { accountTrieBytes, storageTrieBytes,
-// codeBytesTotal, ... } }`. The Go sidecar must serialise the same shape.
+// TestStatecompGetMatchesLegacyNMShape pins the wire schema: nested `trieStats`
+// plus top-level `blockNumber`, matching the C# StateCompositionReport shape.
+// Divergence causes sensor.go's parseSnapshot to silently return zeros.
 func TestStatecompGetMatchesLegacyNMShape(t *testing.T) {
 	tr := newTestTracker(t)
 	s := New(tr, "127.0.0.1:0", zerolog.Nop())
@@ -124,7 +115,6 @@ func TestStatecompGetMatchesLegacyNMShape(t *testing.T) {
 	}
 	res := resp["result"].(map[string]any)
 
-	// Top-level blockNumber is required by sensor.parseSnapshot.
 	if _, ok := res["blockNumber"]; !ok {
 		t.Fatalf("missing top-level blockNumber: %v", res)
 	}
@@ -132,7 +122,6 @@ func TestStatecompGetMatchesLegacyNMShape(t *testing.T) {
 		t.Errorf("blockNumber = %v, want 42", res["blockNumber"])
 	}
 
-	// trieStats nested object — the sensor reads three keys off this.
 	trieStats, ok := res["trieStats"].(map[string]any)
 	if !ok {
 		t.Fatalf("missing nested trieStats object: %v", res["trieStats"])
@@ -152,7 +141,6 @@ func TestStatecompGetMatchesLegacyNMShape(t *testing.T) {
 		t.Errorf("trieStats.codeBytesTotal = %v, want 500", trieStats["codeBytesTotal"])
 	}
 
-	// Full CumulativeTrieStats parity with C# record fields.
 	for _, k := range []string{
 		"accountsTotal", "contractsTotal", "storageSlotsTotal",
 		"accountTrieBranches", "accountTrieExtensions", "accountTrieLeaves",
@@ -181,7 +169,6 @@ func TestStatecompHealthLagAndUptime(t *testing.T) {
 }
 
 func TestServerEndToEndOverTCP(t *testing.T) {
-	// Spin up an actual TCP listener to assert wire compatibility.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

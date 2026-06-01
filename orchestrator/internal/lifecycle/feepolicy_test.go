@@ -166,7 +166,7 @@ func TestRefreshFeePolicyFixedEthPerGas(t *testing.T) {
 	f := &fakeFetcher{baseFee: big.NewInt(1), gasLimit: 12_345_678}
 	fctx := &facade.Context{BaseAddress: make([]byte, 20)}
 
-	if _, err := refreshFeePolicy(context.Background(), f, fctx, testEthPerGas, testTipWei); err != nil {
+	if err := refreshFeePolicy(context.Background(), f, fctx, testEthPerGas, testTipWei); err != nil {
 		t.Fatalf("refreshFeePolicy: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestRefreshFeePolicyFloorsOnBaseFeeSpike(t *testing.T) {
 	f := &fakeFetcher{baseFee: spike, gasLimit: 12_345_678}
 	fctx := &facade.Context{BaseAddress: make([]byte, 20)}
 
-	if _, err := refreshFeePolicy(context.Background(), f, fctx, testEthPerGas, testTipWei); err != nil {
+	if err := refreshFeePolicy(context.Background(), f, fctx, testEthPerGas, testTipWei); err != nil {
 		t.Fatalf("refreshFeePolicy: %v", err)
 	}
 

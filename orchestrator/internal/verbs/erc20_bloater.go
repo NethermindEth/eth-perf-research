@@ -6,30 +6,24 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// erc20_bloater tuning constants. The verb has no canonical Spamoor scenario
-// contract: it shares StorageSpam with the storagespam verb. Both verbs bloat
-// the storage trie via setRandomForGas(uint256 gasLimit, uint256 txid); the
-// only difference is erc20_bloater burns a far larger gas budget per tx, so
-// each call writes a wider slot window — matching the "bloater" intent of
-// bulk state growth.
+// erc20_bloater tuning constants. The verb shares StorageSpam with the
+// storagespam verb — both call setRandomForGas(uint256 gasLimit, uint256 txid)
+// — but burns a far larger gas budget per tx so each call writes a wider slot
+// window.
 const (
 	// erc20BloaterGas is the exec-tx gas limit, matching the EIP-7825 per-tx
-	// cap used by the EELS _BLOAT_DEFAULT_GAS.
+	// cap.
 	erc20BloaterGas = 16_700_000
-	// erc20BloaterGasToBurn is the gasLimit argument passed to
-	// setRandomForGas: the exec-tx limit minus 50_000 headroom, mirroring the
-	// storagespam verb's gas_units + 50_000 sizing. It is intentionally much
-	// larger than storageSpamGasToBurn so each erc20_bloater tx writes more
-	// storage slots than a plain storagespam tx.
+	// erc20BloaterGasToBurn is the gasLimit argument passed to setRandomForGas:
+	// exec-tx limit minus 50_000 headroom (same sizing as storageSpamExecGas).
+	// Intentionally much larger than storageSpamGasToBurn so each call writes
+	// more storage slots than a plain storagespam tx.
 	erc20BloaterGasToBurn = erc20BloaterGas - 50_000
 )
 
 // verbErc20Bloater builds a setRandomForGas(uint256 gasLimit, uint256 txid)
-// call against the deployed StorageSpam contract. erc20_bloater has no
-// dedicated Spamoor scenario contract; it reuses StorageSpam — the real
-// storage bloater — and simply burns a larger gas budget per tx so each call
-// grows more of the storage trie than the storagespam verb. The per-tx index
-// is threaded into the txid word so every tx writes a distinct slot window.
+// call against the deployed StorageSpam contract. The per-tx index is threaded
+// into the txid word so every tx writes a distinct slot window.
 type verbErc20Bloater struct{}
 
 func (verbErc20Bloater) Name() string { return "erc20_bloater" }

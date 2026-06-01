@@ -165,7 +165,7 @@ func TestEmptyFile(t *testing.T) {
 func TestTruncatedLength(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "truncated.bin")
 	// Write only 2 bytes of the 4-byte length header.
-	if err := os.WriteFile(path, []byte{0x00, 0x01}, 0644); err != nil {
+	if err := os.WriteFile(path, []byte{0x00, 0x01}, 0o644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -28,10 +28,10 @@ type headBlockFetcher interface {
 // target, floored at baseFee+tip so a base-fee spike above target can never
 // cause an underpriced-tx rejection. This is pure cost control; it is invisible
 // to verb selection.
-func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, ethPerGasTarget, priorityTipWei int64) (*rpc.BlockHeader, error) {
+func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facade.Context, ethPerGasTarget, priorityTipWei int64) error {
 	head, err := fetcher.BlockByNumber(ctx, -1)
 	if err != nil {
-		return nil, fmt.Errorf("lifecycle: head for fee policy: %w", err)
+		return fmt.Errorf("lifecycle: head for fee policy: %w", err)
 	}
 	baseFee := head.BaseFee
 	if baseFee == nil {
@@ -47,7 +47,7 @@ func refreshFeePolicy(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 	if head.GasLimit > 0 {
 		fctx.SetBlockGasLimit(head.GasLimit)
 	}
-	return head, nil
+	return nil
 }
 
 // runFeePolicyLoop ticks at interval and refreshes the facade fee policy from
@@ -71,7 +71,7 @@ func runFeePolicyLoop(ctx context.Context, fetcher headBlockFetcher, fctx *facad
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-tick.C:
-			if _, err := refreshFeePolicy(ctx, fetcher, fctx, ethPerGasTarget, priorityTipWei); err != nil {
+			if err := refreshFeePolicy(ctx, fetcher, fctx, ethPerGasTarget, priorityTipWei); err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}

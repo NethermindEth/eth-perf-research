@@ -20,9 +20,7 @@ const testHexKey = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f
 // fakeBuilder is a test verb with a configurable per-tx gas and an optional
 // build error. It substitutes the native verb registry in dispatcher tests.
 type fakeBuilder struct {
-	// txGas is the Gas field placed on every built template.
-	txGas uint64
-	// errMsg, if non-empty, makes BuildTx return an error.
+	txGas  uint64
 	errMsg string
 }
 
@@ -55,12 +53,10 @@ func newTestDispatcher(t *testing.T, fb *fakeBuilder) (*Dispatcher, *Context) {
 		Signer: s,
 	}
 	c := &Context{
-		BaseAddress:    make([]byte, 20),
-		Revision:       1,
-		AddressStride:  1 << 40,
-		ChainID:        1,
-		GasLimit:       30_000_000,
-		VerbGasFactors: map[string]float64{},
+		BaseAddress:   make([]byte, 20),
+		Revision:      1,
+		AddressStride: 1 << 40,
+		ChainID:       1,
 	}
 	// BlockGasLimit defaults to zero (no gas cap unless tests override).
 	c.SetFeePolicy(new(big.Int).SetUint64(2e9), new(big.Int).SetUint64(1e9))
@@ -278,8 +274,6 @@ func TestDispatch_ReserveAddressesConcurrent(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		<-done
 	}
-	// All starts must be unique multiples of block and cover 0..goroutines*perGoroutine*block
-	// (modulo ordering across goroutines).
 	seen := make(map[uint64]bool, goroutines*perGoroutine)
 	for _, slice := range got {
 		for _, v := range slice {

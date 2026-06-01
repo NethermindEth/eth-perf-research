@@ -13,10 +13,6 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
-// The poll-interval and deadline defaults used to be package-level constants
-// here; they now live in config.RunConfig.Run (sensor_poll_interval_ms /
-// sensor_deadline_ms) and are passed in by the lifecycle via WithPollInterval /
-// WithDeadline. New still applies a built-in fallback if an option is omitted.
 const (
 	fallbackPollInterval = 100 * time.Millisecond
 	fallbackDeadline     = 2 * time.Second
@@ -90,8 +86,6 @@ func New(c *rpc.Client, opts ...SensorOption) *Sensor {
 //
 // The caller's ctx is respected: cancellation returns immediately with
 // ctx.Err() wrapped.
-//
-// Read is a thin wrapper over ReadAfter: it waits for blockNumber > expected-1.
 func (s *Sensor) Read(ctx context.Context, expected uint64) (*Snapshot, error) {
 	if expected >= 1 {
 		return s.ReadAfter(ctx, expected-1)
@@ -118,7 +112,6 @@ func (s *Sensor) PollOnce(ctx context.Context) (*Snapshot, error) {
 	return s.poll(ctx)
 }
 
-// readForward polls until blockNumber > floor or the deadline fires.
 func (s *Sensor) readForward(ctx context.Context, floor uint64) (*Snapshot, error) {
 	deadline := time.Now().Add(s.deadline)
 	dctx, cancel := context.WithDeadline(ctx, deadline)
@@ -150,8 +143,6 @@ func (s *Sensor) readForward(ctx context.Context, floor uint64) (*Snapshot, erro
 	}
 }
 
-// readAtLeast polls until blockNumber >= minimum (used by Read(ctx, 0) to
-// return the first successful poll regardless of block number).
 func (s *Sensor) readAtLeast(ctx context.Context, minimum uint64) (*Snapshot, error) {
 	deadline := time.Now().Add(s.deadline)
 	dctx, cancel := context.WithDeadline(ctx, deadline)
@@ -183,7 +174,6 @@ func (s *Sensor) readAtLeast(ctx context.Context, minimum uint64) (*Snapshot, er
 	}
 }
 
-// poll calls statecomp_get once and parses the response into a Snapshot.
 func (s *Sensor) poll(ctx context.Context) (*Snapshot, error) {
 	raw, err := s.client.StatecompGet(ctx)
 	if err != nil {

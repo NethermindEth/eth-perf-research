@@ -37,7 +37,6 @@ func assertSignedRLP(t *testing.T, raw []byte, idx int) {
 	if err := tx.UnmarshalBinary(raw); err != nil {
 		t.Fatalf("tx[%d]: UnmarshalBinary: %v", idx, err)
 	}
-	// Re-marshal and verify hash round-trips.
 	raw2, err := tx.MarshalBinary()
 	if err != nil {
 		t.Fatalf("tx[%d]: MarshalBinary: %v", idx, err)
@@ -108,7 +107,7 @@ func TestSignBatch_CtxCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel before calling
+	cancel()
 
 	txs := make([]*orchpb.TxIn, 100)
 	for i := range txs {
@@ -131,7 +130,6 @@ func TestNew_InvalidKey(t *testing.T) {
 }
 
 func TestNew_WithPrefix(t *testing.T) {
-	// Ensure 0x prefix is stripped correctly.
 	_, err := New(testHexKey)
 	if err != nil {
 		t.Fatalf("0x-prefixed key rejected: %v", err)

@@ -46,10 +46,8 @@ func (s *Signer) Address() common.Address {
 //
 // chainID and the corresponding LatestSignerForChainID(chainID) are batch
 // constants — all txs in one Dispatch share the same ChainID — so both are
-// computed once here and reused across every signOne. Pre-fix, signOne
-// allocated a fresh big.Int chainID and a fresh signer per tx; eliding those
-// removes two big-Int allocations from each of ~7-10k signOne calls per
-// batch.
+// computed once here and reused across every signOne, avoiding two big.Int
+// allocations per signOne call.
 func (s *Signer) SignBatch(ctx context.Context, txs []*orchpb.TxIn) ([][]byte, error) {
 	if len(txs) == 0 {
 		return nil, nil
@@ -85,8 +83,8 @@ func (s *Signer) SignBatch(ctx context.Context, txs []*orchpb.TxIn) ([][]byte, e
 }
 
 // signOne converts a protobuf TxIn to a signed EIP-1559 transaction and
-// returns the canonical type-2 prefixed RLP bytes. chainID/signer are
-// batch-constants supplied by the caller.
+// returns the canonical type-2 prefixed RLP bytes. chainID and signer are
+// batch constants supplied by the caller.
 func signOne(tx *orchpb.TxIn, key *ecdsa.PrivateKey, chainID *big.Int, signer types.Signer) ([]byte, error) {
 	var to *common.Address
 	switch len(tx.To) {

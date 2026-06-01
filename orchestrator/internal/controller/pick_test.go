@@ -546,7 +546,7 @@ func TestComputeGasBasedMaxIgnoresMislearnedLowEWMA(t *testing.T) {
 	s := newTestState(verbs, ref, identity)
 
 	for i := 0; i < int(testVerbStatsColdStartN)+5; i++ {
-		s.UpdateVerbStats(verb, 50_000, 1, 1500.0)
+		s.UpdateVerbStats(verb, 50_000, 1)
 	}
 	vs := s.GetVerbStats(verb)
 	if vs == nil || vs.Samples < testVerbStatsColdStartN {

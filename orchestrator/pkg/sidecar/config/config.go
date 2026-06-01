@@ -1,4 +1,4 @@
-// Package config carries the runtime configuration for the v19 sidecar.
+// Package config carries the runtime configuration for the sidecar.
 //
 // All knobs are exposed as flags on the entry binary; this package exists so
 // individual sub-packages can be unit-tested without re-parsing flag.CommandLine.
@@ -27,7 +27,6 @@ const (
 var ValidModes = []Mode{ModeBootstrap, ModeTail, ModeServe, ModeAll}
 
 // Config is the immutable settings struct passed to every module.
-// Per coding-style: builders return new instances; never mutate after Build.
 type Config struct {
 	Mode Mode
 
@@ -71,7 +70,6 @@ type Config struct {
 	// Tracker memory cap (MiB). Hot tier is capped here; rest spills to mmap.
 	TrackerHotMiB int
 
-	// LogLevel: debug, info, warn, error.
 	LogLevel string
 }
 
@@ -89,8 +87,6 @@ func Defaults() Config {
 		SnapshotDir:    "/var/lib/sidecar",
 		// 30s: snapshot writer is O(hot-tier-size) — not state-size — so
 		// cold-start cost (~3h bootstrap) dominates loss-on-crash math.
-		// Halving the default (was 60s) halves expected post-crash rescan
-		// work at negligible disk/CPU overhead.
 		SnapshotInterval:  30,
 		RPCListenAddr:     "0.0.0.0:9001",
 		MetricsListenAddr: "0.0.0.0:9090",
@@ -129,7 +125,6 @@ func FromFlags(args []string) (Config, error) {
 	fs.IntVar(&c.TrackerHotMiB, "tracker-hot-mb", c.TrackerHotMiB, "tracker hot-tier RAM ceiling (MiB)")
 	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "debug|info|warn|error")
 
-	// One-shot snapshot path override used by bootstrap/serve.
 	var outPath string
 	fs.StringVar(&outPath, "out", "", "bootstrap mode: output JSON path; serve mode: snapshot blob path")
 
@@ -140,19 +135,14 @@ func FromFlags(args []string) (Config, error) {
 
 	c.Mode = Mode(strings.ToLower(modeStr))
 	if outPath != "" {
-		// In bootstrap we treat --out as a snapshot directory override (relative
-		// paths supported). Phase 1 keeps it simple: --out implies a one-shot
-		// JSON dump alongside the snapshot blob.
 		c.SnapshotDir = filepath.Dir(outPath)
 		if c.SnapshotDir == "." {
 			c.SnapshotDir = "."
 		}
 	}
-	// If the operator did not pass --blockdiffs-db explicitly, infer it from
-	// the FlatDb path. The Nethermind StateDiffsWriter plugin writes
-	// blockDiffs as a sibling RocksDB at <datadir>/blockDiffs, where
-	// <datadir> is the parent of the FlatDb root. Inferring lets the typical
-	// "--db <datadir>/state/FlatDb" invocation work without a second flag.
+	// Infer blockDiffs path from the FlatDb path when not set explicitly.
+	// The NM StateDiffsWriter plugin writes to <datadir>/blockDiffs, where
+	// <datadir> is the parent of the FlatDb root.
 	if c.BlockDiffsDB == "" && c.DBPath != "" {
 		c.BlockDiffsDB = InferBlockDiffsDBPath(c.DBPath)
 	}
@@ -163,14 +153,11 @@ func FromFlags(args []string) (Config, error) {
 // BlockDiffs RocksDB given the FlatDb path. The NM StateDiffsWriter plugin
 // writes to "<datadir>/blockDiffs", where <datadir> is the parent of the
 // FlatDb root (e.g. "<datadir>/state/FlatDb" → "<datadir>/blockDiffs").
-// Falls back to "<dbPath parent>/blockDiffs" otherwise.
 func InferBlockDiffsDBPath(dbPath string) string {
 	if dbPath == "" {
 		return ""
 	}
 	cleaned := filepath.Clean(dbPath)
-	// Walk up until we find a "state" directory; the directory above it is
-	// the NM datadir. If no "state" segment exists, default to the parent.
 	dir := cleaned
 	for {
 		parent := filepath.Dir(dir)
@@ -217,12 +204,10 @@ func (c Config) isKnownMode() bool {
 	return false
 }
 
-// NeedsDB indicates whether the mode requires the FlatDb path.
 func (c Config) NeedsDB() bool {
 	return c.Mode == ModeBootstrap || c.Mode == ModeTail || c.Mode == ModeAll
 }
 
-// NeedsSnapshotDir indicates whether the mode requires the snapshot directory.
 func (c Config) NeedsSnapshotDir() bool {
 	return c.Mode == ModeServe || c.Mode == ModeTail || c.Mode == ModeAll
 }

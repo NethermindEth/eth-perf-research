@@ -16,7 +16,7 @@ import (
 // second goroutine pulls FSnapshot in a tight loop *without* any lock, the
 // way batch.go::buildRecord now does. Under `go test -race` the run must
 // produce zero race-detector hits: the snapshot reads each VerbRow's
-// [3]float64 slot independently, so a torn read against an Apply mutator
+// AxisVec slot independently, so a torn read against an Apply mutator
 // resolves to either the pre- or post-Apply value per slot — both valid —
 // and the Rows slice header is fixed-length post-NewState so there is no
 // slice-growth race either.
@@ -177,7 +177,6 @@ func BenchmarkPickPreA8Baseline(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		// Five scratch allocs the old Pick made every call.
 		allocSink.fMat = [3][]float64{make([]float64, n), make([]float64, n), make([]float64, n)}
 		allocSink.score = make([]float64, n)
 		allocSink.maxNTxs = make([]float64, n)

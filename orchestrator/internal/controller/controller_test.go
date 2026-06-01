@@ -61,7 +61,6 @@ func makeTarget(totalBytes int64) *Target {
 			AxisCode:     1.0 / 3.0,
 		},
 		TotalBytes: totalBytes,
-		SHA256Hex:  "deadbeef",
 	}
 }
 
@@ -195,10 +194,7 @@ func TestInstabilityTripsAfterMaxTrips(t *testing.T) {
 	var identity [32]byte
 	s := newTestState(verbs, ref, identity)
 
-	// Pre-size the window.
-	s.initOvershootWindow(window)
-
-	// Force overshootFilled = window and set maxTrips entries to true.
+	s.overshootWindow = make([]bool, window)
 	for i := 0; i < window; i++ {
 		s.overshootWindow[i] = i < maxTrips
 	}
@@ -227,7 +223,7 @@ func TestInstabilityNotTripBeforeWindowFull(t *testing.T) {
 	ref := makeRef(verbs, 1.0)
 	var identity [32]byte
 	s := newTestState(verbs, ref, identity)
-	s.initOvershootWindow(window)
+	s.overshootWindow = make([]bool, window)
 	// filled < window — should never trip.
 	s.overshootFilled = window - 1
 	for i := range s.overshootWindow {
@@ -288,7 +284,6 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 	ref := makeRef(verbs, 10.0)
 	var identity [32]byte
 	s := newTestState(verbs, ref, identity)
-	// Seed with known value.
 	s.AvgTxRLP["v"] = 1000.0
 
 	plan := &BatchPlan{Verb: "v", DeadlineBytes: 10000, Mix: map[string]float64{"v": 1.0}}
@@ -304,7 +299,6 @@ func TestAvgTxRLPEWMA(t *testing.T) {
 		t.Fatalf("AvgTxRLP EWMA: got %v, want %v", s.AvgTxRLP["v"], want)
 	}
 
-	// Now observed_avg = 2000, prev = 1000.
 	s.AvgTxRLP["v"] = 1000.0
 	if _, err := s.Apply(pre, post, plan, 1, 2000, 0); err != nil {
 		t.Fatal(err)
@@ -420,7 +414,6 @@ func TestNewStateSeedsNonZeroFromDefaultReferenceF(t *testing.T) {
 	}
 	identity := [32]byte{}
 
-	// referencef.DefaultReferenceF is exactly what loadReferenceF("") returns.
 	s := newTestState(verbs, referencef.DefaultReferenceF(), identity)
 
 	if got := s.GetF("eoatx", AxisAccounts); got != 160 {

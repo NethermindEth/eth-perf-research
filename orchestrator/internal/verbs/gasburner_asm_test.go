@@ -21,11 +21,6 @@ func TestGasBurnerCreationCode(t *testing.T) {
 		t.Fatalf("@.start operand: want %d, got %d", wantInitLen, code[1])
 	}
 
-	// The worker segment is everything after the init code.
-	if got := gasBurnerRuntimeLen(); got != len(code)-wantInitLen {
-		t.Fatalf("runtime len: helper says %d, code says %d", got, len(code)-wantInitLen)
-	}
-
 	// The deployed worker must contain a JUMPDEST at the exit (9) and loop
 	// (19) offsets the jumps target.
 	worker := code[wantInitLen:]

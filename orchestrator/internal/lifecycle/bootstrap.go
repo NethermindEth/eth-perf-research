@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"time"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/crypto"
 
@@ -25,6 +25,10 @@ type bootstrapDeps struct {
 	stateDir  string
 	chainID   uint64
 	deployGas uint64
+	// lastBlockTS is the SAME shared monotonic counter the main loop uses, so
+	// the bootstrap deploy block and the first main-loop block do not collide
+	// on timestamp. See batchDeps.lastBlockTS and nextBlockTS.
+	lastBlockTS *atomic.Uint64
 }
 
 // bootstrapContracts ensures every Spamoor scenario contract the run's verbs
@@ -157,7 +161,7 @@ func deployContracts(ctx context.Context, deps *bootstrapDeps, required []verbs.
 		return nil, fmt.Errorf("lifecycle: bootstrap: sign deploy batch: %w", err)
 	}
 
-	blockTS := uint64(time.Now().Unix())
+	blockTS := nextBlockTS(deps.lastBlockTS)
 	blockHash, err := deps.rpc.TestingCommitBlockV1(ctx, raws, blockTS)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: bootstrap: commit deploy block: %w", err)
@@ -208,4 +212,3 @@ func assertVerbContractsHaveCode(ctx context.Context, cli *rpc.Client, reg *verb
 	}
 	return assertContractsHaveCode(ctx, cli, reg, required)
 }
-

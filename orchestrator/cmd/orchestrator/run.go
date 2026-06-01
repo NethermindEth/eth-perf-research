@@ -14,26 +14,25 @@ import (
 )
 
 type runFlags struct {
-	rpcURL                 string
-	stateDir               string
-	targetYAML             string
-	genesisSHA256          string
-	pluginGitSHA           string
-	nethermindCommitSHA    string
-	dotnetRuntimeMajor     string
-	jwtPath                string
-	sensorRPCURL           string
-	referenceFPath         string
-	manifestPath           string
-	maxBatches             int
-	targetTotalBytesOver   int64
-	deployPrivateKey       string
-	metricsAddr            string
-	overshootThreshold     float64
-	useRatioScoring        bool
-	epsilon                float64
-	allowNonZeroFreshHead  bool
-	debugPick              bool
+	rpcURL                string
+	stateDir              string
+	targetYAML            string
+	genesisSHA256         string
+	pluginGitSHA          string
+	nethermindCommitSHA   string
+	dotnetRuntimeMajor    string
+	jwtPath               string
+	sensorRPCURL          string
+	referenceFPath        string
+	manifestPath          string
+	maxBatches            int
+	deployPrivateKey      string
+	metricsAddr           string
+	overshootThreshold    float64
+	useRatioScoring       bool
+	epsilon               float64
+	allowNonZeroFreshHead bool
+	debugPick             bool
 }
 
 func newRunCmd() *cobra.Command {
@@ -57,7 +56,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.referenceFPath, "reference-f", "", "Path to REFERENCE_F YAML")
 	cmd.Flags().StringVar(&f.manifestPath, "manifest", "", "Manifest output path (defaults to state-dir/run-manifest.json)")
 	cmd.Flags().IntVar(&f.maxBatches, "max-batches", 0, "Stop after N batches (0=unbounded)")
-	cmd.Flags().Int64Var(&f.targetTotalBytesOver, "target-total-bytes-override", 0, "Override target.total_bytes")
 	cmd.Flags().StringVar(&f.deployPrivateKey, "deploy-private-key", "", "Hex private key (0x-prefix optional); also reads ORCH_DEPLOY_PRIVATE_KEY")
 	cmd.Flags().StringVar(&f.metricsAddr, "metrics-addr", ":9101", "TCP address for the Prometheus /metrics endpoint")
 	cmd.Flags().Float64Var(&f.overshootThreshold, "overshoot-threshold", 0, "Override controller overshoot trip ratio (0=use target.yaml/default)")
@@ -84,9 +82,6 @@ func (f runFlags) validate() error {
 	return nil
 }
 
-// runOrchestrator resolves the RunConfig (config.Load: built-in defaults →
-// target.yaml control:/cost:/run: blocks → env overrides), applies any
-// explicitly-set CLI flag overrides on top, then hands off to lifecycle.Run.
 func runOrchestrator(ctx context.Context, cmd *cobra.Command, f runFlags) error {
 	if err := f.validate(); err != nil {
 		return err
@@ -96,9 +91,8 @@ func runOrchestrator(ctx context.Context, cmd *cobra.Command, f runFlags) error 
 	if err != nil {
 		return err
 	}
-	// CLI flags are the highest-precedence override, but only when the user
-	// actually set them — an unset flag must not clobber a target.yaml / env
-	// value with the cobra default.
+	// CLI flags override config only when explicitly set — unset flags must not
+	// clobber target.yaml values with cobra defaults.
 	if cmd.Flags().Changed("metrics-addr") {
 		rc.Run.MetricsAddr = f.metricsAddr
 	}
@@ -130,7 +124,6 @@ func runOrchestrator(ctx context.Context, cmd *cobra.Command, f runFlags) error 
 		MaxBatches:            f.maxBatches,
 		DeployPrivateKey:      cmp.Or(f.deployPrivateKey, os.Getenv("ORCH_DEPLOY_PRIVATE_KEY")),
 		AllowNonZeroFreshHead: f.allowNonZeroFreshHead,
-		DebugPick:             f.debugPick,
 		Verbs:                 resolveVerbs(),
 		PluginGitSHA:          f.pluginGitSHA,
 		NethermindCommitSHA:   f.nethermindCommitSHA,

@@ -13,10 +13,8 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-// ExecutionPayloadV3 is the canonical Engine API ExecutionPayloadV3 carrier.
-// It aliases go-ethereum's engine.ExecutableData so we share the canonical
-// type across orchestrator, replay, and heal-payloads. The on-disk wire
-// format below (rlpPayload + 4-byte BE length prefix) is preserved for
+// ExecutionPayloadV3 aliases go-ethereum's engine.ExecutableData. The on-disk
+// wire format (rlpPayload + 4-byte BE length prefix) is preserved for
 // byte-equal compatibility with existing payloads.rlp artifacts.
 type ExecutionPayloadV3 = engine.ExecutableData
 
@@ -121,9 +119,8 @@ type Writer struct {
 	f *os.File
 }
 
-// OpenWriter opens (or creates) path for append-only writing.
 func OpenWriter(path string) (*Writer, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("payloads: open writer: %w", err)
 	}
@@ -148,7 +145,6 @@ func (w *Writer) Append(p *ExecutionPayloadV3) error {
 	return nil
 }
 
-// Sync fsyncs the underlying file, durably persisting any buffered Appends.
 func (w *Writer) Sync() error {
 	if err := w.f.Sync(); err != nil {
 		return fmt.Errorf("payloads: fsync: %w", err)
@@ -164,12 +160,92 @@ func (w *Writer) Close() error {
 	return w.f.Close()
 }
 
+// AppendRaw writes a pre-framed record (4-byte length prefix + body) verbatim.
+// Used to copy an existing frame byte-for-byte without re-encoding.
+func (w *Writer) AppendRaw(frame []byte) error {
+	if _, err := w.f.Write(frame); err != nil {
+		return fmt.Errorf("payloads: write raw frame: %w", err)
+	}
+	return nil
+}
+
+// FrameRef locates one frame within a payloads file: its block number, the
+// byte offset of its 4-byte length header, and the total frame length
+// (4 + body).
+type FrameRef struct {
+	Number uint64
+	Offset int64
+	Length int
+}
+
+// ScanIndex walks path and returns one FrameRef per frame in file order,
+// decoding only the block number from each body. Cheap relative to a full
+// decode but still reads the whole file sequentially.
+func ScanIndex(path string) ([]FrameRef, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("payloads: scan open: %w", err)
+	}
+	defer f.Close()
+
+	var (
+		refs   []FrameRef
+		offset int64
+		hdr    [4]byte
+	)
+	for {
+		_, err := io.ReadFull(f, hdr[:])
+		if err == io.EOF {
+			return refs, nil
+		}
+		if err == io.ErrUnexpectedEOF {
+			return nil, fmt.Errorf("payloads: scan: truncated length header at offset %d", offset)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("payloads: scan read header: %w", err)
+		}
+		size := binary.BigEndian.Uint32(hdr[:])
+		body := make([]byte, size)
+		if _, err := io.ReadFull(f, body); err != nil {
+			return nil, fmt.Errorf("payloads: scan: truncated body at offset %d: %w", offset, err)
+		}
+		var rp rlpPayload
+		if err := rlp.DecodeBytes(body, &rp); err != nil {
+			return nil, fmt.Errorf("payloads: scan rlp decode at offset %d: %w", offset, err)
+		}
+		refs = append(refs, FrameRef{Number: rp.BlockNumber, Offset: offset, Length: 4 + int(size)})
+		offset += int64(4 + int(size))
+	}
+}
+
+func ReadFrameAt(f io.ReaderAt, ref FrameRef) ([]byte, error) {
+	buf := make([]byte, ref.Length)
+	if _, err := f.ReadAt(buf, ref.Offset); err != nil {
+		return nil, fmt.Errorf("payloads: read frame at %d: %w", ref.Offset, err)
+	}
+	return buf, nil
+}
+
+func DecodeFrame(frame []byte) (*ExecutionPayloadV3, error) {
+	if len(frame) < 4 {
+		return nil, fmt.Errorf("payloads: frame too short: %d bytes", len(frame))
+	}
+	size := binary.BigEndian.Uint32(frame[:4])
+	if len(frame) != 4+int(size) {
+		return nil, fmt.Errorf("payloads: frame length mismatch: header=%d actual=%d", size, len(frame)-4)
+	}
+	var rp rlpPayload
+	if err := rlp.DecodeBytes(frame[4:], &rp); err != nil {
+		return nil, fmt.Errorf("payloads: decode frame: %w", err)
+	}
+	return fromRLP(&rp)
+}
+
 // Reader reads length-prefixed RLP payloads sequentially from a file.
 type Reader struct {
 	f *os.File
 }
 
-// OpenReader opens path for reading.
 func OpenReader(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -208,7 +284,6 @@ func (r *Reader) Next() (*ExecutionPayloadV3, error) {
 	return fromRLP(&rp)
 }
 
-// Close closes the underlying file.
 func (r *Reader) Close() error {
 	return r.f.Close()
 }

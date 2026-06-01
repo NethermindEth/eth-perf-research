@@ -7,9 +7,6 @@ import (
 	"strings"
 )
 
-// The gas-fill / gas-cap fractions and the nMax hard ceiling live in
-// config.RunConfig.Control and are read off the State's cfg.
-//
 // computeGasBasedMax returns the number of txs of `verb` that fill
 // `GasFillFraction × blockGasLimit`. This is the primary batch-size bound;
 // the byte budget is only a secondary clamp. Returns math.MaxInt32 when
@@ -94,35 +91,31 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	scratch.reset(s.Rows)
 
 	current := obsToVec(obs)
-	cum := current[0] + current[1] + current[2]
+	cum := current.Sum()
 	targetTotal := float64(tgt.TotalBytes)
 	progress := math.Min(cum/math.Max(targetTotal, 1.0), 1.0)
 
-	// desired per-axis at current progress
-	desired := [3]float64{
-		progress * tgt.ByteTarget(AxisAccounts),
-		progress * tgt.ByteTarget(AxisStorage),
-		progress * tgt.ByteTarget(AxisCode),
-	}
-	residual := [3]float64{
-		desired[0] - current[0],
-		desired[1] - current[1],
-		desired[2] - current[2],
+	// Per-axis full target, desired-at-progress, and residual. Built by axis
+	// iteration so the accounts/storage/code order lives only in the Axis enum.
+	var desired, residual, targetFull AxisVec
+	for a := Axis(0); a < numAxes; a++ {
+		targetFull[a] = tgt.ByteTarget(a)
+		desired[a] = progress * targetFull[a]
+		residual[a] = desired[a] - current[a]
 	}
 
 	// endgame is retained only as a debug/termination signal; the per-term clip
 	// in the score loop below is what neutralises over-served axes for scoring.
-	targetFull := [3]float64{
-		tgt.ByteTarget(AxisAccounts),
-		tgt.ByteTarget(AxisStorage),
-		tgt.ByteTarget(AxisCode),
+	endgame := false
+	if cum >= targetTotal {
+		for a := Axis(0); a < numAxes; a++ {
+			if current[a] < targetFull[a] {
+				endgame = true
+				break
+			}
+		}
 	}
-	endgame := cum >= targetTotal && (current[0] < targetFull[0] || current[1] < targetFull[1] || current[2] < targetFull[2])
 
-	// Per-verb score: F-row dotted with the relative-gap residual, with one
-	// monotone-bloating rule applied per (verb, axis) term. See historical
-	// docstring in apply.go; the scoring math itself is unchanged from the
-	// pre-A8 version, only the data source is now position-indexed.
 	fMat := scratch.fMat
 	score := scratch.score
 
@@ -130,17 +123,12 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	// debug logger. They are populated only when UseRatioScoring is on and
 	// the trajectory fallback to the legacy formula is not taken; when the
 	// legacy formula runs they stay zero.
-	var deficit, ratioWeight [3]float64
+	var deficit, ratioWeight AxisVec
 	useRatio := s.UseRatioScoring
 	ratioFellBack := false
 	if useRatio {
-		targetShares := [3]float64{
-			tgt.Shares[AxisAccounts],
-			tgt.Shares[AxisStorage],
-			tgt.Shares[AxisCode],
-		}
-		for a := 0; a < 3; a++ {
-			expected := targetShares[a] * cum
+		for a := Axis(0); a < numAxes; a++ {
+			expected := tgt.Shares[a] * cum
 			if expected > targetFull[a] {
 				expected = targetFull[a]
 			}
@@ -150,14 +138,14 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 			}
 			deficit[a] = d
 		}
-		sumDeficit := deficit[0] + deficit[1] + deficit[2]
+		sumDeficit := deficit.Sum()
 		if sumDeficit > 0 {
-			for a := 0; a < 3; a++ {
+			for a := Axis(0); a < numAxes; a++ {
 				ratioWeight[a] = deficit[a] / sumDeficit
 			}
 			for j := 0; j < n; j++ {
 				var sc float64
-				for a := 0; a < 3; a++ {
+				for a := Axis(0); a < numAxes; a++ {
 					f, w := fMat[a][j], ratioWeight[a]
 					if f > 0 && w > 0 {
 						sc += f * w
@@ -172,7 +160,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	if !useRatio || ratioFellBack {
 		for j := 0; j < n; j++ {
 			var sc float64
-			for a := 0; a < 3; a++ {
+			for a := Axis(0); a < numAxes; a++ {
 				f, r := fMat[a][j], residual[a]
 				if r < 0 && f > 0 {
 					continue
@@ -188,19 +176,15 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 	}
 
-	// Per-axis trajectory cap (design-v4 §2.6): max_n_txs[i] = min over the
-	// over-serving axes of headroom/excess. Used both to size the batch and to
-	// exclude a verb that cannot emit even one tx (cap < 1).
-	p := [3]float64{
-		tgt.Shares[AxisAccounts],
-		tgt.Shares[AxisStorage],
-		tgt.Shares[AxisCode],
-	}
-	tolerance := [3]float64{}
-	for axIdx := 0; axIdx < 3; axIdx++ {
-		headroom := math.Max(0, desired[axIdx]-current[axIdx])
-		tol := math.Max(p[axIdx], s.cfg.Control.ToleranceFloor) * float64(totalBatchBytes)
-		tolerance[axIdx] = headroom + tol
+	// Per-axis trajectory cap: max_n_txs[i] = min over the over-serving axes
+	// of headroom/excess. Used both to size the batch and to exclude a verb
+	// that cannot emit even one tx (cap < 1).
+	var p, tolerance AxisVec
+	for a := Axis(0); a < numAxes; a++ {
+		p[a] = tgt.Shares[a]
+		headroom := math.Max(0, desired[a]-current[a])
+		tol := math.Max(p[a], s.cfg.Control.ToleranceFloor) * float64(totalBatchBytes)
+		tolerance[a] = headroom + tol
 	}
 	maxNTxs := scratch.maxNTxs
 	for i := 0; i < n; i++ {
@@ -208,16 +192,16 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	for i := 0; i < n; i++ {
 		fRow := s.Rows[i].F
-		fSum := fRow[0] + fRow[1] + fRow[2]
+		fSum := fRow.Sum()
 		if fSum <= 0 {
 			continue
 		}
 		capForVerb := math.Inf(1)
 		hasOver := false
-		for axIdx := 0; axIdx < 3; axIdx++ {
-			excess := fRow[axIdx] - p[axIdx]*fSum
+		for a := Axis(0); a < numAxes; a++ {
+			excess := fRow[a] - p[a]*fSum
 			if excess > 0 {
-				c := tolerance[axIdx] / excess
+				c := tolerance[a] / excess
 				if c < capForVerb {
 					capForVerb = c
 				}
@@ -252,7 +236,6 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	scratch.candidates = candidates
 
-	// Greedy: argmax score over the candidate set; ties break on lower index.
 	topIndex := candidates[0]
 	for _, i := range candidates {
 		if score[i] > score[topIndex] {
@@ -288,16 +271,14 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 
 	// Mix carries the per-verb score, exposed for the Prometheus MixSimplex
-	// gauge and the journal record. Allocated fresh because BatchPlan escapes
-	// to the committer goroutine; the scratch.mix on State is reserved for
-	// internal use only.
+	// gauge and the journal record. Allocated fresh (not from scratch) because
+	// BatchPlan escapes to the committer goroutine — a reused scratch map would
+	// be mutated by the next Pick while the committer still reads it.
 	mix := make(map[string]float64, n)
 	for i, v := range verbs {
 		mix[v] = score[i]
 	}
 
-	// nMax is the MINIMUM of three bounds plus a hard ceiling — see legacy
-	// docstring; logic unchanged.
 	nMaxHardCeil := s.cfg.Control.NMaxHardCeil
 	if perVerb, ok := s.cfg.Control.NMaxHardCeilPerVerb[topVerb]; ok {
 		nMaxHardCeil = perVerb
@@ -336,14 +317,13 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 
 // logPickDebug emits one structured slog line per batch capturing, for every
 // verb, the score and per-verb cap that drive the deterministic argmax. It is
-// called only when ORCH_DEBUG_PICK is truthy ($ORCH_DEBUG_PICK gate, read once
-// at construction). It is purely observational — it reads already-computed
-// values and changes no control state.
+// called only when the --debug-pick flag is set (State.debugPick). It is purely
+// observational — it reads already-computed values and changes no control state.
 func (s *State) logPickDebug(
 	verbs []string,
-	fMat [3][]float64,
+	fMat [numAxes][]float64,
 	score, maxNTxs []float64,
-	residual, deficit, ratioWeight [3]float64,
+	residual, deficit, ratioWeight AxisVec,
 	useRatio, ratioFellBack bool,
 	endgame bool,
 	cum, progress float64,
@@ -398,17 +378,14 @@ func (s *State) logPickDebug(
 	)
 }
 
-// obsToVec converts an Observation to an axis-ordered float64 triple.
-func obsToVec(obs *Observation) [3]float64 {
-	return [3]float64{
-		float64(obs.AccountTrieBytes),
-		float64(obs.StorageTrieBytes),
-		float64(obs.CodeBytesTotal),
+// obsToVec converts an Observation to an AxisVec. This and the Axis enum are the
+// only places that define which AxisVec slot holds which observation field.
+func obsToVec(obs *Observation) AxisVec {
+	return AxisVec{
+		AxisAccounts: float64(obs.AccountTrieBytes),
+		AxisStorage:  float64(obs.StorageTrieBytes),
+		AxisCode:     float64(obs.CodeBytesTotal),
 	}
-}
-
-func l2Norm3(v [3]float64) float64 {
-	return math.Sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
 }
 
 func clampMin(v, lo int) int {

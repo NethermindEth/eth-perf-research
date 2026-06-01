@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"strconv"
-	"strings"
 
 	"sigs.k8s.io/yaml"
 )
@@ -27,7 +25,6 @@ type yamlFile struct {
 type controlYAML struct {
 	Epsilon               *float64          `json:"epsilon"`
 	ToleranceFloor        *float64          `json:"tolerance_floor"`
-	BytesPerGasTieBreak   *bool             `json:"bytes_per_gas_tie_break"`
 	GasFillFraction       *float64          `json:"gas_fill_fraction"`
 	GasCapFraction        *float64          `json:"gas_cap_fraction"`
 	NMaxHardCeil          *int              `json:"nmax_hard_ceil"`
@@ -63,7 +60,6 @@ type costYAML struct {
 }
 
 type runYAML struct {
-	TotalBatchBytes        *int    `json:"total_batch_bytes"`
 	TotalBatchBytesCap     *int    `json:"total_batch_bytes_cap"`
 	AddressStride          *uint64 `json:"address_stride"`
 	DispatchSkipStreakHalt *int    `json:"dispatch_skip_streak_halt"`
@@ -88,11 +84,10 @@ type runYAML struct {
 // Load resolves a RunConfig for the run. Precedence, low to high:
 //  1. Defaults() — the historical hardcoded constants.
 //  2. The optional control: / cost: / run: blocks in target.yaml.
-//  3. Environment-variable overrides for keys that historically had env vars.
+//  3. Environment-variable overrides.
 //
 // targetYAMLPath may be empty, in which case only steps 1 and 3 apply. Load
-// then validates the result and returns a clear error on any out-of-range
-// value so a misconfigured run fails fast at startup.
+// validates the result and returns a clear error on any out-of-range value.
 func Load(targetYAMLPath string) (RunConfig, error) {
 	cfg := Defaults()
 
@@ -108,22 +103,16 @@ func Load(targetYAMLPath string) (RunConfig, error) {
 		applyYAML(&cfg, &yf)
 	}
 
-	if err := applyEnv(&cfg); err != nil {
-		return RunConfig{}, err
-	}
-
 	if err := cfg.validate(); err != nil {
 		return RunConfig{}, err
 	}
 	return cfg, nil
 }
 
-// applyYAML overlays any present target.yaml block onto cfg.
 func applyYAML(cfg *RunConfig, yf *yamlFile) {
 	if c := yf.Control; c != nil {
 		setF(&cfg.Control.Epsilon, c.Epsilon)
 		setF(&cfg.Control.ToleranceFloor, c.ToleranceFloor)
-		setB(&cfg.Control.BytesPerGasTieBreak, c.BytesPerGasTieBreak)
 		setF(&cfg.Control.GasFillFraction, c.GasFillFraction)
 		setF(&cfg.Control.GasCapFraction, c.GasCapFraction)
 		setI(&cfg.Control.NMaxHardCeil, c.NMaxHardCeil)
@@ -169,7 +158,6 @@ func applyYAML(cfg *RunConfig, yf *yamlFile) {
 		setI64(&cfg.Cost.EthPerGasTarget, c.EthPerGasTarget)
 	}
 	if r := yf.Run; r != nil {
-		setI(&cfg.Run.TotalBatchBytes, r.TotalBatchBytes)
 		setI(&cfg.Run.TotalBatchBytesCap, r.TotalBatchBytesCap)
 		setU64(&cfg.Run.AddressStride, r.AddressStride)
 		setI(&cfg.Run.DispatchSkipStreakHalt, r.DispatchSkipStreakHalt)
@@ -196,112 +184,41 @@ func setF(dst *float64, v *float64) {
 		*dst = *v
 	}
 }
+
 func setI(dst *int, v *int) {
 	if v != nil {
 		*dst = *v
 	}
 }
+
 func setI64(dst *int64, v *int64) {
 	if v != nil {
 		*dst = *v
 	}
 }
+
 func setU64(dst *uint64, v *uint64) {
 	if v != nil {
 		*dst = *v
 	}
 }
+
 func setStr(dst *string, v *string) {
 	if v != nil {
 		*dst = *v
 	}
 }
+
 func setB(dst *bool, v *bool) {
 	if v != nil {
 		*dst = *v
 	}
 }
 
-// applyEnv overlays the historical environment-variable overrides. Every env
-// var the orchestrator previously honoured is still honoured here so existing
-// deployment scripts keep working. A malformed value is a hard error — a typo
-// in an env var must fail fast, not silently fall back.
-func applyEnv(cfg *RunConfig) error {
-	if raw, ok := os.LookupEnv("ORCH_EWMA_ALPHA"); ok && raw != "" {
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_EWMA_ALPHA=%q: %w", raw, err)
-		}
-		cfg.Control.EWMAAlpha = v
-	}
-	if raw, ok := os.LookupEnv("ORCH_OVERSHOOT_THRESHOLD"); ok && raw != "" {
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_OVERSHOOT_THRESHOLD=%q: %w", raw, err)
-		}
-		cfg.Control.OvershootThreshold = v
-	}
-	if raw, ok := os.LookupEnv("ORCH_TOTAL_BATCH_BYTES"); ok && raw != "" {
-		v, err := strconv.Atoi(raw)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_TOTAL_BATCH_BYTES=%q: %w", raw, err)
-		}
-		cfg.Run.TotalBatchBytes = v
-	}
-	if raw, ok := os.LookupEnv("ORCH_RPC_TIMEOUT_S"); ok && raw != "" {
-		v, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_RPC_TIMEOUT_S=%q: %w", raw, err)
-		}
-		cfg.Run.RPCTimeoutS = v
-	}
-	if raw, ok := os.LookupEnv("ORCH_RESUME_REORG_TOLERANCE"); ok && raw != "" {
-		v, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_RESUME_REORG_TOLERANCE=%q: %w", raw, err)
-		}
-		cfg.Run.ResumeReorgTolerance = v
-	}
-	if raw, ok := os.LookupEnv("ORCH_LOOKAHEAD_DEPTH"); ok && raw != "" {
-		v, err := strconv.Atoi(raw)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_LOOKAHEAD_DEPTH=%q: %w", raw, err)
-		}
-		cfg.Run.LookaheadDepth = v
-	}
-	if raw, ok := os.LookupEnv("ORCH_EPSILON"); ok && raw != "" {
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return fmt.Errorf("config: ORCH_EPSILON=%q: %w", raw, err)
-		}
-		cfg.Control.Epsilon = v
-	}
-	if _, ok := os.LookupEnv("ORCH_USE_RATIO_SCORING"); ok {
-		cfg.Control.UseRatioScoring = EnvTruthy("ORCH_USE_RATIO_SCORING")
-	}
-	return nil
-}
-
-// EnvTruthy reports whether an environment variable is set to a truthy value.
-// Accepted truthy values: "1", "true", "yes", "on" (case-insensitive). It is
-// the single home for the orchestrator's env-flag parsing (ORCH_DEBUG_PICK,
-// ORCH_ALLOW_NON_ZERO_FRESH_HEAD).
-func EnvTruthy(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-// Validate range-checks a RunConfig. It is exported so callers that mutate a
-// loaded config (e.g. CLI-flag overrides) can re-check it before use. Load
-// always calls it; a bad value fails fast with a clear error.
+// Validate range-checks a RunConfig. Exported so callers that mutate a loaded
+// config (e.g. CLI-flag overrides) can re-check before use.
 func Validate(c RunConfig) error { return c.validate() }
 
-// validate range-checks the resolved config. It fails fast with a clear error
-// so a bad target.yaml value or env override is caught at startup.
 func (c RunConfig) validate() error {
 	ck := c.Control
 	if !inUnit(ck.Epsilon) {
@@ -402,9 +319,6 @@ func (c RunConfig) validate() error {
 	}
 
 	r := c.Run
-	if r.TotalBatchBytes < 1024 {
-		return rangeErr("run.total_batch_bytes", float64(r.TotalBatchBytes), ">= 1024")
-	}
 	if r.TotalBatchBytesCap < 1024 {
 		return rangeErr("run.total_batch_bytes_cap", float64(r.TotalBatchBytesCap), ">= 1024")
 	}

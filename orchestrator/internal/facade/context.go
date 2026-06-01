@@ -4,8 +4,6 @@ import (
 	"math/big"
 	"sync/atomic"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/verbs"
 )
 
@@ -17,12 +15,10 @@ import (
 // ReserveAddresses / ReserveSalts. All other fields are written once during run
 // setup and treated as read-only thereafter.
 type Context struct {
-	BaseAddress   []byte         // 20-byte base for sequential address derivation
-	SignerAddr    common.Address // master signer address (noop self-transfer target)
-	Revision      uint64         // address-space generation
-	AddressStride uint64         // typically 1<<40
+	BaseAddress   []byte // 20-byte base for sequential address derivation
+	Revision      uint64 // address-space generation
+	AddressStride uint64 // typically 1<<40
 	ChainID       uint64
-	GasLimit      uint64
 	// BlockGasLimit is refreshed by the lifecycle every batch from the head
 	// block. Accessed via the atomic wrapper so the planner loop and the
 	// background fee refresher don't race on plain reads/writes.
@@ -42,9 +38,6 @@ type Context struct {
 	maxFeePerGas         atomic.Pointer[big.Int]
 	maxPriorityFeePerGas atomic.Pointer[big.Int]
 
-	// Per-verb gas-aware sizing.
-	VerbGasFactors map[string]float64
-
 	// Contracts holds the Spamoor scenario contract addresses the bootstrap
 	// phase deployed. Set once after bootstrap, before the hot loop starts;
 	// read-only thereafter. Threaded into every verb's BuildCtx so contract-
@@ -52,13 +45,10 @@ type Context struct {
 	Contracts *verbs.ContractRegistry
 }
 
-// ReserveAddresses reserves n consecutive address-cursor slots and returns the
-// first one.
 func (c *Context) ReserveAddresses(n uint64) (start uint64) {
 	return c.AddressCursor.Add(n) - n
 }
 
-// LoadAddressCursor returns the current high-water mark of reserved addresses.
 func (c *Context) LoadAddressCursor() uint64 {
 	return c.AddressCursor.Load()
 }
@@ -68,11 +58,6 @@ func (c *Context) LoadAddressCursor() uint64 {
 // irrelevant.
 func (c *Context) ReserveSalts(n uint64) (start uint64) {
 	return c.SaltCursor.Add(n) - n
-}
-
-// LoadSaltCursor returns the current high-water mark of reserved salts.
-func (c *Context) LoadSaltCursor() uint64 {
-	return c.SaltCursor.Load()
 }
 
 // SetFeePolicy atomically updates the EIP-1559 fee policy. Callers should
@@ -89,18 +74,10 @@ func (c *Context) LoadFeePolicy() (maxFee, maxPriority *big.Int) {
 	return c.maxFeePerGas.Load(), c.maxPriorityFeePerGas.Load()
 }
 
-// SetBlockGasLimit atomically updates the per-block gas ceiling.
 func (c *Context) SetBlockGasLimit(v uint64) {
 	c.BlockGasLimit.Store(v)
 }
 
-// LoadBlockGasLimit returns the current per-block gas ceiling.
 func (c *Context) LoadBlockGasLimit() uint64 {
 	return c.BlockGasLimit.Load()
-}
-
-// signerAddress returns the master signer address used as the noop verb's
-// self-transfer recipient.
-func (c *Context) signerAddress() common.Address {
-	return c.SignerAddr
 }

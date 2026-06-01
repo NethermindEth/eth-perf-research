@@ -23,9 +23,9 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/pkg/sidecar/tracker"
 )
 
-// Metrics is the set of gauges we publish. All names match the
-// Nethermind.StateComposition plugin's legacy Prometheus output so the
-// existing bloatnet dashboard panels keep working unchanged.
+// Metrics is the set of gauges we publish. All names match the legacy
+// Nethermind.StateComposition plugin output so existing dashboard panels
+// keep working unchanged.
 type Metrics struct {
 	accountsTotal         prometheus.Gauge
 	contractsTotal        prometheus.Gauge
@@ -44,21 +44,18 @@ type Metrics struct {
 	incrementalBlock      prometheus.Gauge
 	slotCountHistogram    *prometheus.GaugeVec
 
-	// Derived totals + shares (acct/stor/code as fraction of total).
 	totalStateBytes prometheus.Gauge
 	accountShare    prometheus.Gauge
 	storageShare    prometheus.Gauge
 	codeShare       prometheus.Gauge
 
-	// Growth-rate gauges in bytes/sec, EWMA over a ~30s window. Useful for
-	// Grafana single-stat panels that show "current speed" without needing
-	// rate() math at query time.
+	// Growth-rate gauges in bytes/sec, EWMA over ~30s. Spares dashboards
+	// from needing rate() math at query time.
 	totalGrowthBPS   prometheus.Gauge
 	accountGrowthBPS prometheus.Gauge
 	storageGrowthBPS prometheus.Gauge
 	codeGrowthBPS    prometheus.Gauge
 
-	// Rate-tracking state (private to Publish; not exported).
 	lastSample time.Time
 	lastAcct   int64
 	lastStor   int64
@@ -204,7 +201,7 @@ func (m *Metrics) Publish(snap tracker.Snapshot) {
 		m.codeShare.Set(float64(snap.CodeBytesTotal) / float64(total))
 	}
 
-	// EWMA growth rate. α=0.1 → ~30s effective window at 1Hz publish.
+	// α=0.1 → ~30s effective window at 1 Hz.
 	now := time.Now()
 	if !m.lastSample.IsZero() {
 		dt := now.Sub(m.lastSample).Seconds()
@@ -225,7 +222,8 @@ func (m *Metrics) Publish(snap tracker.Snapshot) {
 	m.lastCode = snap.CodeBytesTotal
 }
 
-// currentGauge reads back a gauge's current value for EWMA chaining.
+// currentGauge reads back a gauge's current value for EWMA chaining; required
+// because prometheus.Gauge has no direct getter.
 func currentGauge(g prometheus.Gauge) float64 {
 	var m dto.Metric
 	if err := g.Write(&m); err != nil || m.Gauge == nil || m.Gauge.Value == nil {
@@ -242,8 +240,7 @@ func (m *Metrics) Run(ctx context.Context, t *tracker.Tracker, interval time.Dur
 	}
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
-	// One immediate publish so /metrics is non-empty as soon as the tracker
-	// exists, instead of waiting interval seconds for the first tick.
+	// Publish immediately so /metrics is non-empty on startup.
 	m.Publish(t.SnapshotCounters())
 	for {
 		select {

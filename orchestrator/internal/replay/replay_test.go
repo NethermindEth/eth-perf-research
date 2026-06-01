@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	goethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/manifest"
@@ -33,12 +35,11 @@ func randPayload(rng *rand.Rand, i int) *payloads.ExecutionPayloadV3 {
 	var bloom [256]byte
 	rng.Read(bloom[:]) //nolint:staticcheck
 
-	var parentHash, stateRoot, receiptsRoot, prevRandao, blockHash [32]byte
-	rng.Read(parentHash[:])  //nolint:staticcheck
-	rng.Read(stateRoot[:])   //nolint:staticcheck
-	rng.Read(receiptsRoot[:]) //nolint:staticcheck
-	rng.Read(prevRandao[:])  //nolint:staticcheck
-	rng.Read(blockHash[:])   //nolint:staticcheck
+	var parentHash, stateRoot, prevRandao, blockHash [32]byte
+	rng.Read(parentHash[:]) //nolint:staticcheck
+	rng.Read(stateRoot[:])  //nolint:staticcheck
+	rng.Read(prevRandao[:]) //nolint:staticcheck
+	rng.Read(blockHash[:])  //nolint:staticcheck
 
 	var feeRecipient [20]byte
 	rng.Read(feeRecipient[:]) //nolint:staticcheck
@@ -47,7 +48,7 @@ func randPayload(rng *rand.Rand, i int) *payloads.ExecutionPayloadV3 {
 		ParentHash:    parentHash,
 		FeeRecipient:  feeRecipient,
 		StateRoot:     stateRoot,
-		ReceiptsRoot:  receiptsRoot,
+		ReceiptsRoot:  goethtypes.EmptyReceiptsHash,
 		LogsBloom:     bloom[:],
 		Random:        prevRandao,
 		Number:        uint64(i + 1),
@@ -57,7 +58,10 @@ func randPayload(rng *rand.Rand, i int) *payloads.ExecutionPayloadV3 {
 		ExtraData:     randBytes(rng, rng.Intn(32)),
 		BaseFeePerGas: new(big.Int).SetUint64(uint64(rng.Intn(1e9) + 1)),
 		BlockHash:     blockHash,
-		Transactions:  [][]byte{randBytes(rng, 50)},
+		// Empty txs: relink recomputes the block hash via
+		// ExecutableDataToBlockNoHash, which decodes the tx list; opaque junk
+		// bytes are not valid RLP and would fail that decode.
+		Transactions:  [][]byte{},
 		Withdrawals:   []*goethtypes.Withdrawal{},
 		BlobGasUsed:   new(uint64),
 		ExcessBlobGas: new(uint64),
@@ -162,7 +166,9 @@ func validHandler(stateRoot string) handlerFunc {
 				Params []json.RawMessage `json:"params"`
 			}
 			json.Unmarshal(body, &req)
-			var wp struct{ BlockHash string `json:"blockHash"` }
+			var wp struct {
+				BlockHash string `json:"blockHash"`
+			}
 			json.Unmarshal(req.Params[0], &wp)
 			return mockResponse(id, map[string]any{
 				"status":          "VALID",
@@ -243,7 +249,9 @@ func TestReplayInvalid(t *testing.T) {
 				Params []json.RawMessage `json:"params"`
 			}
 			json.Unmarshal(body, &req)
-			var wp struct{ BlockHash string `json:"blockHash"` }
+			var wp struct {
+				BlockHash string `json:"blockHash"`
+			}
 			json.Unmarshal(req.Params[0], &wp)
 			// Second newPayload call → INVALID.
 			if n == 2 {
@@ -340,7 +348,9 @@ func TestReplayPayloadCount(t *testing.T) {
 				Params []json.RawMessage `json:"params"`
 			}
 			json.Unmarshal(body, &req)
-			var wp struct{ BlockHash string `json:"blockHash"` }
+			var wp struct {
+				BlockHash string `json:"blockHash"`
+			}
 			json.Unmarshal(req.Params[0], &wp)
 			return mockResponse(id, map[string]any{
 				"status":          "VALID",
@@ -387,7 +397,7 @@ func TestReplayNoManifestRoot(t *testing.T) {
 	rng := rand.New(rand.NewSource(5))
 	ps := []*payloads.ExecutionPayloadV3{randPayload(rng, 0)}
 
-	srv := newEngineServer(t, validHandler("0x" + strings.Repeat("ff", 32)))
+	srv := newEngineServer(t, validHandler("0x"+strings.Repeat("ff", 32)))
 	client, _ := rpc.NewClient(srv.URL)
 	path := writePayloadsFile(t, ps)
 	d := &Driver{
@@ -397,6 +407,125 @@ func TestReplayNoManifestRoot(t *testing.T) {
 
 	if err := d.Replay(context.Background(), path); err != nil {
 		t.Fatalf("expected nil with no manifest root, got: %v", err)
+	}
+}
+
+// linkablePayload builds a payload with empty transactions (so the relink hash
+// recompute via ExecutableDataToBlockNoHash succeeds) and the given number /
+// timestamp. ParentHash and BlockHash are left zero; the transform is expected
+// to rewrite them.
+func linkablePayload(number, timestamp uint64) *payloads.ExecutionPayloadV3 {
+	return &payloads.ExecutionPayloadV3{
+		ParentHash:    common.Hash{},
+		FeeRecipient:  common.Address{},
+		StateRoot:     common.HexToHash("0x01"),
+		ReceiptsRoot:  goethtypes.EmptyReceiptsHash,
+		LogsBloom:     make([]byte, 256),
+		Random:        common.Hash{},
+		Number:        number,
+		GasLimit:      30_000_000,
+		GasUsed:       0,
+		Timestamp:     timestamp,
+		ExtraData:     []byte{},
+		BaseFeePerGas: big.NewInt(1_000_000_000),
+		BlockHash:     common.Hash{},
+		Transactions:  [][]byte{},
+		Withdrawals:   []*goethtypes.Withdrawal{},
+		BlobGasUsed:   new(uint64),
+		ExcessBlobGas: new(uint64),
+	}
+}
+
+// TestReplayRestampsDuplicateTimestamps feeds payloads with equal timestamps
+// through the Replay loop and asserts the SUBMITTED payloads have
+// strictly-increasing timestamps and each ParentHash == the previous submitted
+// BlockHash. The fake EL returns VALID echoing the submitted blockHash, so the
+// driver's latestValidHash check passes and we assert on the captured params.
+func TestReplayRestampsDuplicateTimestamps(t *testing.T) {
+	ps := []*payloads.ExecutionPayloadV3{
+		linkablePayload(1, 100),
+		linkablePayload(2, 100),
+		linkablePayload(3, 100),
+	}
+
+	type submitted struct {
+		parentHash string
+		blockHash  string
+		timestamp  uint64
+	}
+	var got []submitted
+
+	const expectedRoot = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	handler := func(body []byte) []byte {
+		id := rpcID(body)
+		switch rpcMethod(body) {
+		case "engine_newPayloadV4":
+			var req struct {
+				Params []json.RawMessage `json:"params"`
+			}
+			json.Unmarshal(body, &req)
+			var wp struct {
+				ParentHash string         `json:"parentHash"`
+				BlockHash  string         `json:"blockHash"`
+				Timestamp  hexutil.Uint64 `json:"timestamp"`
+			}
+			json.Unmarshal(req.Params[0], &wp)
+			got = append(got, submitted{
+				parentHash: strings.ToLower(wp.ParentHash),
+				blockHash:  strings.ToLower(wp.BlockHash),
+				timestamp:  uint64(wp.Timestamp),
+			})
+			return mockResponse(id, map[string]any{
+				"status":          "VALID",
+				"latestValidHash": wp.BlockHash,
+				"validationError": nil,
+			})
+		case "engine_forkchoiceUpdatedV3":
+			return mockResponse(id, map[string]any{
+				"payloadStatus": map[string]any{
+					"status":          "VALID",
+					"latestValidHash": "0x" + strings.Repeat("00", 32),
+					"validationError": nil,
+				},
+				"payloadId": nil,
+			})
+		case "eth_getBlockByNumber":
+			return mockResponse(id, map[string]any{"stateRoot": expectedRoot})
+		default:
+			return mockResponse(id, nil)
+		}
+	}
+
+	srv := newEngineServer(t, handler)
+	client, _ := rpc.NewClient(srv.URL)
+	path := writePayloadsFile(t, ps)
+	d := &Driver{
+		Client:   client,
+		Manifest: &manifest.Manifest{FinalStateRoot: expectedRoot},
+	}
+
+	if err := d.Replay(context.Background(), path); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(got) != len(ps) {
+		t.Fatalf("submitted %d payloads, want %d", len(got), len(ps))
+	}
+
+	// Strictly-increasing timestamps.
+	for i := 1; i < len(got); i++ {
+		if got[i].timestamp <= got[i-1].timestamp {
+			t.Fatalf("timestamp not strictly increasing at %d: %d <= %d",
+				i, got[i].timestamp, got[i-1].timestamp)
+		}
+	}
+
+	// Each ParentHash links to the previous submitted BlockHash.
+	for i := 1; i < len(got); i++ {
+		if got[i].parentHash != got[i-1].blockHash {
+			t.Fatalf("parentHash mismatch at %d: parent=%s prev block=%s",
+				i, got[i].parentHash, got[i-1].blockHash)
+		}
 	}
 }
 

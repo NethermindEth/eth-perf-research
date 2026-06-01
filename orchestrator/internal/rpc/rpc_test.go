@@ -16,9 +16,6 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
-// jwtSecret is a test-only 32-byte key used in JWT tests.
-var jwtSecret = strings.Repeat("a", 64) // 32 bytes hex-encoded
-
 // newTestServer creates an httptest server that dispatches JSON-RPC methods via
 // the provided handler map. Any method not in the map returns an internal error.
 func newTestServer(t *testing.T, handlers map[string]func() any) *httptest.Server {
@@ -193,10 +190,6 @@ func TestRpcError(t *testing.T) {
 // errorAs is a local type-assertion helper because errors.As requires a pointer
 // to the target type.
 func errorAs(err error, target **rpc.RpcError) bool {
-	type asser interface {
-		As(any) bool
-	}
-	// Use the standard library errors.As via unwrapping.
 	for err != nil {
 		if e, ok := err.(*rpc.RpcError); ok {
 			*target = e

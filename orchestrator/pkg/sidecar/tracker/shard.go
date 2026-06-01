@@ -17,40 +17,28 @@ import (
 	"sync"
 )
 
-// ShardCount = 32 — power of two so the routing is a single byte shift.
+// ShardCount is 32 (power of two); routing is a single byte shift.
 const ShardCount = 32
 
-// shardOf returns the shard index for a hashed key. Caller guarantees
-// len(key) >= 1 (all our keys are [32]byte).
 func shardOf(key [32]byte) int {
 	return int(key[0]) % ShardCount
 }
 
-// codeEntry holds a single codeHash's refcount and the bytecode size carried
-// alongside (used for the cumulative codeBytesTotal counter). Bytes are
-// captured the first time the hash appears (NewCodeSize on the diff record)
-// and re-stamped on every subsequent appearance — if NM ever recomputes the
-// size we adopt the latest value.
+// codeEntry holds a codeHash's refcount and bytecode size (used for codeBytesTotal).
+// Size is captured on first insertion and re-stamped on each subsequent sighting.
 type codeEntry struct {
 	Refcount uint32
 	CodeSize uint64
 }
 
-// shard owns a slice of the keyspace. It holds slot data in-memory and
-// references the tracker-level CodeStore for code data.
+// shard owns a slice of the keyspace. Per-shard mu serialises read-modify-write
+// on any given hash; the CodeStore is safe under concurrent distinct-key access.
 type shard struct {
-	mu sync.RWMutex
-
-	// codes is a CodeStore reference shared with the rest of the tracker.
-	// Set by newShard via the tracker constructor. Per-shard mu serialises
-	// any read-modify-write on a single hash; the CodeStore itself is safe
-	// for concurrent calls on distinct keys.
+	mu    sync.RWMutex
 	codes CodeStore
 
 	slots map[[32]byte]uint64
 
-	// Cached counters maintained incrementally so /lite never has to walk
-	// the maps. Updated under mu.
 	uniqueCodeHashes     int64
 	codeBytesTotal       int64
 	contractsTotal       int64 // accounts that currently have code
@@ -65,12 +53,9 @@ func newShard(codes CodeStore) *shard {
 	}
 }
 
-// applyCodeRemove decrements the refcount for oldHash. Caller has already
-// verified oldHash != zeroHash. When refcount drops to zero the entry is
-// evicted and codeBytesTotal/uniqueCodeHashes are updated accordingly.
-//
-// contractsTotal is always decremented (one account lost its code) regardless
-// of whether other accounts still reference the same code hash.
+// applyCodeRemove decrements the refcount for oldHash (caller guarantees
+// oldHash != zeroHash). On zero refcount the entry is evicted. contractsTotal
+// is always decremented regardless of other accounts sharing the same hash.
 func (s *shard) applyCodeRemove(oldHash [32]byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,8 +84,8 @@ func (s *shard) applyCodeRemove(oldHash [32]byte) {
 	}
 }
 
-// applyCodeAdd increments the refcount for newHash, allocating the entry if
-// missing. CodeBytesTotal is bumped only on first insertion (deduped by hash).
+// applyCodeAdd increments refcount for newHash. CodeBytesTotal only grows on
+// first insertion (deduped by hash).
 func (s *shard) applyCodeAdd(newHash [32]byte, newSize uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,16 +111,11 @@ func (s *shard) applySlotChange(addr [32]byte, oldCount, newCount uint64) {
 	defer s.mu.Unlock()
 
 	prev, hadEntry := s.slots[addr]
-	// Defensively reconcile the parent value the diff claims with what the
-	// shard already remembers. Mismatch ⇒ baseline drifted (rare); we trust
-	// the new value but log via the counter so the integration test can
-	// detect it.
 	_ = hadEntry
 	_ = prev
 
 	if oldCount > 0 && !hadEntry {
-		// The diff says the address had slots but we never saw it — treat
-		// as a fresh insertion at oldCount (then transition to newCount).
+		// Address had slots but we never saw it — insert at oldCount before applying delta.
 		s.slots[addr] = oldCount
 		s.storageSlotsTotal += int64(oldCount)
 		s.contractsWithStorage++
@@ -164,7 +144,6 @@ func (s *shard) applySlotChange(addr [32]byte, oldCount, newCount uint64) {
 	s.slots[addr] = newCount
 }
 
-// snapshotCounters captures the shard's cumulative counters atomically.
 func (s *shard) snapshotCounters() shardCounters {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -174,18 +153,15 @@ func (s *shard) snapshotCounters() shardCounters {
 		ContractsTotal:       s.contractsTotal,
 		StorageSlotsTotal:    s.storageSlotsTotal,
 		ContractsWithStorage: s.contractsWithStorage,
-		SlotEntries:          int64(len(s.slots)),
 	}
 }
 
-// shardCounters is an immutable snapshot of one shard's tier-1 metrics.
 type shardCounters struct {
 	UniqueCodeHashes     int64
 	CodeBytesTotal       int64
 	ContractsTotal       int64
 	StorageSlotsTotal    int64
 	ContractsWithStorage int64
-	SlotEntries          int64
 }
 
 func (c shardCounters) add(o shardCounters) shardCounters {
@@ -195,7 +171,6 @@ func (c shardCounters) add(o shardCounters) shardCounters {
 		ContractsTotal:       c.ContractsTotal + o.ContractsTotal,
 		StorageSlotsTotal:    c.StorageSlotsTotal + o.StorageSlotsTotal,
 		ContractsWithStorage: c.ContractsWithStorage + o.ContractsWithStorage,
-		SlotEntries:          c.SlotEntries + o.SlotEntries,
 	}
 }
 

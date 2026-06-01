@@ -3,14 +3,11 @@ package verbs
 import "encoding/binary"
 
 // gasBurnerCreationCode returns CREATE-tx initcode for the gasburnertx
-// contract. Spamoor's gasburnertx scenario has no Solidity source; it compiles
-// the contract from geas templates at runtime (spamoor/scenarios/gasburnertx/
-// gasburnertx.go, sendDeploymentTx). This function replicates that assembly in
-// Go from the same templates with Spamoor's default options: default burn
-// opcodes (PUSH2 0x1337; POP), default init opcode (PUSH1 0), and the default
-// gas_remainder of 10000.
+// contract. Spamoor's gasburnertx has no Solidity source; it assembles the
+// contract from geas templates with default options: burn opcodes PUSH2 0x1337;
+// POP, init opcode PUSH1 0, gas_remainder 10000.
 //
-// The geas templates Spamoor uses:
+// The geas templates:
 //
 //	init:   push @.start; codesize; sub; dup1; push @.start; push0;
 //	        codecopy; push0; return
@@ -56,9 +53,9 @@ func gasBurnerCreationCode() []byte {
 		return []byte{opPUSH2, b[0], b[1]}
 	}
 
-	// --- worker runtime ---
-	// Prologue length is fixed, so the exit and loop label offsets are known
-	// statically. Layout (byte offsets within the deployed runtime):
+	// Worker runtime. Prologue length is fixed, so the exit and loop label
+	// offsets are known statically. Layout (byte offsets within the deployed
+	// runtime):
 	//   prologue: PUSH1 0 GAS PUSH1 0 PUSH2 loop JUMP = 2+1+2+3+1 = 9 bytes
 	//   exit:     JUMPDEST PUSH1 0 MSTORE PUSH1 32 PUSH1 0 LOG1 STOP = 10 bytes
 	//   loop:     JUMPDEST PUSH2 gr GAS LT PUSH2 exit JUMPI PUSH1 1 ADD
@@ -71,14 +68,11 @@ func gasBurnerCreationCode() []byte {
 	)
 
 	worker := make([]byte, 0, 64)
-	// prologue: stash the init opcode, push remaining gas + loop_counter,
-	// then jump into the loop.
 	worker = append(worker, opPUSH1, 0x00)
 	worker = append(worker, opGAS)
 	worker = append(worker, opPUSH1, 0x00)
 	worker = append(worker, push2(loopOffset)...)
 	worker = append(worker, opJUMP)
-	// exit: store loop_counter at mem 0 and emit it as a 32-byte LOG1, stop.
 	worker = append(worker, opJUMPDEST)
 	worker = append(worker, opPUSH1, 0x00)
 	worker = append(worker, opMSTORE)
@@ -86,8 +80,6 @@ func gasBurnerCreationCode() []byte {
 	worker = append(worker, opPUSH1, 0x00)
 	worker = append(worker, opLOG1)
 	worker = append(worker, opSTOP)
-	// loop: exit once gas drops below gas_remainder, else bump the counter,
-	// run the burn opcodes (PUSH2 0x1337; POP) and repeat.
 	worker = append(worker, opJUMPDEST)
 	worker = append(worker, push2(gasRemainder)...)
 	worker = append(worker, opGAS)
@@ -101,19 +93,17 @@ func gasBurnerCreationCode() []byte {
 	worker = append(worker, push2(loopOffset)...)
 	worker = append(worker, opJUMP)
 
-	// --- init code ---
-	// CODECOPY the worker runtime out of the creation calldata and RETURN it.
-	// @.start resolves to the init-code length (where the worker begins); the
-	// init segment is < 256 bytes so it fits a PUSH1. The sequence is
-	// PUSH1 start CODESIZE SUB DUP1 PUSH1 start PUSH0 CODECOPY PUSH0 RETURN,
-	// which is 2+1+1+1+2+1+1+1+1 = 11 bytes.
+	// Init code: CODECOPY the worker runtime out of the creation calldata and
+	// RETURN it. @.start is the init-code length (where the worker begins);
+	// the init segment is < 256 bytes so it fits a PUSH1. The sequence
+	// PUSH1 start CODESIZE SUB DUP1 PUSH1 start PUSH0 CODECOPY PUSH0 RETURN
+	// is 2+1+1+1+2+1+1+1+1 = 11 bytes.
 	const initLen = 11
 	startOffset := byte(initLen)
 
 	init := make([]byte, 0, initLen)
 	init = append(init, opPUSH1, startOffset)
 	init = append(init, opCODESIZE)
-	// CODESIZE - .start is the worker (runtime) length.
 	init = append(init, opSUB)
 	// DUP1 keeps a second copy of the length for RETURN's size argument.
 	init = append(init, opDUP1)
@@ -124,13 +114,4 @@ func gasBurnerCreationCode() []byte {
 	init = append(init, opRETURN)
 
 	return append(init, worker...)
-}
-
-// gasBurnerRuntimeLen returns the length of the deployed runtime emitted by
-// gasBurnerCreationCode; exposed for tests asserting the init code's RETURN
-// size matches the worker segment.
-func gasBurnerRuntimeLen() int {
-	code := gasBurnerCreationCode()
-	const initLen = 11
-	return len(code) - initLen
 }

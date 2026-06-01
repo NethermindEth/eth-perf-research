@@ -50,6 +50,18 @@ func (d *Driver) Replay(ctx context.Context, payloadsPath string) error {
 	}
 	defer r.Close()
 
+	// The recording path commits blocks via testing_commitBlockV1 with
+	// ProcessingOptions.NoValidation, which accepted blocks whose timestamp
+	// equals the parent's. The normal Engine API (engine_newPayloadV4, used
+	// here) requires strictly-increasing timestamps, so we re-stamp duplicate
+	// timestamps to prev+1. Bumping a timestamp (or relinking the parent hash
+	// after an upstream bump) changes the block hash, so relink recomputes and
+	// rewrites BlockHash to keep the chain hash-linked. The state root is
+	// timestamp-independent for this workload, so the final-state-root check
+	// downstream still holds.
+	var prevHash *common.Hash
+	var prevTs uint64
+
 	var count int
 	for {
 		p, err := r.Next()
@@ -60,9 +72,17 @@ func (d *Driver) Replay(ctx context.Context, payloadsPath string) error {
 			return fmt.Errorf("replay: read payload %d: %w", count, err)
 		}
 
+		if err := relink(p, prevHash, prevTs); err != nil {
+			return fmt.Errorf("replay: relink payload %d: %w", count, err)
+		}
+
 		if err := d.submitPayload(ctx, p); err != nil {
 			return err
 		}
+
+		h := p.BlockHash
+		prevHash = &h
+		prevTs = p.Timestamp
 
 		count++
 		if count%100 == 0 {
@@ -99,9 +119,44 @@ func (d *Driver) Replay(ctx context.Context, payloadsPath string) error {
 	return nil
 }
 
-// submitPayload sends engine_newPayloadV4 then engine_forkchoiceUpdatedV3 for p.
+// relink re-stamps and re-links p so the replayed chain has strictly-increasing
+// timestamps and hash-linked parents, recomputing the block hash when either
+// field changes.
+//
+// The recorded payloads come from the NoValidation testing_commitBlockV1 path,
+// which accepted equal consecutive timestamps; engine_newPayloadV4 rejects
+// those. Bumping the timestamp (or relinking the parent hash after an upstream
+// bump) invalidates the stored BlockHash, so we recompute it with
+// ExecutableDataToBlockNoHash (which does NOT validate against the stale stored
+// hash). The recompute uses the same empty beaconRoot / empty executionRequests
+// the driver submits, so the derived hash matches what the EL will compute.
+func relink(p *payloads.ExecutionPayloadV3, prevHash *common.Hash, prevTs uint64) error {
+	if prevHash == nil {
+		return nil
+	}
+
+	needBump := p.Timestamp <= prevTs
+	if needBump {
+		p.Timestamp = prevTs + 1
+	}
+	needRelink := p.ParentHash != *prevHash
+	if needRelink {
+		p.ParentHash = *prevHash
+	}
+	if !needBump && !needRelink {
+		return nil
+	}
+
+	zeroHash := common.Hash{}
+	blk, err := engine.ExecutableDataToBlockNoHash(*p, nil, &zeroHash, [][]byte{})
+	if err != nil {
+		return err
+	}
+	p.BlockHash = blk.Hash()
+	return nil
+}
+
 func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayloadV3) error {
-	// engine_newPayloadV4
 	var status engine.PayloadStatusV1
 	err := d.Client.Call(ctx, "engine_newPayloadV4", []any{
 		p,                 // ExecutionPayloadV3 == engine.ExecutableData
@@ -121,7 +176,6 @@ func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayload
 			ErrReplayInvalid, p.BlockHash.Hex(), status.LatestValidHash)
 	}
 
-	// engine_forkchoiceUpdatedV3
 	fcs := engine.ForkchoiceStateV1{
 		HeadBlockHash:      p.BlockHash,
 		SafeBlockHash:      p.BlockHash,

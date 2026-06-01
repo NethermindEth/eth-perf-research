@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/config"
@@ -33,13 +34,35 @@ type batchDeps struct {
 	targetDigest []byte
 	metricsReg   *metrics.Registry
 	cfg          config.RunConfig
+	// lastBlockTS is a shared monotonic counter ensuring committed blocks have
+	// strictly-increasing timestamps. testing_commitBlockV1 runs with
+	// NoValidation and accepts ts == parent.ts, but Geth and the normal Engine
+	// API require ts > parent.ts; without this, ~3 blocks/sec at 1s resolution
+	// share a timestamp and the recorded payloads become un-replayable. It is a
+	// POINTER so the bootstrap deps and the main loop deps share one counter.
+	lastBlockTS *atomic.Uint64
+}
+
+// nextBlockTS returns a strictly-increasing block timestamp. It uses wall-clock
+// seconds when those advance past the last emitted value, and bumps by +1 only
+// to break a tie within the same wall-clock second.
+func nextBlockTS(last *atomic.Uint64) uint64 {
+	now := uint64(time.Now().Unix())
+	for {
+		prev := last.Load()
+		ts := now
+		if ts <= prev {
+			ts = prev + 1
+		}
+		if last.CompareAndSwap(prev, ts) {
+			return ts
+		}
+	}
 }
 
 // batchResult is the outcome of one iteration's work.
 type batchResult struct {
 	committed   bool
-	txCount     int
-	rlpBytes    uint64
 	blockHeader *rpc.BlockHeader
 	postObs     *controller.Observation
 }
@@ -58,7 +81,6 @@ type dispatched struct {
 	batchID    uint64
 	plan       *controller.BatchPlan
 	addrBefore uint64
-	addrAfter  uint64
 	saltBefore uint64
 	saltAfter  uint64
 	res        *facade.Result // signed RLPs, hashes, cursors-after
@@ -129,7 +151,6 @@ func dispatchBatch(ctx context.Context, d *batchDeps, batchID uint64, currentObs
 		batchID:    batchID,
 		plan:       plan,
 		addrBefore: addrBefore,
-		addrAfter:  res.NewCursor,
 		saltBefore: saltBefore,
 		saltAfter:  res.NewSalt,
 		res:        res,
@@ -171,7 +192,7 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched) (*batchResul
 	}
 
 	commitStart := time.Now()
-	blockTS := uint64(time.Now().Unix())
+	blockTS := nextBlockTS(d.lastBlockTS)
 	blockHash, err := d.rpc.TestingCommitBlockV1(ctx, db.res.SignedRLP, blockTS)
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: testing_commitBlockV1: %w", err)
@@ -199,7 +220,6 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched) (*batchResul
 		AccountTrieBytes: snap.AccountTrieBytes,
 		StorageTrieBytes: snap.StorageTrieBytes,
 		CodeBytesTotal:   snap.CodeBytesTotal,
-		BlockNumber:      snap.BlockNumber,
 	}
 
 	applyStart := time.Now()
@@ -227,7 +247,6 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched) (*batchResul
 
 	db.timing.observe(d.metricsReg, db.batchID, db.res.TxCount)
 
-	// Update Prometheus metrics after a successful commit.
 	if d.metricsReg != nil {
 		m := d.metricsReg
 		m.JournalRecordsTotal.Inc()
@@ -247,20 +266,18 @@ func commitBatch(ctx context.Context, d *batchDeps, db *dispatched) (*batchResul
 		}
 		for verb, row := range d.state.AlphaSnapshot() {
 			for ax, v := range row {
-				m.AlphaCurrent.WithLabelValues(verb, string(ax)).Set(v)
+				m.AlphaCurrent.WithLabelValues(verb, ax.String()).Set(v)
 			}
 		}
 		for verb, row := range d.state.SigmaSnapshot() {
 			for ax, v := range row {
-				m.AlphaState.WithLabelValues(verb, string(ax)).Set(v)
+				m.AlphaState.WithLabelValues(verb, ax.String()).Set(v)
 			}
 		}
 	}
 
 	return &batchResult{
 		committed:   true,
-		txCount:     db.res.TxCount,
-		rlpBytes:    db.res.RLPBytes,
 		blockHeader: block,
 		postObs:     post,
 	}, nil
@@ -314,7 +331,6 @@ func buildRecord(
 			StatecompSnapshot:  snap.Raw,
 			ResidualNorm:       residual.L2Norm,
 			GasUsed:            block.GasUsed,
-			VerbGasFactors:     cloneFloatMap(d.facadeCtx.VerbGasFactors),
 			CoeffsAfter:        flatFromAxisMap(d.state.FSnapshot()),
 			AlphaCurrent:       flatFromAxisMap(d.state.AlphaSnapshot()),
 			SigmaInnov:         flatFromAxisMap(d.state.SigmaSnapshot()),
@@ -332,17 +348,6 @@ func encodeAddr(cursor uint64) []byte {
 	for i := 7; i >= 0; i-- {
 		out[i] = byte(cursor & 0xff)
 		cursor >>= 8
-	}
-	return out
-}
-
-func cloneFloatMap(in map[string]float64) map[string]float64 {
-	if in == nil {
-		return map[string]float64{}
-	}
-	out := make(map[string]float64, len(in))
-	for k, v := range in {
-		out[k] = v
 	}
 	return out
 }

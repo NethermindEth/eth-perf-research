@@ -115,39 +115,17 @@ func flatFromAxisMap(m map[string]map[controller.Axis]float64) map[string]float6
 	return out
 }
 
-// observationFromSnapshot builds a controller.Observation from a sensor
-// snapshot. Returns nil if snap is nil.
-func observationFromSnapshot(snap *sensorSnapshotLike) *controller.Observation {
-	if snap == nil {
-		return nil
-	}
-	return &controller.Observation{
-		AccountTrieBytes: snap.AccountTrieBytes,
-		StorageTrieBytes: snap.StorageTrieBytes,
-		CodeBytesTotal:   snap.CodeBytesTotal,
-		BlockNumber:      snap.BlockNumber,
-	}
-}
-
-// sensorSnapshotLike is the minimal shape we need from sensor.Snapshot — we
-// keep it free of imports so helpers can be tested without the sensor pkg.
-type sensorSnapshotLike struct {
-	AccountTrieBytes uint64
-	StorageTrieBytes uint64
-	CodeBytesTotal   uint64
-	BlockNumber      uint64
-}
-
 // shareTargetFromTarget converts a *target.Target-ish view (raw shares as
 // strings) into a *controller.Target.
-func shareTargetFromTarget(shares map[string]float64, totalBytes int64, sha256Hex string) *controller.Target {
+func shareTargetFromTarget(shares map[string]float64, totalBytes int64) *controller.Target {
 	out := &controller.Target{
 		Shares:     make(map[controller.Axis]float64, len(shares)),
 		TotalBytes: totalBytes,
-		SHA256Hex:  sha256Hex,
 	}
 	for k, v := range shares {
-		out.Shares[controller.Axis(k)] = v
+		if ax, ok := controller.ParseAxis(k); ok {
+			out.Shares[ax] = v
+		}
 	}
 	return out
 }

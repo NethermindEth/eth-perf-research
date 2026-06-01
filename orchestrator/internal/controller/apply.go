@@ -40,10 +40,10 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	// and small; the underflow path is what historically fed ~6.5e13 bytes/tx
 	// garbage into UpdateCoeff and diverged F.
 	txCountF := float64(txCount)
-	observed := [3]float64{
-		signedDelta(post.AccountTrieBytes, pre.AccountTrieBytes) / txCountF,
-		signedDelta(post.StorageTrieBytes, pre.StorageTrieBytes) / txCountF,
-		signedDelta(post.CodeBytesTotal, pre.CodeBytesTotal) / txCountF,
+	observed := AxisVec{
+		AxisAccounts: signedDelta(post.AccountTrieBytes, pre.AccountTrieBytes) / txCountF,
+		AxisStorage:  signedDelta(post.StorageTrieBytes, pre.StorageTrieBytes) / txCountF,
+		AxisCode:     signedDelta(post.CodeBytesTotal, pre.CodeBytesTotal) / txCountF,
 	}
 
 	verb := plan.Verb
@@ -71,60 +71,49 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	//      even an in-range-but-large observation cannot ratchet the matrix
 	//      toward the divergent 6.48e13 / 4.15e14 state seen in production.
 	// The adaptive-α/Huber math itself (UpdateCoeff) is unchanged.
-	for axIdx := 0; axIdx < 3; axIdx++ {
-		if !mathx.IsFiniteInRange(observed[axIdx], coeffBound) {
+	for a := Axis(0); a < numAxes; a++ {
+		if !mathx.IsFiniteInRange(observed[a], coeffBound) {
 			// Pathological observation — skip this axis's update entirely.
 			continue
 		}
 		result := mathx.UpdateCoeff(
-			row.F[axIdx],
-			observed[axIdx],
-			row.Sigma[axIdx],
-			row.Alpha[axIdx],
+			row.F[a],
+			observed[a],
+			row.Sigma[a],
+			row.Alpha[a],
 			tuning,
 		)
 		// Writes go through atomicStoreFloat so the lock-free snapshot readers
 		// (FSnapshot / AlphaSnapshot / SigmaSnapshot) see clean, race-detector
 		// safe values. Pick reads plain slots under pickApplyMu — the same mu
 		// this Apply call holds — so the writes are still ordered wrt Pick.
-		atomicStoreFloat(&row.F[axIdx], mathx.ClampCoeff(result.F, coeffBound))
-		atomicStoreFloat(&row.Sigma[axIdx], mathx.ClampSigma(result.Sigma, sigmaFloor, coeffBound))
-		atomicStoreFloat(&row.Alpha[axIdx], result.Alpha)
+		atomicStoreFloat(&row.F[a], mathx.ClampCoeff(result.F, coeffBound))
+		atomicStoreFloat(&row.Sigma[a], mathx.ClampSigma(result.Sigma, sigmaFloor, coeffBound))
+		atomicStoreFloat(&row.Alpha[a], result.Alpha)
 	}
 
 	// Residual: obs_vec - commanded_vec (commanded = F[verb][ax] * txCount after update).
-	// Python computes residual BEFORE updating F (uses new F[verb] post-update for commanded).
-	// Actually re-reading: Python computes commanded_vec from state.F[verb] which has already
-	// been updated in the loop above. We match that.
-	commanded := [3]float64{}
-	obsVec := [3]float64{}
-	for axIdx := 0; axIdx < 3; axIdx++ {
-		commanded[axIdx] = row.F[axIdx] * float64(txCount)
-		obsVec[axIdx] = observed[axIdx] * float64(txCount)
+	var commanded, obsVec AxisVec
+	for a := Axis(0); a < numAxes; a++ {
+		commanded[a] = row.F[a] * float64(txCount)
+		obsVec[a] = observed[a] * float64(txCount)
 	}
-	diff := [3]float64{obsVec[0] - commanded[0], obsVec[1] - commanded[1], obsVec[2] - commanded[2]}
-	residualNorm := l2Norm3(diff)
+	diff := obsVec.Sub(commanded)
+	residualNorm := diff.L2()
 
-	s.lastResidualL2 = residualNorm
 	s.BatchID++
 
-	// Update overshoot window.
 	s.pushOvershoot(residualNorm, commanded)
 
-	// Per-verb gas/bytes EWMA: skipped when gasUsed is zero (legacy call path)
-	// or when no RLP bytes were dispatched (bytesPerTx would be undefined).
+	// Per-verb gas EWMA: skipped when gasUsed is zero (legacy call path) so a
+	// no-op batch can't pollute the estimate.
 	if gasUsed > 0 && txCount > 0 {
-		bytesPerTx := 0.0
-		if dispatchedRLPBytes > 0 {
-			bytesPerTx = float64(dispatchedRLPBytes) / float64(txCount)
-		}
-		s.UpdateVerbStats(verb, gasUsed, uint64(txCount), bytesPerTx)
+		s.UpdateVerbStats(verb, gasUsed, uint64(txCount))
 	}
 
-	perAxis := map[Axis]float64{
-		AxisAccounts: diff[0],
-		AxisStorage:  diff[1],
-		AxisCode:     diff[2],
+	perAxis := make(map[Axis]float64, len(Axes))
+	for a := Axis(0); a < numAxes; a++ {
+		perAxis[a] = diff[a]
 	}
 
 	return &ResidualSnapshot{
@@ -144,12 +133,12 @@ func signedDelta(post, pre uint64) float64 {
 
 // pushOvershoot records the current batch residual ratio in the rolling window.
 // The grace period and trip threshold come from the resolved RunConfig.
-func (s *State) pushOvershoot(residualNorm float64, commanded [3]float64) {
+func (s *State) pushOvershoot(residualNorm float64, commanded AxisVec) {
 	// BatchID has already been incremented above.
 	if s.BatchID <= uint64(s.cfg.Control.OvershootGrace) {
 		return
 	}
-	denom := math.Max(l2Norm3(commanded), s.cfg.Control.ResidualNormFloor)
+	denom := math.Max(commanded.L2(), s.cfg.Control.ResidualNormFloor)
 	ratio := residualNorm / denom
 	tripped := ratio > s.cfg.Control.OvershootThreshold
 

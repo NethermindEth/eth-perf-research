@@ -56,12 +56,9 @@ type BlockHeader struct {
 	BaseFee    *big.Int
 }
 
-// clientOpts collects functional-option state before the Client is built.
 type clientOpts struct {
-	jwtSecret    []byte
-	timeout      time.Duration
-	maxIdleConns int
-	userAgent    string
+	jwtSecret []byte
+	timeout   time.Duration
 }
 
 // Option configures a Client.
@@ -99,16 +96,6 @@ func WithTimeout(d time.Duration) Option {
 	return func(o *clientOpts) { o.timeout = d }
 }
 
-// WithMaxIdleConns sets the maximum number of idle keep-alive connections.
-func WithMaxIdleConns(n int) Option {
-	return func(o *clientOpts) { o.maxIdleConns = n }
-}
-
-// WithUserAgent sets the User-Agent header sent on every request.
-func WithUserAgent(ua string) Option {
-	return func(o *clientOpts) { o.userAgent = ua }
-}
-
 // Client is a JSON-RPC HTTP client. Safe for concurrent use.
 type Client struct {
 	rpc *gethrpc.Client
@@ -119,22 +106,20 @@ type Client struct {
 // port. Use WithJWTSecret or WithJWTFile to enable JWT auth.
 func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	o := &clientOpts{
-		timeout:      defaultTimeout,
-		maxIdleConns: defaultMaxIdleConns,
-		userAgent:    defaultUserAgent,
+		timeout: defaultTimeout,
 	}
 	for _, fn := range opts {
 		fn(o)
 	}
 
 	httpClient := &http.Client{
-		Transport: &http.Transport{MaxIdleConnsPerHost: o.maxIdleConns},
+		Transport: &http.Transport{MaxIdleConnsPerHost: defaultMaxIdleConns},
 		Timeout:   o.timeout,
 	}
 
 	clientOpts := []gethrpc.ClientOption{
 		gethrpc.WithHTTPClient(httpClient),
-		gethrpc.WithHeader("User-Agent", o.userAgent),
+		gethrpc.WithHeader("User-Agent", defaultUserAgent),
 	}
 	if len(o.jwtSecret) > 0 {
 		var secret [32]byte
@@ -149,7 +134,6 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	return &Client{rpc: rc, eth: ethclient.NewClient(rc)}, nil
 }
 
-// Call invokes method with params and unmarshals the result into out.
 func (c *Client) Call(ctx context.Context, method string, params []any, out any) error {
 	args := params
 	if args == nil {
@@ -161,7 +145,6 @@ func (c *Client) Call(ctx context.Context, method string, params []any, out any)
 	return nil
 }
 
-// ChainID returns the chain ID via eth_chainId.
 func (c *Client) ChainID(ctx context.Context) (uint64, error) {
 	id, err := c.eth.ChainID(ctx)
 	if err != nil {
@@ -186,7 +169,6 @@ func (c *Client) BlockByNumber(ctx context.Context, n int64) (*BlockHeader, erro
 	return headerToBlockHeader(h), nil
 }
 
-// BlockByHash returns the block header identified by h.
 func (c *Client) BlockByHash(ctx context.Context, h common.Hash, _ bool) (*BlockHeader, error) {
 	hdr, err := c.eth.HeaderByHash(ctx, h)
 	if err != nil {
@@ -195,7 +177,6 @@ func (c *Client) BlockByHash(ctx context.Context, h common.Hash, _ bool) (*Block
 	return headerToBlockHeader(hdr), nil
 }
 
-// TransactionCount returns the on-chain nonce for addr at the latest block.
 func (c *Client) TransactionCount(ctx context.Context, addr common.Address) (uint64, error) {
 	n, err := c.eth.NonceAt(ctx, addr, nil)
 	if err != nil {
@@ -204,8 +185,6 @@ func (c *Client) TransactionCount(ctx context.Context, addr common.Address) (uin
 	return n, nil
 }
 
-// TestingCommitBlockV1 submits signed transactions to Nethermind's
-// testing_commitBlockV1 endpoint. Returns the committed block hash.
 func (c *Client) TestingCommitBlockV1(ctx context.Context, signedTxs [][]byte, timestamp uint64) (common.Hash, error) {
 	txs := make([]hexutil.Bytes, len(signedTxs))
 	for i, tx := range signedTxs {
@@ -245,7 +224,6 @@ func (c *Client) CodeAt(ctx context.Context, addr common.Address, blockTag strin
 	return raw, nil
 }
 
-// StatecompGet retrieves Nethermind's statecomp plugin report.
 func (c *Client) StatecompGet(ctx context.Context) (json.RawMessage, error) {
 	var raw json.RawMessage
 	if err := c.Call(ctx, "statecomp_get", nil, &raw); err != nil {
@@ -267,8 +245,6 @@ func translateError(err error) error {
 	return err
 }
 
-// headerToBlockHeader projects geth's Header onto the subset the orchestrator
-// uses.
 func headerToBlockHeader(h *types.Header) *BlockHeader {
 	var baseFee *big.Int
 	if h.BaseFee != nil {
@@ -286,7 +262,6 @@ func headerToBlockHeader(h *types.Header) *BlockHeader {
 	}
 }
 
-// decodeHex32 decodes a 64-char hex string (0x prefix optional) to 32 bytes.
 func decodeHex32(s string) ([]byte, error) {
 	s = strings.TrimPrefix(s, "0x")
 	s = strings.TrimPrefix(s, "0X")

@@ -22,7 +22,6 @@ func TestApplyCodeChangeAddsAndRemoves(t *testing.T) {
 		t.Errorf("ContractsTotal = %d, want 1", got.ContractsTotal)
 	}
 
-	// Add a second account that reuses the same code hash.
 	addr2 := [32]byte{0x02}
 	tr.ApplyCodeChange(addr2, [32]byte{}, hash, 1024)
 	got = tr.SnapshotCounters()
@@ -32,12 +31,10 @@ func TestApplyCodeChangeAddsAndRemoves(t *testing.T) {
 	if got.ContractsTotal != 2 {
 		t.Errorf("ContractsTotal after second add = %d, want 2", got.ContractsTotal)
 	}
-	// codeBytesTotal must NOT double-count (deduped by hash).
 	if got.CodeBytesTotal != 1024 {
 		t.Errorf("CodeBytesTotal = %d, want 1024 (deduped)", got.CodeBytesTotal)
 	}
 
-	// Remove one of them.
 	tr.ApplyCodeChange(addr2, hash, [32]byte{}, 0)
 	got = tr.SnapshotCounters()
 	if got.UniqueCodeHashes != 1 {
@@ -47,7 +44,6 @@ func TestApplyCodeChangeAddsAndRemoves(t *testing.T) {
 		t.Errorf("ContractsTotal after remove = %d, want 1", got.ContractsTotal)
 	}
 
-	// Remove the last one — bytes should drop to zero.
 	tr.ApplyCodeChange(addr, hash, [32]byte{}, 0)
 	got = tr.SnapshotCounters()
 	if got.UniqueCodeHashes != 0 {
@@ -156,11 +152,8 @@ func TestSeedFromScan(t *testing.T) {
 	}
 }
 
-// TestSeedOneCodeMatchesSeedFromScan asserts that feeding seeds one-at-a-time
-// via SeedOneCode produces exactly the same aggregate counters as the
-// slice-based SeedFromScan. This is the correctness guarantee that lets the
-// bootstrap scanner replace the OOM-prone []CodeSeed path with a streaming
-// sink without behavior drift.
+// TestSeedOneCodeMatchesSeedFromScan asserts one-at-a-time SeedOneCode produces
+// the same counters as SeedFromScan, guaranteeing the streaming path is correct.
 func TestSeedOneCodeMatchesSeedFromScan(t *testing.T) {
 	seeds := []CodeSeed{
 		{CodeHash: [32]byte{0x10}, CodeSize: 100, Refcount: 1},
@@ -169,11 +162,9 @@ func TestSeedOneCodeMatchesSeedFromScan(t *testing.T) {
 		{CodeHash: [32]byte{0x40}, CodeSize: 400, Refcount: 4},
 	}
 
-	// Bulk path (legacy).
 	a := New()
 	a.SeedFromScan(seeds, nil)
 
-	// Streaming path (new bootstrap).
 	b := New()
 	for _, s := range seeds {
 		b.SeedOneCode(s)
@@ -192,18 +183,13 @@ func TestSeedOneCodeMatchesSeedFromScan(t *testing.T) {
 	}
 }
 
-// TestRebuildCountersFromCodeStore asserts that the snapshot-restore path
-// can reconstruct aggregate counters by walking the active CodeStore alone,
-// without re-seeding (which would double-count). Critical for the
-// CodesExternal restart path: snapshot.bin carries no per-code records, so
-// counters must be rebuilt from the on-disk store.
+// TestRebuildCountersFromCodeStore guards the CodesExternal restart path:
+// snapshot.bin carries no code records; counters must rebuild from the store alone.
 func TestRebuildCountersFromCodeStore(t *testing.T) {
-	// Seed a tracker the normal way.
 	a := New()
 	a.SeedOneCode(CodeSeed{CodeHash: [32]byte{0xa1}, CodeSize: 500, Refcount: 5})
 	a.SeedOneCode(CodeSeed{CodeHash: [32]byte{0xa2}, CodeSize: 700, Refcount: 7})
 
-	// Move its codestore into a fresh tracker and rebuild counters from it.
 	store := a.CodeStore()
 	b := NewWithCodeStore(store)
 	if err := b.RebuildCountersFromCodeStore(); err != nil {
@@ -223,11 +209,8 @@ func TestRebuildCountersFromCodeStore(t *testing.T) {
 	}
 }
 
-// TestStreamingSeed1M_Correctness exercises the streaming seed path at a
-// scale that would have OOMed the legacy SeedFromScan implementation. We
-// don't measure memory here (that's the responsibility of the regression
-// test in test/sidecar/memory_regression_test.go); we verify that the
-// counters end up exactly where they should.
+// TestStreamingSeed1M_Correctness verifies streaming-seed counter accuracy at
+// 1M entries (the scale that OOMs the slice-based path).
 func TestStreamingSeed1M_Correctness(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping 1M streaming-seed correctness test in short mode")
@@ -257,7 +240,6 @@ func TestStreamingSeed1M_Correctness(t *testing.T) {
 	}
 }
 
-
 func TestAdvanceLastBlockMonotonic(t *testing.T) {
 	tr := New()
 
@@ -266,19 +248,16 @@ func TestAdvanceLastBlockMonotonic(t *testing.T) {
 		t.Fatalf("after Advance(100): LastBlock=%d, want 100", got)
 	}
 
-	// Going backwards must be a no-op.
 	tr.AdvanceLastBlock(50)
 	if got := tr.LastBlock(); got != 100 {
 		t.Fatalf("after Advance(50): LastBlock=%d, want 100 (monotonic)", got)
 	}
 
-	// Forward progress works.
 	tr.AdvanceLastBlock(150)
 	if got := tr.LastBlock(); got != 150 {
 		t.Fatalf("after Advance(150): LastBlock=%d, want 150", got)
 	}
 
-	// Existing state root pinned by SetLastBlock must NOT be cleared.
 	root := [32]byte{0xab}
 	tr.SetLastBlock(200, root)
 	tr.AdvanceLastBlock(250)

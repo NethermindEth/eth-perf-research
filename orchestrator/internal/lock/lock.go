@@ -26,8 +26,6 @@ var ErrAlreadyHeld = errors.New("lock: already held")
 // Lock represents an acquired exclusive lock on a state directory.
 type Lock struct {
 	fd       int
-	lockPath string
-	idPath   string
 	identity string
 }
 
@@ -83,8 +81,6 @@ func Acquire(stateDir string) (*Lock, error) {
 
 	return &Lock{
 		fd:       fd,
-		lockPath: lockPath,
-		idPath:   idPath,
 		identity: identity,
 	}, nil
 }
@@ -107,7 +103,6 @@ func (l *Lock) Release() error {
 	return nil
 }
 
-// Identity returns the UUID-like token written to .lock-identity.
 func (l *Lock) Identity() string {
 	if l == nil {
 		return ""

@@ -7,11 +7,10 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 )
 
-// Uniswap V2 Router02 swap selectors and the fixed placeholder addresses,
-// ported verbatim from EELS build_uniswap_swaps_transactions (helpers.py:625-
-// 639). The router/WETH/DAI/recipient addresses are the EELS placeholders;
-// the orchestrator targets the same router placeholder so the produced swap
-// calldata is byte-equal to the EELS adaptation.
+// Uniswap V2 Router02 swap selectors and fixed placeholder addresses. The
+// router/WETH/DAI/recipient addresses are the EELS placeholders; targeting the
+// same router placeholder keeps the produced swap calldata byte-equal to the
+// EELS adaptation.
 var (
 	uniswapRouterAddr = common.HexToAddress("0x4444444444444444444444444444444444444444")
 	uniswapWethAddr   = common.HexToAddress("0x5555555555555555555555555555555555555555")
@@ -19,30 +18,28 @@ var (
 	uniswapRecipient  = common.HexToAddress("0x7777777777777777777777777777777777777777")
 )
 
-// uniswap swap parameters — EELS build_uniswap_swaps_transactions defaults.
+// uniswap swap parameters.
 const (
-	uniswapBuyRatio = 40      // percent of txs that are buys (helpers.py:692)
-	uniswapSlippage = 50      // bps slippage (helpers.py:693)
-	uniswapGas      = 200_000 // gas_limit default (helpers.py:696)
+	uniswapBuyRatio = 40      // percent of txs that are buys
+	uniswapSlippage = 50      // bps slippage
+	uniswapGas      = 200_000 // exec-tx gas limit
 )
 
-// uniswap swap-amount bounds (helpers.py:689-690). swap_amount is the
-// midpoint of [min, max], min_out applies the slippage haircut.
+// uniswap swap-amount bounds. swap_amount is the midpoint of [min, max];
+// min_out applies the slippage haircut.
 var (
 	uniswapMinSwapAmount = bigFromDec("100000000000000000")            // 1e17
 	uniswapMaxSwapAmount = bigFromDec("1000000000000000000000")        // 1e21
 	uniswapSwapAmount    = new(big.Int).Rsh(uniswapSwapAmountSum(), 1) // (min+max)/2
 	uniswapMinOut        = uniswapComputeMinOut()
-	// uniswapDeadline is the fixed future unix ts EELS uses (helpers.py:740).
-	uniswapDeadline = big.NewInt(2_000_000_000)
+	uniswapDeadline      = big.NewInt(2_000_000_000)
 )
 
 func uniswapSwapAmountSum() *big.Int {
 	return new(big.Int).Add(uniswapMinSwapAmount, uniswapMaxSwapAmount)
 }
 
-// uniswapComputeMinOut mirrors helpers.py:739:
-// min_out = swap_amount * max(0, 10000 - slippage) // 10000.
+// uniswapComputeMinOut: min_out = swap_amount * (10000 - slippage) / 10000.
 func uniswapComputeMinOut() *big.Int {
 	num := new(big.Int).Mul(uniswapSwapAmount, big.NewInt(10_000-uniswapSlippage))
 	return num.Div(num, big.NewInt(10_000))
@@ -53,18 +50,13 @@ func bigFromDec(s string) *big.Int {
 	return v
 }
 
-// verbUniswapSwaps builds Uniswap V2 router swap calls — a faithful port of
-// EELS build_uniswap_swaps_transactions (helpers.py:686). Each tx is a type-2
+// verbUniswapSwaps builds Uniswap V2 router swap calls. Each tx is a type-2
 // call to the router placeholder carrying ABI-encoded swap calldata.
 //
-// EELS allocates buys vs sells across the whole batch proportional to
-// buy_ratio, interleaving buys by a stride. The orchestrator's verb is a pure
-// idx->tx function with no batch count, so the per-idx buy/sell decision is
-// expressed count-independently: idx is the k-th buy when
-// floor(idx*buy_ratio/100) increments at idx. As count grows this reproduces
-// the EELS stride exactly. buys alternate variant 0 (swapExactTokensForTokens)
-// and variant 1 (swapExactETHForTokens) by buy parity; sells use variant 2
-// (swapExactTokensForETH) — identical to helpers.py:758-764.
+// The per-idx buy/sell decision is expressed count-independently: idx is a
+// buy when floor(idx*buy_ratio/100) increments at idx. Buys alternate variant 0
+// (swapExactTokensForTokens) and variant 1 (swapExactETHForTokens) by buy
+// parity; sells use variant 2 (swapExactTokensForETH).
 type verbUniswapSwaps struct{}
 
 func (verbUniswapSwaps) Name() string { return "uniswap_swaps" }
@@ -100,7 +92,7 @@ func (verbUniswapSwaps) BuildTx(idx uint64, _ BuildCtx) (*types.DynamicFeeTx, er
 }
 
 // encodeUniswapSwapCall returns the ABI-encoded calldata and tx value for a
-// router swap. Mirrors _encode_uniswap_swap_call (helpers.py:642):
+// router swap:
 //
 //	variant 0 -> swapExactTokensForTokens (value 0)
 //	variant 1 -> swapExactETHForTokens   (value = amountIn, payable)

@@ -1,18 +1,12 @@
 package verbs
 
 // Spamoor scenario contract creation (init) bytecode. Each constant is the
-// exact *MetaData.Bin from the abigen-generated Go binding under
-// spamoor/scenarios/<name>/contract/, with the leading 0x stripped. Deploying
-// a CREATE transaction with this as the calldata reproduces the on-chain
-// contract Spamoor itself deploys at scenario start.
+// exact *MetaData.Bin from the abigen-generated Go binding, with the leading
+// 0x stripped. Deploying a CREATE transaction with this as the calldata
+// reproduces the on-chain contract Spamoor deploys at scenario start.
 //
-//   - storageSpamInitHex  — scenarios/storagespam/contract/StorageSpam.go
-//   - testTokenInitHex    — scenarios/erc20tx/contract/TestToken.go
-//   - storageRefundInitHex — scenarios/storagerefundtx/contract/StorageRefund.go
-//
-// gasBurnerInitHex is assembled by gasBurnerCreationCode (gasburner_asm.go);
-// the gasburnertx scenario has no Solidity source — Spamoor compiles it from
-// geas templates at runtime.
+// The GasBurner init code has no Solidity source — it is assembled by
+// gasBurnerCreationCode (gasburner_asm.go).
 const (
 	// StorageSpam: setRandomForGas(uint256,uint256) writes pseudo-random
 	// storage slots until a gas budget is exhausted — the primary storage
@@ -27,4 +21,3 @@ const (
 	// slots and clears an older window — exercises SSTORE refunds.
 	storageRefundInitHex = "608060405234801561000f575f80fd5b506102148061001d5f395ff3fe608060405234801561000f575f80fd5b5060043610610060575f3560e01c80632552317c1461006457806351bbd3581461007f5780635387694b1461008857806375635015146100a75780638c60b2ee146100af578063fe0d94c1146100b8575b5f80fd5b61006d60035481565b60405190815260200160405180910390f35b61006d60025481565b61006d610096366004610187565b60046020525f908152604090205481565b61006d5f5481565b61006d60015481565b6100cb6100c6366004610187565b6100cd565b005b6003544311156100e1575f54600255436003555b5f6001546002546100f291906101b2565b9050818111156100ff5750805b6001545f5b828110156101335760045f61011983856101cb565b815260208101919091526040015f90812055600101610104565b5061013e82826101cb565b6001555f8054905b84811015610174574360045f61015c84866101cb565b815260208101919091526040015f2055600101610146565b5061017f84826101cb565b5f5550505050565b5f60208284031215610197575f80fd5b5035919050565b634e487b7160e01b5f52601160045260245ffd5b818103818111156101c5576101c561019e565b92915050565b808201808211156101c5576101c561019e56fea2646970667358221220c918dd9b1ba607b3ceaac63b561025c13f1fe54a55ec0e6c3401467ce28df6b664736f6c63430008160033"
 )
-
