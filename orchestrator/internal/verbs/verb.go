@@ -42,17 +42,24 @@ type Verb interface {
 // Registry maps verb names to their native implementation. Verbs that are not
 // yet golden-verified are intentionally absent so the dispatcher fails loudly
 // rather than shipping unverified on-chain state.
-var Registry = map[string]Verb{
-	verbEoatx{}.Name():           verbEoatx{},
-	verbCalltx{}.Name():          verbCalltx{},
-	verbDeploytx{}.Name():        verbDeploytx{},
-	verbFactoryDeploytx{}.Name(): verbFactoryDeploytx{},
-	verbStorageSpam{}.Name():     verbStorageSpam{},
-	verbErc20Bloater{}.Name():    verbErc20Bloater{},
-	verbErc20tx{}.Name():         verbErc20tx{},
-	verbUniswapSwaps{}.Name():    verbUniswapSwaps{},
-	verbStorageRefundtx{}.Name(): verbStorageRefundtx{},
-	verbGasburnertx{}.Name():     verbGasburnertx{},
+var Registry = buildRegistry()
+
+// buildRegistry assembles the verb registry from the bespoke verbs plus the
+// table-driven contract-call verbs (see calltable.go). Verbs that are not yet
+// golden-verified are intentionally absent so the dispatcher fails loudly
+// rather than shipping unverified on-chain state.
+func buildRegistry() map[string]Verb {
+	reg := map[string]Verb{
+		verbEoatx{}.Name():           verbEoatx{},
+		verbDeploytx{}.Name():        verbDeploytx{},
+		verbFactoryDeploytx{}.Name(): verbFactoryDeploytx{},
+		verbErc20tx{}.Name():         verbErc20tx{},
+		verbUniswapSwaps{}.Name():    verbUniswapSwaps{},
+	}
+	for _, spec := range callSpecs {
+		reg[spec.name] = callVerb{spec: spec}
+	}
+	return reg
 }
 
 // Lookup returns the verb registered under name, or false if unknown.

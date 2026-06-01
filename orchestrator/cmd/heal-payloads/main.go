@@ -64,7 +64,7 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fetcher := newRPCBlockFetcher(client)
+			fetcher := newDebugBlockFetcher(client)
 			summary, err := Heal(cmd.Context(), HealConfig{
 				InputPath:   f.in,
 				OutputPath:  out,

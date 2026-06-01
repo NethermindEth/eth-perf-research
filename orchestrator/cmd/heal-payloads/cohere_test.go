@@ -13,15 +13,15 @@ import (
 
 // orphanPayload is a frame for block n that does NOT link to the canonical
 // chain: its parent and self hashes are off-chain sentinels.
-func orphanPayload(n uint64) *payloads.ExecutionPayloadV3 {
-	p := fakePayload(n)
+func orphanPayload(canonical *payloads.ExecutionPayloadV3) *payloads.ExecutionPayloadV3 {
+	cp := *canonical
 	var off common.Hash
 	for i := range off {
 		off[i] = 0xee
 	}
-	p.ParentHash = off
-	p.BlockHash = off
-	return p
+	cp.ParentHash = off
+	cp.BlockHash = off
+	return &cp
 }
 
 func cohereFetcher(t *testing.T, canonical []*payloads.ExecutionPayloadV3, head uint64) HashFetcher {
@@ -32,17 +32,7 @@ func cohereFetcher(t *testing.T, canonical []*payloads.ExecutionPayloadV3, head 
 	if err != nil {
 		t.Fatalf("rpc.NewClient: %v", err)
 	}
-	return newRPCBlockFetcher(client)
-}
-
-// canonicalBlocks returns fakePayload(0..n] inclusive of 0 so BlockHashAt(from-1)
-// can be served for from=1.
-func canonicalBlocks(n uint64) []*payloads.ExecutionPayloadV3 {
-	out := make([]*payloads.ExecutionPayloadV3, n+1)
-	for i := uint64(0); i <= n; i++ {
-		out[i] = fakePayload(i)
-	}
-	return out
+	return newDebugBlockFetcher(client)
 }
 
 func TestCohereHeadAndInternalGap(t *testing.T) {
@@ -50,7 +40,7 @@ func TestCohereHeadAndInternalGap(t *testing.T) {
 	in := filepath.Join(dir, "payloads.rlp")
 	out := filepath.Join(dir, "payloads.rlp.cohered")
 
-	all := canonicalBlocks(5)
+	all := buildCanonicalChain(5)
 	// Input starts at 3 (missing head 1,2) and omits 4 (internal gap): [3,5].
 	writePayloadsFile(t, in, []*payloads.ExecutionPayloadV3{all[3], all[5]})
 
@@ -77,7 +67,7 @@ func TestCohereReorgLastOccurrenceWins(t *testing.T) {
 	in := filepath.Join(dir, "payloads.rlp")
 	out := filepath.Join(dir, "payloads.rlp.cohered")
 
-	all := canonicalBlocks(5)
+	all := buildCanonicalChain(5)
 	// Simulate a reorg recorded in the file: committed 1,2,3,4 then rolled back
 	// and re-committed 3,4,5. Last occurrence of 3 and 4 is canonical.
 	writePayloadsFile(t, in, []*payloads.ExecutionPayloadV3{
@@ -107,10 +97,10 @@ func TestCohereRelinkOrphan(t *testing.T) {
 	in := filepath.Join(dir, "payloads.rlp")
 	out := filepath.Join(dir, "payloads.rlp.cohered")
 
-	all := canonicalBlocks(4)
+	all := buildCanonicalChain(4)
 	// Block 3 present only as an orphan (does not link); cohere must refetch it.
 	writePayloadsFile(t, in, []*payloads.ExecutionPayloadV3{
-		all[1], all[2], orphanPayload(3), all[4],
+		all[1], all[2], orphanPayload(all[3]), all[4],
 	})
 
 	summary, err := Cohere(context.Background(), CohereConfig{

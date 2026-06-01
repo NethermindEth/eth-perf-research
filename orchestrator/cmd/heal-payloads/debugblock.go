@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
+	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -65,44 +68,27 @@ func (f *debugBlockFetcher) PayloadAt(ctx context.Context, blockNumber uint64) (
 	if err := rlp.DecodeBytes(b, &blk); err != nil {
 		return nil, fmt.Errorf("heal: rlp-decode block %d: %w", blockNumber, err)
 	}
-	return blockToPayload(&blk)
+	return engine.BlockToExecutableData(&blk, nil, nil, nil).ExecutionPayload, nil
 }
 
-func blockToPayload(blk *types.Block) (*payloads.ExecutionPayloadV3, error) {
-	h := blk.Header()
-	txs := make([][]byte, len(blk.Transactions()))
-	for i, tx := range blk.Transactions() {
-		enc, err := tx.MarshalBinary()
-		if err != nil {
-			return nil, fmt.Errorf("heal: marshal tx %d in block %d: %w", i, h.Number.Uint64(), err)
-		}
-		txs[i] = enc
+func parseHexUint64(s string) (uint64, error) {
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	if s == "" {
+		return 0, nil
 	}
-	bloom := h.Bloom
-	var blobGasUsed, excessBlobGas uint64
-	if h.BlobGasUsed != nil {
-		blobGasUsed = *h.BlobGasUsed
+	var v uint64
+	if _, err := fmt.Sscanf(s, "%x", &v); err != nil {
+		return 0, fmt.Errorf("parseHexUint64 %q: %w", s, err)
 	}
-	if h.ExcessBlobGas != nil {
-		excessBlobGas = *h.ExcessBlobGas
+	return v, nil
+}
+
+func decodeHexBytes(s string) ([]byte, error) {
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	if s == "" {
+		return []byte{}, nil
 	}
-	return &payloads.ExecutionPayloadV3{
-		ParentHash:    h.ParentHash,
-		FeeRecipient:  h.Coinbase,
-		StateRoot:     h.Root,
-		ReceiptsRoot:  h.ReceiptHash,
-		LogsBloom:     bloom[:],
-		Random:        h.MixDigest,
-		Number:        h.Number.Uint64(),
-		GasLimit:      h.GasLimit,
-		GasUsed:       h.GasUsed,
-		Timestamp:     h.Time,
-		ExtraData:     h.Extra,
-		BaseFeePerGas: h.BaseFee,
-		BlockHash:     blk.Hash(),
-		Transactions:  txs,
-		Withdrawals:   blk.Withdrawals(),
-		BlobGasUsed:   &blobGasUsed,
-		ExcessBlobGas: &excessBlobGas,
-	}, nil
+	return hex.DecodeString(s)
 }

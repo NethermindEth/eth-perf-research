@@ -253,8 +253,8 @@ type State struct {
 	// contractEligible is the set of verbs whose contract dependencies are
 	// deployed-and-verified on this chain. It is computed once after bootstrap
 	// and installed via SetEligibleVerbs; Pick restricts its candidate set to
-	// these verbs (ineligible verbs get zero gradient weight, are skipped by
-	// the simplex, and are NOT floored by R1). A nil map means "eligibility
+	// these verbs (ineligible verbs are excluded from the candidate set and the
+	// exploration floor). A nil map means "eligibility
 	// not configured" — every verb is treated as eligible, which preserves the
 	// pre-eligibility behaviour for tests and any caller that never calls
 	// SetEligibleVerbs.
@@ -278,7 +278,7 @@ type State struct {
 // computes after bootstrap. It is called once, before the hot loop starts and
 // before any Pick — Pick itself stays read-only on State. A verb absent from
 // the set is structurally dead on this chain (its contract is not deployed)
-// and is excluded from the gradient, the simplex, and the R1 entropy floor.
+// and is excluded from the candidate set and the exploration floor.
 func (s *State) SetEligibleVerbs(eligible []string) {
 	set := make(map[string]bool, len(eligible))
 	for _, v := range eligible {
@@ -436,7 +436,7 @@ func (s *State) alphaTuning() mathx.Tuning {
 type BatchPlan struct {
 	Verb          string
 	DeadlineBytes int
-	Mix           map[string]float64 // post-projection simplex weights (per verb)
+	Mix           map[string]float64 // per-verb score
 	NMaxTxs       int                // hard cap derived from axis headroom; 0 = uncapped
 }
 

@@ -85,7 +85,6 @@ func TestDefaultsMatchHistoricalConstants(t *testing.T) {
 	if r.IdleBackoffMS != 50 {
 		t.Errorf("idle_backoff_ms = %d, want 50", r.IdleBackoffMS)
 	}
-	checkI(t, "lookahead_depth", r.LookaheadDepth, 4)
 	if r.ResumeReorgTolerance != 256 {
 		t.Errorf("resume_reorg_tolerance = %d, want 256", r.ResumeReorgTolerance)
 	}
@@ -163,8 +162,7 @@ run:
 	}
 }
 
-// TestLoadEnvOverridesYAML verifies an env var takes precedence over a YAML
-// value, which in turn takes precedence over Defaults().
+// TestLoadEWMAAlpha verifies a YAML value overlays the Defaults() value.
 func TestLoadEWMAAlpha(t *testing.T) {
 	path := writeYAML(t, "control:\n  ewma_alpha: 0.77\n")
 	cfg, err := Load(path)
@@ -173,24 +171,6 @@ func TestLoadEWMAAlpha(t *testing.T) {
 	}
 	if cfg.Control.EWMAAlpha != 0.77 {
 		t.Errorf("ewma_alpha = %g, want 0.77 (YAML overlay)", cfg.Control.EWMAAlpha)
-	}
-}
-
-// TestLoadLookaheadDepth verifies the run.lookahead_depth knob: YAML overlay
-// and the >= 1 range check.
-func TestLoadLookaheadDepth(t *testing.T) {
-	path := writeYAML(t, "run:\n  lookahead_depth: 8\n")
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Run.LookaheadDepth != 8 {
-		t.Errorf("lookahead_depth = %d, want 8 (YAML overlay)", cfg.Run.LookaheadDepth)
-	}
-
-	bad := writeYAML(t, "run:\n  lookahead_depth: 0\n")
-	if _, err := Load(bad); err == nil {
-		t.Fatal("expected Load to fail on lookahead_depth=0, got nil")
 	}
 }
 

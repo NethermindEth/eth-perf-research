@@ -6,11 +6,20 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/pkg/sidecar/rlp"
 )
 
+// TestApplyCodeChangeAddsAndRemoves exercises add, dedup, and remove semantics
+// via ApplyBlockDiff (the production batched path) with 1-element slices so
+// each step is equivalent to the old per-call ApplyCodeChange.
 func TestApplyCodeChangeAddsAndRemoves(t *testing.T) {
 	tr := New()
-	addr := [32]byte{0x01}
 	hash := [32]byte{0xab}
-	tr.ApplyCodeChange(addr, [32]byte{}, hash, 1024)
+
+	// First add: new contract with hash, size 1024.
+	tr.ApplyBlockDiff(rlp.BlockDiffRecord{
+		BlockNumber: 1,
+		CodeHashChanges: []rlp.CodeHashChange{
+			{OldHash: [32]byte{}, NewHash: hash, NewCodeSize: 1024},
+		},
+	})
 	got := tr.SnapshotCounters()
 	if got.UniqueCodeHashes != 1 {
 		t.Errorf("UniqueCodeHashes = %d, want 1", got.UniqueCodeHashes)
@@ -22,8 +31,13 @@ func TestApplyCodeChangeAddsAndRemoves(t *testing.T) {
 		t.Errorf("ContractsTotal = %d, want 1", got.ContractsTotal)
 	}
 
-	addr2 := [32]byte{0x02}
-	tr.ApplyCodeChange(addr2, [32]byte{}, hash, 1024)
+	// Second add of same hash (different account): refcount goes to 2, still 1 unique.
+	tr.ApplyBlockDiff(rlp.BlockDiffRecord{
+		BlockNumber: 2,
+		CodeHashChanges: []rlp.CodeHashChange{
+			{OldHash: [32]byte{}, NewHash: hash, NewCodeSize: 1024},
+		},
+	})
 	got = tr.SnapshotCounters()
 	if got.UniqueCodeHashes != 1 {
 		t.Errorf("UniqueCodeHashes after second add = %d, want 1", got.UniqueCodeHashes)
@@ -35,7 +49,13 @@ func TestApplyCodeChangeAddsAndRemoves(t *testing.T) {
 		t.Errorf("CodeBytesTotal = %d, want 1024 (deduped)", got.CodeBytesTotal)
 	}
 
-	tr.ApplyCodeChange(addr2, hash, [32]byte{}, 0)
+	// Remove one reference: refcount → 1, still unique.
+	tr.ApplyBlockDiff(rlp.BlockDiffRecord{
+		BlockNumber: 3,
+		CodeHashChanges: []rlp.CodeHashChange{
+			{OldHash: hash, NewHash: [32]byte{}, NewCodeSize: 0},
+		},
+	})
 	got = tr.SnapshotCounters()
 	if got.UniqueCodeHashes != 1 {
 		t.Errorf("UniqueCodeHashes after remove = %d, want 1", got.UniqueCodeHashes)
@@ -44,7 +64,13 @@ func TestApplyCodeChangeAddsAndRemoves(t *testing.T) {
 		t.Errorf("ContractsTotal after remove = %d, want 1", got.ContractsTotal)
 	}
 
-	tr.ApplyCodeChange(addr, hash, [32]byte{}, 0)
+	// Remove last reference: evicted.
+	tr.ApplyBlockDiff(rlp.BlockDiffRecord{
+		BlockNumber: 4,
+		CodeHashChanges: []rlp.CodeHashChange{
+			{OldHash: hash, NewHash: [32]byte{}, NewCodeSize: 0},
+		},
+	})
 	got = tr.SnapshotCounters()
 	if got.UniqueCodeHashes != 0 {
 		t.Errorf("UniqueCodeHashes after final remove = %d, want 0", got.UniqueCodeHashes)

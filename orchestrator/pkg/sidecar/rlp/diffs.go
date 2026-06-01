@@ -23,7 +23,6 @@ package rlp
 
 import (
 	"fmt"
-	"io"
 
 	gethrlp "github.com/ethereum/go-ethereum/rlp"
 )
@@ -339,48 +338,6 @@ func toWire(rec BlockDiffRecord) blockDiffWire {
 	}
 }
 
-func fromWire(w blockDiffWire) (BlockDiffRecord, error) {
-	rec := BlockDiffRecord{BlockNumber: w.BlockNumber}
-	if len(w.StateRoot) != 0 {
-		if len(w.StateRoot) != 32 {
-			return BlockDiffRecord{}, fmt.Errorf("stateRoot len=%d, want 32", len(w.StateRoot))
-		}
-		copy(rec.StateRoot[:], w.StateRoot)
-	}
-	if len(w.CodeHashChanges) > 0 {
-		rec.CodeHashChanges = make([]CodeHashChange, len(w.CodeHashChanges))
-		for i, c := range w.CodeHashChanges {
-			if err := assertHashLen(c.OldHash, "oldHash"); err != nil {
-				return BlockDiffRecord{}, err
-			}
-			if err := assertHashLen(c.NewHash, "newHash"); err != nil {
-				return BlockDiffRecord{}, err
-			}
-			rec.CodeHashChanges[i].NewCodeSize = c.NewCodeSize
-			if len(c.OldHash) == 32 {
-				copy(rec.CodeHashChanges[i].OldHash[:], c.OldHash)
-			}
-			if len(c.NewHash) == 32 {
-				copy(rec.CodeHashChanges[i].NewHash[:], c.NewHash)
-			}
-		}
-	}
-	if len(w.SlotCountChanges) > 0 {
-		rec.SlotCountChanges = make([]SlotCountChange, len(w.SlotCountChanges))
-		for i, s := range w.SlotCountChanges {
-			if err := assertHashLen(s.HashedAddress, "hashedAddress"); err != nil {
-				return BlockDiffRecord{}, err
-			}
-			rec.SlotCountChanges[i].OldCount = s.OldCount
-			rec.SlotCountChanges[i].NewCount = s.NewCount
-			if len(s.HashedAddress) == 32 {
-				copy(rec.SlotCountChanges[i].HashedAddress[:], s.HashedAddress)
-			}
-		}
-	}
-	return rec, nil
-}
-
 // assertHashLen permits zero length (canonical RLP of the all-zero NoCode
 // sentinel) and a full 32-byte hash; anything else is data corruption.
 func assertHashLen(b []byte, name string) error {
@@ -388,13 +345,4 @@ func assertHashLen(b []byte, name string) error {
 		return nil
 	}
 	return fmt.Errorf("%s: invalid length %d, want 0 or 32", name, len(b))
-}
-
-// DecodeBlockDiffStream decodes a single record from an io.Reader.
-func DecodeBlockDiffStream(r io.Reader) (BlockDiffRecord, error) {
-	var w blockDiffWire
-	if err := gethrlp.Decode(r, &w); err != nil {
-		return BlockDiffRecord{}, fmt.Errorf("decode BlockDiffRecord (stream): %w", err)
-	}
-	return fromWire(w)
 }

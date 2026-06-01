@@ -16,6 +16,7 @@ package snapshot
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -136,10 +137,15 @@ func writeFile(path string, t *tracker.Tracker) (err error) {
 
 	snap := t.SnapshotCounters()
 	hdr := Header{
-		SchemaVersion:         2,
-		WrittenAt:             time.Now().UTC().Format(time.RFC3339Nano),
-		BlockNumber:           snap.LastBlock,
-		StateRoot:             hex32(snap.StateRoot),
+		SchemaVersion: 2,
+		WrittenAt:     time.Now().UTC().Format(time.RFC3339Nano),
+		BlockNumber:   snap.LastBlock,
+		StateRoot: func() string {
+			if snap.StateRoot == ([32]byte{}) {
+				return ""
+			}
+			return "0x" + hex.EncodeToString(snap.StateRoot[:])
+		}(),
 		AccountsTotal:         snap.AccountsTotal,
 		EmptyAccounts:         snap.EmptyAccounts,
 		AccountTrieBranches:   snap.AccountTrieBranches,
@@ -261,19 +267,4 @@ func writeUvarint(w io.Writer, v uint64) error {
 		return fmt.Errorf("write uvarint: %w", err)
 	}
 	return nil
-}
-
-func hex32(b [32]byte) string {
-	const hexChars = "0123456789abcdef"
-	out := make([]byte, 2+64)
-	out[0] = '0'
-	out[1] = 'x'
-	for i, v := range b {
-		out[2+2*i] = hexChars[v>>4]
-		out[2+2*i+1] = hexChars[v&0x0F]
-	}
-	if b == [32]byte{} {
-		return ""
-	}
-	return string(out)
 }

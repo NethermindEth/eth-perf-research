@@ -94,17 +94,6 @@ func (t *Tracker) CodesAreExternal() bool {
 	return t.codes != nil && !isMem
 }
 
-// ApplyCodeChange routes old and new hashes to their respective shards
-// (they may differ). Refcount lookups are keyed by codeHash, not address.
-func (t *Tracker) ApplyCodeChange(addr, oldHash, newHash [32]byte, newSize uint64) {
-	if oldHash != zeroHash {
-		t.shards[shardOf(oldHash)].applyCodeRemove(oldHash)
-	}
-	if newHash != zeroHash {
-		t.shards[shardOf(newHash)].applyCodeAdd(newHash, newSize)
-	}
-}
-
 // ApplySlotChange routes a SlotCountChange to its owning shard.
 func (t *Tracker) ApplySlotChange(addr [32]byte, oldCount, newCount uint64) {
 	idx := shardOf(addr)

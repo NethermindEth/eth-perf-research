@@ -53,58 +53,6 @@ func newShard(codes CodeStore) *shard {
 	}
 }
 
-// applyCodeRemove decrements the refcount for oldHash (caller guarantees
-// oldHash != zeroHash). On zero refcount the entry is evicted. contractsTotal
-// is always decremented regardless of other accounts sharing the same hash.
-func (s *shard) applyCodeRemove(oldHash [32]byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if e, ok := s.codes.Get(oldHash); ok {
-		if e.Refcount > 0 {
-			e.Refcount--
-		}
-		if e.Refcount == 0 {
-			s.codeBytesTotal -= int64(e.CodeSize)
-			if s.codeBytesTotal < 0 {
-				s.codeBytesTotal = 0
-			}
-			s.uniqueCodeHashes--
-			if s.uniqueCodeHashes < 0 {
-				s.uniqueCodeHashes = 0
-			}
-			s.codes.Delete(oldHash)
-		} else {
-			s.codes.Put(oldHash, e)
-		}
-	}
-	s.contractsTotal--
-	if s.contractsTotal < 0 {
-		s.contractsTotal = 0
-	}
-}
-
-// applyCodeAdd increments refcount for newHash. CodeBytesTotal only grows on
-// first insertion (deduped by hash).
-func (s *shard) applyCodeAdd(newHash [32]byte, newSize uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	e, ok := s.codes.Get(newHash)
-	if !ok {
-		s.uniqueCodeHashes++
-		s.codeBytesTotal += int64(newSize)
-		e = codeEntry{Refcount: 0, CodeSize: newSize}
-	} else if e.CodeSize == 0 && newSize > 0 {
-		// Repair an earlier entry that came in without a size hint.
-		s.codeBytesTotal += int64(newSize)
-		e.CodeSize = newSize
-	}
-	e.Refcount++
-	s.codes.Put(newHash, e)
-	s.contractsTotal++
-}
-
 // applySlotChange folds a SlotCountChange into the slot map.
 func (s *shard) applySlotChange(addr [32]byte, oldCount, newCount uint64) {
 	s.mu.Lock()

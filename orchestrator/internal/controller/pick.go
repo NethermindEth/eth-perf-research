@@ -264,10 +264,10 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	var deadlineBytes int
 	capN := maxNTxs[topIndex]
 	if math.IsInf(capN, 1) {
-		deadlineBytes = clampMin(totalBatchBytes, 1)
+		deadlineBytes = max(totalBatchBytes, 1)
 	} else {
 		safe := int(capN * avg)
-		deadlineBytes = clampMin(clampMax(safe, totalBatchBytes), 1)
+		deadlineBytes = max(min(safe, totalBatchBytes), 1)
 	}
 
 	// Mix carries the per-verb score, exposed for the Prometheus MixSimplex
@@ -285,7 +285,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	byteBasedMax := nMaxHardCeil
 	if avg > 0 && deadlineBytes > 0 {
-		byteBasedMax = min(clampMin(deadlineBytes/int(avg), 1), nMaxHardCeil)
+		byteBasedMax = min(max(deadlineBytes/int(avg), 1), nMaxHardCeil)
 	}
 	gasBasedMax := min(s.computeGasBasedMax(topVerb, blockGasLimit), nMaxHardCeil)
 	nMax := min(byteBasedMax, gasBasedMax)
@@ -377,18 +377,4 @@ func obsToVec(obs *Observation) AxisVec {
 		AxisStorage:  float64(obs.StorageTrieBytes),
 		AxisCode:     float64(obs.CodeBytesTotal),
 	}
-}
-
-func clampMin(v, lo int) int {
-	if v < lo {
-		return lo
-	}
-	return v
-}
-
-func clampMax(v, hi int) int {
-	if v > hi {
-		return hi
-	}
-	return v
 }

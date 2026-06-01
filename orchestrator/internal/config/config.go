@@ -1,8 +1,8 @@
 // Package config defines RunConfig, the single source of truth for every
 // tunable orchestrator value. RunConfig has three groups — Control (controller
 // tuning), Cost (fee policy), and Run (run-loop / sensor / bootstrap) —
-// populated by Load from built-in defaults, optional target.yaml blocks, and
-// environment-variable overrides, in that precedence order.
+// populated by Load from built-in defaults overlaid by optional target.yaml
+// blocks.
 package config
 
 // Control groups the controller-tuning parameters.
@@ -94,10 +94,6 @@ type Run struct {
 	DispatchSkipStreakHalt int   `json:"dispatch_skip_streak_halt"`
 	RejectionStreakHalt    int   `json:"rejection_streak_halt"`
 	IdleBackoffMS          int64 `json:"idle_backoff_ms"`
-
-	// LookaheadDepth is the max number of blocks the committer goroutine may
-	// run ahead of the sensor-confirming goroutine; 1 = strictly serial.
-	LookaheadDepth int `json:"lookahead_depth"`
 
 	ResumeReorgTolerance int64 `json:"resume_reorg_tolerance"`
 	// RPCTimeoutS is the JSON-RPC client timeout, in seconds.
@@ -197,7 +193,6 @@ func Defaults() RunConfig {
 			DispatchSkipStreakHalt:    20,
 			RejectionStreakHalt:       5,
 			IdleBackoffMS:             50,
-			LookaheadDepth:            4,
 			ResumeReorgTolerance:      256,
 			RPCTimeoutS:               120,
 			SensorPollIntervalMS:      100,

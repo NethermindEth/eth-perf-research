@@ -10,82 +10,96 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
-// fakePayload synthesises a deterministic ExecutionPayloadV3 for block n.
-func fakePayload(n uint64) *payloads.ExecutionPayloadV3 {
-	hash := func(seed byte) common.Hash {
-		var h common.Hash
-		for i := range h {
-			h[i] = seed
-		}
-		return h
+// buildBlock converts a payload into a types.Block with a real computed hash.
+// Uses ExecutableDataToBlockNoHash so block.Hash() is canonical (no stored-hash
+// check), then derives the payload back via BlockToExecutableData so BlockHash
+// reflects what the debug fetcher will compute.
+func buildBlock(p *payloads.ExecutionPayloadV3) *types.Block {
+	blk, err := engine.ExecutableDataToBlockNoHash(*p, nil, nil, nil)
+	if err != nil {
+		panic(fmt.Sprintf("buildBlock: ExecutableDataToBlockNoHash: %v", err))
 	}
-	var bloom [256]byte
-	for i := range bloom {
-		bloom[i] = byte(n) ^ byte(i)
-	}
-	return &payloads.ExecutionPayloadV3{
-		ParentHash:    hash(byte(n - 1)),
-		FeeRecipient:  common.Address{0xaa, byte(n)},
-		StateRoot:     hash(byte(n) | 0x40),
-		ReceiptsRoot:  hash(byte(n) | 0x60),
-		LogsBloom:     bloom[:],
-		Random:        hash(byte(n) | 0x80),
-		Number:        n,
-		GasLimit:      30_000_000,
-		GasUsed:       21000 * n,
-		Timestamp:     1_700_000_000 + n*12,
-		ExtraData:     []byte{0xde, 0xad, byte(n)},
-		BaseFeePerGas: new(big.Int).SetUint64(7 + n),
-		BlockHash:     hash(byte(n)),
-		Transactions:  [][]byte{{0x01, byte(n)}, {0x02, byte(n)}},
-		Withdrawals:   []*types.Withdrawal{{Index: n, Validator: n, Address: common.Address{0xbb, byte(n)}, Amount: 1000 + n}},
-		BlobGasUsed:   new(uint64),
-		ExcessBlobGas: new(uint64),
-	}
+	return blk
 }
 
-// fakeRPC stands in for Nethermind. It indexes payloads by block number,
-// derives synthetic tx hashes, and serves eth_getBlockByNumber,
-// eth_getRawTransactionByHash and eth_blockNumber.
+// buildCanonicalChain constructs n+1 payloads (indices 0..n) where each
+// payload's ParentHash and BlockHash are the cryptographically correct hashes
+// of the underlying types.Block chain. Blocks use deterministic but minimal
+// header fields; block 0 uses common.Hash{} as parent.
+func buildCanonicalChain(n uint64) []*payloads.ExecutionPayloadV3 {
+	out := make([]*payloads.ExecutionPayloadV3, n+1)
+	var prevHash common.Hash // genesis parent = zero hash
+	for i := uint64(0); i <= n; i++ {
+		var bloom [256]byte
+		for j := range bloom {
+			bloom[j] = byte(i) ^ byte(j)
+		}
+		blobGasUsed := uint64(0)
+		excessBlobGas := uint64(0)
+		p := &payloads.ExecutionPayloadV3{
+			ParentHash:    prevHash,
+			FeeRecipient:  common.Address{0xaa, byte(i)},
+			StateRoot:     common.Hash{0x40, byte(i)},
+			ReceiptsRoot:  common.Hash{0x60, byte(i)},
+			LogsBloom:     bloom[:],
+			Random:        common.Hash{0x80, byte(i)},
+			Number:        i,
+			GasLimit:      30_000_000,
+			GasUsed:       0,
+			Timestamp:     1_700_000_000 + i*12,
+			ExtraData:     []byte{0xde, 0xad, byte(i)},
+			BaseFeePerGas: new(big.Int).SetUint64(7 + i),
+			Transactions:  [][]byte{},
+			Withdrawals:   []*types.Withdrawal{{Index: i, Validator: i, Address: common.Address{0xbb, byte(i)}, Amount: 1000 + i}},
+			BlobGasUsed:   &blobGasUsed,
+			ExcessBlobGas: &excessBlobGas,
+		}
+		blk := buildBlock(p)
+		ep := engine.BlockToExecutableData(blk, nil, nil, nil).ExecutionPayload
+		out[i] = ep
+		prevHash = blk.Hash()
+	}
+	return out
+}
+
+// rawBlockFor encodes a payload's underlying types.Block as RLP hex, as
+// debug_getRawBlock would return from a real node.
+func rawBlockFor(p *payloads.ExecutionPayloadV3) string {
+	blk := buildBlock(p)
+	b, err := rlp.EncodeToBytes(blk)
+	if err != nil {
+		panic(fmt.Sprintf("rawBlockFor: rlp encode: %v", err))
+	}
+	return "0x" + hex.EncodeToString(b)
+}
+
+// fakeRPC stands in for Nethermind. It indexes payloads by block number and
+// serves eth_getBlockByNumber, debug_getRawBlock and eth_blockNumber.
 type fakeRPC struct {
 	payloadsByNum map[uint64]*payloads.ExecutionPayloadV3
-	txByHash      map[string][]byte
 	head          uint64
 }
 
 func newFakeRPC(blocks []*payloads.ExecutionPayloadV3, head uint64) *fakeRPC {
 	f := &fakeRPC{
 		payloadsByNum: make(map[uint64]*payloads.ExecutionPayloadV3),
-		txByHash:      make(map[string][]byte),
 		head:          head,
 	}
 	for _, p := range blocks {
 		f.payloadsByNum[p.Number] = p
-		for i, tx := range p.Transactions {
-			h := txHash(p.Number, i)
-			f.txByHash[h] = tx
-		}
 	}
 	return f
-}
-
-// txHash derives a deterministic 32-byte hash from (blockNumber, index).
-func txHash(bn uint64, idx int) string {
-	var h common.Hash
-	h[0] = byte(bn)
-	h[1] = byte(idx)
-	h[31] = 0xff
-	return "0x" + hex.EncodeToString(h[:])
 }
 
 func (f *fakeRPC) handleBlockByNumber(params []json.RawMessage) (any, *rpcErr) {
@@ -100,7 +114,10 @@ func (f *fakeRPC) handleBlockByNumber(params []json.RawMessage) (any, *rpcErr) {
 	if tag == "latest" {
 		n = f.head
 	} else {
-		s := strings.TrimPrefix(tag, "0x")
+		s := tag
+		if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
+			s = s[2:]
+		}
 		if _, err := fmt.Sscanf(s, "%x", &n); err != nil {
 			return nil, &rpcErr{Code: -32602, Message: err.Error()}
 		}
@@ -112,28 +129,32 @@ func (f *fakeRPC) handleBlockByNumber(params []json.RawMessage) (any, *rpcErr) {
 	return wireBlockFor(p), nil
 }
 
-func (f *fakeRPC) handleRawTx(params []json.RawMessage) (any, *rpcErr) {
+func (f *fakeRPC) handleRawBlock(params []json.RawMessage) (any, *rpcErr) {
 	if len(params) < 1 {
-		return nil, &rpcErr{Code: -32602, Message: "missing hash"}
+		return nil, &rpcErr{Code: -32602, Message: "missing block tag"}
 	}
-	var h string
-	if err := json.Unmarshal(params[0], &h); err != nil {
+	var tag string
+	if err := json.Unmarshal(params[0], &tag); err != nil {
 		return nil, &rpcErr{Code: -32602, Message: err.Error()}
 	}
-	tx, ok := f.txByHash[h]
-	if !ok {
-		return nil, &rpcErr{Code: -32602, Message: "unknown tx hash " + h}
+	var n uint64
+	s := tag
+	if len(s) >= 2 && (s[:2] == "0x" || s[:2] == "0X") {
+		s = s[2:]
 	}
-	return "0x" + hex.EncodeToString(tx), nil
+	if _, err := fmt.Sscanf(s, "%x", &n); err != nil {
+		return nil, &rpcErr{Code: -32602, Message: err.Error()}
+	}
+	p, ok := f.payloadsByNum[n]
+	if !ok {
+		return nil, &rpcErr{Code: -32602, Message: fmt.Sprintf("block %d not found", n)}
+	}
+	return rawBlockFor(p), nil
 }
 
 // wireBlockFor renders a payload into the JSON shape eth_getBlockByNumber
-// would return for the heal-payloads CLI.
+// returns, using the payload's BlockHash field as the canonical hash.
 func wireBlockFor(p *payloads.ExecutionPayloadV3) map[string]any {
-	txHashes := make([]string, len(p.Transactions))
-	for i := range p.Transactions {
-		txHashes[i] = txHash(p.Number, i)
-	}
 	withdrawals := make([]map[string]string, len(p.Withdrawals))
 	for i, w := range p.Withdrawals {
 		withdrawals[i] = map[string]string{
@@ -159,7 +180,6 @@ func wireBlockFor(p *payloads.ExecutionPayloadV3) map[string]any {
 		"baseFeePerGas": fmt.Sprintf("0x%x", p.BaseFeePerGas),
 		"blobGasUsed":   fmt.Sprintf("0x%x", deref(p.BlobGasUsed)),
 		"excessBlobGas": fmt.Sprintf("0x%x", deref(p.ExcessBlobGas)),
-		"transactions":  txHashes,
 		"withdrawals":   withdrawals,
 	}
 }
@@ -200,8 +220,8 @@ func newFakeRPCServer(t *testing.T, f *fakeRPC) *httptest.Server {
 			result = fmt.Sprintf("0x%x", f.head)
 		case "eth_getBlockByNumber":
 			result, rerr = f.handleBlockByNumber(req.Params)
-		case "eth_getRawTransactionByHash":
-			result, rerr = f.handleRawTx(req.Params)
+		case "debug_getRawBlock":
+			result, rerr = f.handleRawBlock(req.Params)
 		default:
 			rerr = &rpcErr{Code: -32601, Message: "method not found: " + req.Method}
 		}
@@ -259,13 +279,12 @@ func TestHealPayloadsFillsGap(t *testing.T) {
 	inPath := filepath.Join(dir, "payloads.rlp")
 	outPath := filepath.Join(dir, "payloads.rlp.healed")
 
-	// Build 5 payloads, write only [1,2,5] to disk; serve 3 and 4 via the
-	// fake RPC. Heal must produce a contiguous [1..5] output.
-	all := make([]*payloads.ExecutionPayloadV3, 5)
-	for i := range all {
-		all[i] = fakePayload(uint64(i + 1))
-	}
-	writePayloadsFile(t, inPath, []*payloads.ExecutionPayloadV3{all[0], all[1], all[4]})
+	// Build 5 payloads (indices 0..4 = blocks 1..5 after shift); we use
+	// buildCanonicalChain so hashes are real and round-trip via debug_getRawBlock.
+	all := buildCanonicalChain(5)
+	// Write only blocks 1, 2, 5 to disk; serve 3 and 4 via the fake RPC.
+	// Heal must produce a contiguous [1..5] output.
+	writePayloadsFile(t, inPath, []*payloads.ExecutionPayloadV3{all[1], all[2], all[5]})
 
 	fake := newFakeRPC(all, 5)
 	srv := newFakeRPCServer(t, fake)
@@ -274,7 +293,7 @@ func TestHealPayloadsFillsGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rpc.NewClient: %v", err)
 	}
-	fetcher := newRPCBlockFetcher(client)
+	fetcher := newDebugBlockFetcher(client)
 
 	summary, err := Heal(context.Background(), HealConfig{
 		InputPath:   inPath,
@@ -318,12 +337,9 @@ func TestHealPayloadsTail(t *testing.T) {
 	inPath := filepath.Join(dir, "payloads.rlp")
 	outPath := filepath.Join(dir, "payloads.rlp.healed")
 
-	all := make([]*payloads.ExecutionPayloadV3, 5)
-	for i := range all {
-		all[i] = fakePayload(uint64(i + 1))
-	}
+	all := buildCanonicalChain(5)
 	// Input has [1,2,3]; node head is 5 → tail must add 4 and 5.
-	writePayloadsFile(t, inPath, all[:3])
+	writePayloadsFile(t, inPath, all[1:4])
 	fake := newFakeRPC(all, 5)
 	srv := newFakeRPCServer(t, fake)
 	client, err := rpc.NewClient(srv.URL)
@@ -334,7 +350,7 @@ func TestHealPayloadsTail(t *testing.T) {
 	summary, err := Heal(context.Background(), HealConfig{
 		InputPath:   inPath,
 		OutputPath:  outPath,
-		Fetcher:     newRPCBlockFetcher(client),
+		Fetcher:     newDebugBlockFetcher(client),
 		IncludeTail: true,
 	})
 	if err != nil {

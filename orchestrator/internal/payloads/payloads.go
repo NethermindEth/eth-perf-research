@@ -260,9 +260,6 @@ func (r *Reader) Next() (*ExecutionPayloadV3, error) {
 	var hdr [4]byte
 	_, err := io.ReadFull(r.f, hdr[:])
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		// Distinguish clean EOF (0 bytes read) from mid-header truncation.
-		n, _ := r.f.Seek(0, io.SeekCurrent)
-		_ = n
 		if err == io.EOF {
 			return nil, io.EOF
 		}
