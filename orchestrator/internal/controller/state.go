@@ -181,7 +181,7 @@ func (p *pickScratch) reset(rows []VerbRow) {
 			row[j] = rows[j].F[ax]
 		}
 	}
-	for j := 0; j < n; j++ {
+	for j := range n {
 		p.score[j] = 0
 		p.maxNTxs[j] = 0
 	}

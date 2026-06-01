@@ -63,11 +63,11 @@ func TestNextBlockTSConcurrent(t *testing.T) {
 	results := make([]uint64, goroutines*perGoroutine)
 
 	var wg sync.WaitGroup
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
-			for i := 0; i < perGoroutine; i++ {
+			for i := range perGoroutine {
 				results[g*perGoroutine+i] = nextBlockTS(last)
 			}
 		}(g)

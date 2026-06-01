@@ -98,7 +98,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	// Per-axis full target, desired-at-progress, and residual. Built by axis
 	// iteration so the accounts/storage/code order lives only in the Axis enum.
 	var desired, residual, targetFull AxisVec
-	for a := Axis(0); a < numAxes; a++ {
+	for a := range numAxes {
 		targetFull[a] = tgt.ByteTarget(a)
 		desired[a] = progress * targetFull[a]
 		residual[a] = desired[a] - current[a]
@@ -108,7 +108,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	// in the score loop below is what neutralises over-served axes for scoring.
 	endgame := false
 	if cum >= targetTotal {
-		for a := Axis(0); a < numAxes; a++ {
+		for a := range numAxes {
 			if current[a] < targetFull[a] {
 				endgame = true
 				break
@@ -127,7 +127,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	useRatio := s.UseRatioScoring
 	ratioFellBack := false
 	if useRatio {
-		for a := Axis(0); a < numAxes; a++ {
+		for a := range numAxes {
 			expected := tgt.Shares[a] * cum
 			if expected > targetFull[a] {
 				expected = targetFull[a]
@@ -140,12 +140,12 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 		sumDeficit := deficit.Sum()
 		if sumDeficit > 0 {
-			for a := Axis(0); a < numAxes; a++ {
+			for a := range numAxes {
 				ratioWeight[a] = deficit[a] / sumDeficit
 			}
-			for j := 0; j < n; j++ {
+			for j := range n {
 				var sc float64
-				for a := Axis(0); a < numAxes; a++ {
+				for a := range numAxes {
 					f, w := fMat[a][j], ratioWeight[a]
 					if f > 0 && w > 0 {
 						sc += f * w
@@ -158,9 +158,9 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 	}
 	if !useRatio || ratioFellBack {
-		for j := 0; j < n; j++ {
+		for j := range n {
 			var sc float64
-			for a := Axis(0); a < numAxes; a++ {
+			for a := range numAxes {
 				f, r := fMat[a][j], residual[a]
 				if r < 0 && f > 0 {
 					continue
@@ -180,17 +180,17 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	// of headroom/excess. Used both to size the batch and to exclude a verb
 	// that cannot emit even one tx (cap < 1).
 	var p, tolerance AxisVec
-	for a := Axis(0); a < numAxes; a++ {
+	for a := range numAxes {
 		p[a] = tgt.Shares[a]
 		headroom := math.Max(0, desired[a]-current[a])
 		tol := math.Max(p[a], s.cfg.Control.ToleranceFloor) * float64(totalBatchBytes)
 		tolerance[a] = headroom + tol
 	}
 	maxNTxs := scratch.maxNTxs
-	for i := 0; i < n; i++ {
+	for i := range n {
 		maxNTxs[i] = math.Inf(1)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		fRow := s.Rows[i].F
 		fSum := fRow.Sum()
 		if fSum <= 0 {
@@ -198,7 +198,7 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 		}
 		capForVerb := math.Inf(1)
 		hasOver := false
-		for a := Axis(0); a < numAxes; a++ {
+		for a := range numAxes {
 			excess := fRow[a] - p[a]*fSum
 			if excess > 0 {
 				c := tolerance[a] / excess
@@ -285,19 +285,10 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 	byteBasedMax := nMaxHardCeil
 	if avg > 0 && deadlineBytes > 0 {
-		byteBasedMax = clampMin(deadlineBytes/int(avg), 1)
-		if byteBasedMax > nMaxHardCeil {
-			byteBasedMax = nMaxHardCeil
-		}
+		byteBasedMax = min(clampMin(deadlineBytes/int(avg), 1), nMaxHardCeil)
 	}
-	gasBasedMax := s.computeGasBasedMax(topVerb, blockGasLimit)
-	if gasBasedMax > nMaxHardCeil {
-		gasBasedMax = nMaxHardCeil
-	}
-	nMax := gasBasedMax
-	if byteBasedMax < nMax {
-		nMax = byteBasedMax
-	}
+	gasBasedMax := min(s.computeGasBasedMax(topVerb, blockGasLimit), nMaxHardCeil)
+	nMax := min(byteBasedMax, gasBasedMax)
 	if !math.IsInf(capN, 1) {
 		if raw := int(math.Min(capN, float64(nMaxHardCeil))); raw < nMax {
 			nMax = raw

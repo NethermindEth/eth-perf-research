@@ -1,3 +1,4 @@
+// Package target loads and watches the target.yaml composition shares.
 package target
 
 import (

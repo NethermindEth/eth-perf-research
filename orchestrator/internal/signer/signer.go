@@ -1,3 +1,4 @@
+// Package signer batch-signs EIP-1559 transactions with the master key.
 package signer
 
 import (
@@ -60,7 +61,6 @@ func (s *Signer) SignBatch(ctx context.Context, txs []*orchpb.TxIn) ([][]byte, e
 
 	g, ctx := errgroup.WithContext(ctx)
 	for i, tx := range txs {
-		i, tx := i, tx
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -367,8 +368,6 @@ func freshManifest(cfg Config, t *target.Target, chainIdentity [32]byte, session
 
 func cloneShares(in map[string]float64) map[string]float64 {
 	out := make(map[string]float64, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }

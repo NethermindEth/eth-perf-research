@@ -302,14 +302,12 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	feeCtx, feeCancel := context.WithCancel(ctx)
 	var feeWG sync.WaitGroup
-	feeWG.Add(1)
-	go func() {
-		defer feeWG.Done()
+	feeWG.Go(func() {
 		feeInterval := time.Duration(rc.Cost.FeePolicyIntervalMS) * time.Millisecond
 		if err := runFeePolicyLoop(feeCtx, rpcCli, facadeCtx, feeInterval, rc.Cost.EthPerGasTarget, rc.Cost.PriorityTipWei); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("lifecycle: fee policy loop exited", "err", err)
 		}
-	}()
+	})
 	defer func() {
 		feeCancel()
 		feeWG.Wait()
@@ -532,12 +530,12 @@ func parsePartialAcceptance(err error) (expected, included uint64) {
 	}
 	msg := err.Error()
 	const sep = "transactions but only"
-	idx := strings.Index(msg, sep)
-	if idx < 0 {
+	before, after, ok := strings.Cut(msg, sep)
+	if !ok {
 		return 0, 0
 	}
 	// Walk left to extract the integer before " transactions but only".
-	left := strings.TrimRight(msg[:idx], " ")
+	left := strings.TrimRight(before, " ")
 	if li := strings.LastIndex(left, " "); li >= 0 {
 		left = left[li+1:]
 	}
@@ -545,7 +543,7 @@ func parsePartialAcceptance(err error) (expected, included uint64) {
 		expected = v
 	}
 	// Walk right to extract the integer after "transactions but only ".
-	right := strings.TrimLeft(msg[idx+len(sep):], " ")
+	right := strings.TrimLeft(after, " ")
 	end := 0
 	for end < len(right) && right[end] >= '0' && right[end] <= '9' {
 		end++

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -112,12 +113,12 @@ func registrySummary(reg *verbs.ContractRegistry) string {
 		parts = append(parts, fmt.Sprintf("%s=%s", n, addr.Hex()))
 	}
 	sort.Strings(parts)
-	out := ""
+	var out strings.Builder
 	for i, p := range parts {
 		if i > 0 {
-			out += " "
+			out.WriteString(" ")
 		}
-		out += p
+		out.WriteString(p)
 	}
-	return out
+	return out.String()
 }

@@ -304,7 +304,7 @@ func TestPickDeterministic(t *testing.T) {
 	obs := zeroObs()
 
 	first := s.Pick(obs, tgt, 4_000_000, 0).Verb
-	for i := 0; i < 25; i++ {
+	for i := range 25 {
 		// Advancing BatchID must not perturb the choice — there is no
 		// BatchID-seeded RNG in the new picker.
 		s.BatchID = uint64(i)
@@ -335,7 +335,7 @@ func TestPickEpsilonGreedyExplores(t *testing.T) {
 	obs := zeroObs()
 
 	seen := map[string]bool{}
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		seen[s.Pick(obs, tgt, 4_000_000, 0).Verb] = true
 	}
 	if len(seen) < 2 {
@@ -367,7 +367,7 @@ func TestPickExcludesContractIneligibleVerb(t *testing.T) {
 		TotalBytes: 10 * 1024 * 1024 * 1024,
 	}
 	obs := &Observation{AccountTrieBytes: 400_000_000}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		s.BatchID = uint64(i)
 		plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
 		if plan.Verb != "eoatx" {
@@ -939,7 +939,7 @@ func TestRatioScoring_PreservesEpsilonGreedy(t *testing.T) {
 	const N = 1000
 	explored := 0
 	seen := map[string]int{}
-	for i := 0; i < N; i++ {
+	for range N {
 		plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
 		seen[plan.Verb]++
 		if plan.Verb != "verb_acc" {

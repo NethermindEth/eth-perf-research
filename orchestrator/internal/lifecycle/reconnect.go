@@ -35,8 +35,7 @@ func isTransportError(err error) bool {
 	}
 	// A JSON-RPC error envelope means NM was reachable and answered — that is a
 	// logical error regardless of any transport-sounding words in the message.
-	var rpcErr *rpc.RpcError
-	if errors.As(err, &rpcErr) {
+	if _, ok := errors.AsType[*rpc.RpcError](err); ok {
 		return false
 	}
 	// Socket-level closure during an in-flight call.
@@ -49,12 +48,10 @@ func isTransportError(err error) bool {
 	}
 	// net.Error covers dial timeouts, connection refused wrapped as *net.OpError,
 	// and DNS failures.
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); ok {
 		return true
 	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if _, ok := errors.AsType[*net.OpError](err); ok {
 		return true
 	}
 	// Fallback substring match for transport failures that arrive as plain

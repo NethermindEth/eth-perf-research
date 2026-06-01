@@ -107,7 +107,7 @@ func TestPickDeterministicWithEpsilonZero(t *testing.T) {
 	obs := zeroObs()
 
 	first := s.Pick(obs, tgt, 4_000_000, 0).Verb
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		got := s.Pick(obs, tgt, 4_000_000, 0).Verb
 		if got != first {
 			t.Fatalf("non-deterministic: got %s on iteration %d, want %s", got, i, first)
@@ -195,7 +195,7 @@ func TestInstabilityTripsAfterMaxTrips(t *testing.T) {
 	s := newTestState(verbs, ref, identity)
 
 	s.overshootWindow = make([]bool, window)
-	for i := 0; i < window; i++ {
+	for i := range window {
 		s.overshootWindow[i] = i < maxTrips
 	}
 	s.overshootFilled = window
@@ -205,7 +205,7 @@ func TestInstabilityTripsAfterMaxTrips(t *testing.T) {
 	}
 
 	// With only maxTrips-1 trips it must not fire.
-	for i := 0; i < window; i++ {
+	for i := range window {
 		s.overshootWindow[i] = i < maxTrips-1
 	}
 	if s.HasInstability(testCfg().Control.OvershootThreshold, window, maxTrips, grace) {

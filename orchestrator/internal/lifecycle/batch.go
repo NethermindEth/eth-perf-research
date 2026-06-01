@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync/atomic"
 	"time"
 
@@ -303,9 +304,7 @@ func buildRecord(
 ) *orchpb.Record {
 	addrAfter := addrBefore + uint64(res.TxCount)
 	mix := make(map[string]float64, len(plan.Mix))
-	for k, v := range plan.Mix {
-		mix[k] = v
-	}
+	maps.Copy(mix, plan.Mix)
 
 	return &orchpb.Record{
 		SessionId:        d.sessionID,

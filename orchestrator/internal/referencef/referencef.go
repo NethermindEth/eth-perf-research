@@ -1,7 +1,9 @@
+// Package referencef holds the reference-F seed (per-verb expected per-axis growth).
 package referencef
 
 import (
 	"fmt"
+	"maps"
 	"os"
 
 	"sigs.k8s.io/yaml"
@@ -74,9 +76,7 @@ func WithDefaults(rf *ReferenceF) *ReferenceF {
 	}
 	for verb, defRow := range def.Verbs {
 		row := make(map[string]float64, len(defRow))
-		for axis, v := range defRow {
-			row[axis] = v
-		}
+		maps.Copy(row, defRow)
 		out.Verbs[verb] = row
 	}
 	if rf != nil {
@@ -86,13 +86,9 @@ func WithDefaults(rf *ReferenceF) *ReferenceF {
 				row = make(map[string]float64, len(suppliedRow))
 				out.Verbs[verb] = row
 			}
-			for axis, v := range suppliedRow {
-				row[axis] = v
-			}
+			maps.Copy(row, suppliedRow)
 		}
-		for verb, v := range rf.AvgTxRLP {
-			out.AvgTxRLP[verb] = v
-		}
+		maps.Copy(out.AvgTxRLP, rf.AvgTxRLP)
 	}
 	return out
 }

@@ -71,7 +71,7 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	//      even an in-range-but-large observation cannot ratchet the matrix
 	//      toward the divergent 6.48e13 / 4.15e14 state seen in production.
 	// The adaptive-α/Huber math itself (UpdateCoeff) is unchanged.
-	for a := Axis(0); a < numAxes; a++ {
+	for a := range numAxes {
 		if !mathx.IsFiniteInRange(observed[a], coeffBound) {
 			// Pathological observation — skip this axis's update entirely.
 			continue
@@ -94,7 +94,7 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 
 	// Residual: obs_vec - commanded_vec (commanded = F[verb][ax] * txCount after update).
 	var commanded, obsVec AxisVec
-	for a := Axis(0); a < numAxes; a++ {
+	for a := range numAxes {
 		commanded[a] = row.F[a] * float64(txCount)
 		obsVec[a] = observed[a] * float64(txCount)
 	}
@@ -112,7 +112,7 @@ func (s *State) Apply(pre, post *Observation, plan *BatchPlan, txCount int, disp
 	}
 
 	perAxis := make(map[Axis]float64, len(Axes))
-	for a := Axis(0); a < numAxes; a++ {
+	for a := range numAxes {
 		perAxis[a] = diff[a]
 	}
 

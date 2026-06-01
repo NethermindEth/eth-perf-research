@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"os"
 
@@ -138,16 +139,12 @@ func applyYAML(cfg *RunConfig, yf *yamlFile) {
 		setU64(&cfg.Control.DefaultBaseGasPerVerb, c.DefaultBaseGasPerVerb)
 		if c.BaseGasPerVerb != nil {
 			m := make(map[string]uint64, len(c.BaseGasPerVerb))
-			for k, v := range c.BaseGasPerVerb {
-				m[k] = v
-			}
+			maps.Copy(m, c.BaseGasPerVerb)
 			cfg.Control.BaseGasPerVerb = m
 		}
 		if c.NMaxHardCeilPerVerb != nil {
 			m := make(map[string]int, len(c.NMaxHardCeilPerVerb))
-			for k, v := range c.NMaxHardCeilPerVerb {
-				m[k] = v
-			}
+			maps.Copy(m, c.NMaxHardCeilPerVerb)
 			cfg.Control.NMaxHardCeilPerVerb = m
 		}
 		setB(&cfg.Control.UseRatioScoring, c.UseRatioScoring)

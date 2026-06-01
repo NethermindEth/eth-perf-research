@@ -94,7 +94,7 @@ func TestFeePolicyLoopRateIndependentOfReaders(t *testing.T) {
 
 	var readerWG sync.WaitGroup
 	readerWG.Add(readers)
-	for i := 0; i < readers; i++ {
+	for range readers {
 		go func() {
 			defer readerWG.Done()
 			tick := time.NewTicker(2 * time.Millisecond)

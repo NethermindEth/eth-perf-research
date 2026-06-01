@@ -1,3 +1,4 @@
+// Package manifest reads and writes the run-manifest.json run descriptor.
 package manifest
 
 import (

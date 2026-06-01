@@ -45,7 +45,7 @@ func (v verbErc20tx) BuildTx(idx uint64, ctx BuildCtx) (*types.DynamicFeeTx, err
 // followed by the low 8 bytes of idx big-endian.
 func erc20RecipientForIdx(idx uint64) common.Address {
 	var addr common.Address
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		addr[i] = 0xcc
 	}
 	binary.BigEndian.PutUint64(addr[12:], idx)

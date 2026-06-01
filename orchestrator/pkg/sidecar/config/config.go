@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -196,12 +197,7 @@ func (c Config) Validate() error {
 }
 
 func (c Config) isKnownMode() bool {
-	for _, m := range ValidModes {
-		if c.Mode == m {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ValidModes, c.Mode)
 }
 
 func (c Config) NeedsDB() bool {

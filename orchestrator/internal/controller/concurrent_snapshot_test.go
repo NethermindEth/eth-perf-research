@@ -66,9 +66,7 @@ func TestConcurrentPickApplyAndSnapshot(t *testing.T) {
 	// the race-detector contract the snapshot reader is what we need to keep
 	// strictly lock-free, so colocating Pick+Apply in one writer goroutine is
 	// fine and exercises the same memory orderings.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for !stop.Load() {
 			s.LockState()
 			_ = s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
@@ -76,15 +74,13 @@ func TestConcurrentPickApplyAndSnapshot(t *testing.T) {
 			s.UnlockState()
 			pickApplyOps.Add(1)
 		}
-	}()
+	})
 
 	// Reader: pull FSnapshot in a tight loop with NO LockState, the way the
 	// post-A8 batch.go::buildRecord does. Every value must be finite — a
 	// non-finite read would imply a torn write produced garbage, which the
 	// per-slot word-atomic invariant must prevent.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for !stop.Load() {
 			snap := s.FSnapshot()
 			for _, row := range snap {
@@ -96,7 +92,7 @@ func TestConcurrentPickApplyAndSnapshot(t *testing.T) {
 			}
 			snapshotOps.Add(1)
 		}
-	}()
+	})
 
 	time.Sleep(time.Until(deadline))
 	stop.Store(true)

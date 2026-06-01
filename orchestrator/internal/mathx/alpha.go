@@ -1,3 +1,4 @@
+// Package mathx holds the adaptive-α numeric primitives used by the controller.
 package mathx
 
 import (

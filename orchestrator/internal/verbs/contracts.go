@@ -3,7 +3,7 @@ package verbs
 import (
 	"encoding/hex"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -102,7 +102,7 @@ func (r *ContractRegistry) Names() []ContractName {
 	for n := range r.Contracts {
 		out = append(out, n)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
 

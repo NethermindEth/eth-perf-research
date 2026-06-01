@@ -1,3 +1,4 @@
+// Package payloads reads and writes the length-prefixed ExecutionPayloadV3 RLP log.
 package payloads
 
 import (

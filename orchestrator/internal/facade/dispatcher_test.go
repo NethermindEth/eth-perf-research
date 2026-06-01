@@ -262,16 +262,16 @@ func TestDispatch_ReserveAddressesConcurrent(t *testing.T) {
 
 	got := make([][]uint64, goroutines)
 	done := make(chan int, goroutines)
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		got[g] = make([]uint64, 0, perGoroutine)
 		go func(idx int) {
-			for i := 0; i < perGoroutine; i++ {
+			for range perGoroutine {
 				got[idx] = append(got[idx], c.ReserveAddresses(block))
 			}
 			done <- idx
 		}(g)
 	}
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		<-done
 	}
 	seen := make(map[uint64]bool, goroutines*perGoroutine)

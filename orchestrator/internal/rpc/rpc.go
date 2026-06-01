@@ -238,8 +238,7 @@ func translateError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var rerr gethrpc.Error
-	if errors.As(err, &rerr) {
+	if rerr, ok := errors.AsType[gethrpc.Error](err); ok {
 		return &RpcError{Code: rerr.ErrorCode(), Message: rerr.Error()}
 	}
 	return err
