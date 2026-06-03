@@ -46,14 +46,18 @@ func (e *RpcError) Error() string {
 // BlockHeader holds the fields the orchestrator cares about from
 // eth_getBlockByNumber / eth_getBlockByHash.
 type BlockHeader struct {
-	Number     uint64
-	Hash       common.Hash
-	ParentHash common.Hash
-	StateRoot  common.Hash
-	GasLimit   uint64
-	GasUsed    uint64
-	Timestamp  uint64
-	BaseFee    *big.Int
+	Number       uint64
+	Hash         common.Hash
+	ParentHash   common.Hash
+	StateRoot    common.Hash
+	ReceiptsRoot common.Hash
+	LogsBloom    []byte
+	FeeRecipient common.Address
+	PrevRandao   common.Hash
+	GasLimit     uint64
+	GasUsed      uint64
+	Timestamp    uint64
+	BaseFee      *big.Int
 }
 
 type clientOpts struct {
@@ -250,14 +254,18 @@ func headerToBlockHeader(h *types.Header) *BlockHeader {
 		baseFee = new(big.Int).Set(h.BaseFee)
 	}
 	return &BlockHeader{
-		Number:     h.Number.Uint64(),
-		Hash:       h.Hash(),
-		ParentHash: h.ParentHash,
-		StateRoot:  h.Root,
-		GasLimit:   h.GasLimit,
-		GasUsed:    h.GasUsed,
-		Timestamp:  h.Time,
-		BaseFee:    baseFee,
+		Number:       h.Number.Uint64(),
+		Hash:         h.Hash(),
+		ParentHash:   h.ParentHash,
+		StateRoot:    h.Root,
+		ReceiptsRoot: h.ReceiptHash,
+		LogsBloom:    h.Bloom.Bytes(),
+		FeeRecipient: h.Coinbase,
+		PrevRandao:   h.MixDigest,
+		GasLimit:     h.GasLimit,
+		GasUsed:      h.GasUsed,
+		Timestamp:    h.Time,
+		BaseFee:      baseFee,
 	}
 }
 

@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/controller"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads"
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
@@ -74,22 +72,28 @@ func reachedTarget(obs *controller.Observation, t *controller.Target) bool {
 // buildExecutionPayloadV3 maps a fetched BlockHeader plus the dispatched
 // signed-tx RLPs into the canonical Engine API ExecutionPayloadV3 shape.
 //
-// Fee recipient, prev_randao, logs_bloom, receipts_root and withdrawals are
-// not part of the orchestrator's BlockHeader projection; we fill the zero
-// values (matching the Python `_block_to_payload` for synthetic Nethermind
-// commits, where the test commit path produces an empty miner/randao/etc.).
+// receipts_root, logs_bloom, fee_recipient and prev_randao are projected from
+// the committed block's header so the recorded payload is internally consistent
+// (its block_hash is computed over these fields). Zeroing receipts_root in
+// particular produced payloads whose block_hash could not be reproduced on
+// replay (Geth recomputes a different hash). Withdrawals stay nil — the
+// synthetic commit path produces no withdrawals (empty withdrawalsRoot).
 func buildExecutionPayloadV3(block *rpc.BlockHeader, signedRLP [][]byte) *payloads.ExecutionPayloadV3 {
 	baseFee := block.BaseFee
 	if baseFee == nil {
 		baseFee = new(big.Int)
 	}
+	logsBloom := block.LogsBloom
+	if len(logsBloom) != 256 {
+		logsBloom = make([]byte, 256)
+	}
 	return &payloads.ExecutionPayloadV3{
 		ParentHash:    block.ParentHash,
-		FeeRecipient:  common.Address{},
+		FeeRecipient:  block.FeeRecipient,
 		StateRoot:     block.StateRoot,
-		ReceiptsRoot:  common.Hash{},
-		LogsBloom:     make([]byte, 256),
-		Random:        common.Hash{},
+		ReceiptsRoot:  block.ReceiptsRoot,
+		LogsBloom:     logsBloom,
+		Random:        block.PrevRandao,
 		Number:        block.Number,
 		GasLimit:      block.GasLimit,
 		GasUsed:       block.GasUsed,
