@@ -23,9 +23,9 @@ var updateGolden = flag.Bool("update", false, "regenerate testdata/golden.json f
 type goldenEntry struct {
 	Verb  string `json:"verb"`
 	Idx   uint64 `json:"idx"`
-	To    string `json:"to"`    // "" = contract creation, else 0x-hex
-	Value uint64 `json:"value"` // these vectors all fit uint64
-	Data  string `json:"data"`  // 0x-hex
+	To    string   `json:"to"`    // "" = contract creation, else 0x-hex
+	Value *big.Int `json:"value"` // wei; may exceed uint64 (multi-ETH transfers)
+	Data  string   `json:"data"`  // 0x-hex
 	Gas   uint64 `json:"gas"`
 }
 
@@ -97,9 +97,9 @@ func regenerateGolden(t *testing.T) {
 			if tx.To != nil {
 				to = tx.To.Hex()
 			}
-			value := uint64(0)
+			value := new(big.Int)
 			if tx.Value != nil {
-				value = tx.Value.Uint64()
+				value.Set(tx.Value)
 			}
 			entries = append(entries, goldenEntry{
 				Verb:  name,
@@ -173,7 +173,10 @@ func TestVerbsGolden(t *testing.T) {
 				}
 			}
 
-			wantValue := new(big.Int).SetUint64(e.Value)
+			wantValue := e.Value
+			if wantValue == nil {
+				wantValue = new(big.Int)
+			}
 			gotValue := tx.Value
 			if gotValue == nil {
 				gotValue = new(big.Int)
