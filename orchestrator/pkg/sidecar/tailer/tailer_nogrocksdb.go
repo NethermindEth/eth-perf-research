@@ -28,6 +28,9 @@ func New(h *db.Handle, t *tracker.Tracker, log zerolog.Logger, pollEvery time.Du
 	return &Tailer{t: t, log: log, lastApplied: t.LastBlock()}
 }
 
+// SetHeadSink is a no-op in the stub build (no CF to read a head from).
+func (l *Tailer) SetHeadSink(fn func(int64)) {}
+
 func (l *Tailer) Run(ctx context.Context) error {
 	l.log.Warn().Msg("tailer (stub): no rocksdb; idling")
 	<-ctx.Done()

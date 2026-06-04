@@ -276,6 +276,7 @@ func runAll(ctx context.Context, cfg config.Config, logger zerolog.Logger, machi
 	go prom.Run(ctx, t, time.Second)
 
 	tlr := tailer.New(tailHandle, t, logger, 100*time.Millisecond)
+	tlr.SetHeadSink(rpcSrv.SetChainHead)
 	machine.Advance(state.PhaseLive)
 	runErr := tlr.Run(ctx)
 	writeShutdownSnapshot(cfg, t, logger)

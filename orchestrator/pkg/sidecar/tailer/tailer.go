@@ -33,6 +33,7 @@ type Tailer struct {
 	log         zerolog.Logger
 	pollEvery   time.Duration
 	lastApplied int64
+	headSink    func(int64)
 }
 
 // New constructs a Tailer. pollEvery is the dwell time between CatchUp/scan iterations.
@@ -42,6 +43,12 @@ func New(h *db.Handle, t *tracker.Tracker, log zerolog.Logger, pollEvery time.Du
 	}
 	return &Tailer{h: h, t: t, log: log, pollEvery: pollEvery, lastApplied: t.LastBlock()}
 }
+
+// SetHeadSink registers a callback invoked each tick with the highest block
+// present in the BlockDiffs CF (i.e. the chain head Nethermind has committed).
+// Wiring it to rpc.Server.SetChainHead makes statecomp lag (head - lastApplied)
+// report real catch-up distance instead of a constant 0.
+func (l *Tailer) SetHeadSink(fn func(int64)) { l.headSink = fn }
 
 // Run blocks until ctx is cancelled. Each tick: (1) catch up secondary WAL,
 // (2) iterate BlockDiffs from key > lastApplied, (3) apply to tracker.
@@ -71,7 +78,34 @@ func (l *Tailer) tick(ctx context.Context) error {
 	if err := l.h.CatchUp(); err != nil {
 		l.log.Warn().Err(err).Msg("tailer: CatchUp failed")
 	}
+	if l.headSink != nil {
+		if head, ok := l.highestBlock(); ok {
+			l.headSink(head)
+		}
+	}
 	return l.consumeFrom(ctx, l.lastApplied+1)
+}
+
+// highestBlock returns the largest BlockDiffs key currently visible — the
+// highest block Nethermind has committed to the CF. Cheap O(log n) SeekToLast.
+func (l *Tailer) highestBlock() (int64, bool) {
+	ro := db.NewScanReadOptions()
+	defer ro.Destroy()
+
+	it := l.h.DB.NewIteratorCF(ro, l.h.BlockDiffsCF)
+	defer it.Close()
+
+	it.SeekToLast()
+	if !it.Valid() {
+		return 0, false
+	}
+	k := it.Key()
+	defer k.Free()
+	key := k.Data()
+	if len(key) != 8 {
+		return 0, false
+	}
+	return int64(binary.BigEndian.Uint64(key)), true
 }
 
 // consumeFrom seeks to the first block-number key >= start and applies every
