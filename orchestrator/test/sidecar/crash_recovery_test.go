@@ -45,9 +45,8 @@ func TestCrashRecoveryFromSnapshot(t *testing.T) {
 	// ---- Pre-crash run ----
 	preSnap := buildAndPersistTracker(t, dir)
 
-	// Wipe the in-memory state — anything that survives must do so via the
-	// on-disk blob.
-	preSnap = preSnap // pinned for asserts; no further mutation
+	// Drop any in-memory caches — anything that survives the restart must do so
+	// via the on-disk blob. preSnap is kept for the post-restore asserts.
 	runtime.GC()
 
 	// ---- Restart path: restore from snapshot, NOT from a fresh scan ----
