@@ -63,6 +63,15 @@ type BlockHeader struct {
 type clientOpts struct {
 	jwtSecret []byte
 	timeout   time.Duration
+	err       error
+}
+
+// setErr records the first option error. Functional options can't return an
+// error directly, so they stash it here for NewClient to surface.
+func (o *clientOpts) setErr(err error) {
+	if o.err == nil {
+		o.err = err
+	}
 }
 
 // Option configures a Client.
@@ -73,7 +82,7 @@ func WithJWTSecret(secretHex string) Option {
 	return func(o *clientOpts) {
 		b, err := decodeHex32(secretHex)
 		if err != nil {
-			o.jwtSecret = nil
+			o.setErr(fmt.Errorf("rpc: WithJWTSecret: %w", err))
 			return
 		}
 		o.jwtSecret = b
@@ -85,10 +94,12 @@ func WithJWTFile(path string) Option {
 	return func(o *clientOpts) {
 		raw, err := os.ReadFile(path)
 		if err != nil {
+			o.setErr(fmt.Errorf("rpc: WithJWTFile: read %s: %w", path, err))
 			return
 		}
 		b, err := decodeHex32(strings.TrimSpace(string(raw)))
 		if err != nil {
+			o.setErr(fmt.Errorf("rpc: WithJWTFile: parse %s: %w", path, err))
 			return
 		}
 		o.jwtSecret = b
@@ -114,6 +125,9 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	}
 	for _, fn := range opts {
 		fn(o)
+	}
+	if o.err != nil {
+		return nil, o.err
 	}
 
 	httpClient := &http.Client{
