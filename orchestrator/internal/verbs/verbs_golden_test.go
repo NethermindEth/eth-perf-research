@@ -21,12 +21,12 @@ var updateGolden = flag.Bool("update", false, "regenerate testdata/golden.json f
 // goldenEntry is one tx template vector. golden.json pins To/Value/Data/Gas
 // so any later verb regression is caught byte-for-byte.
 type goldenEntry struct {
-	Verb  string `json:"verb"`
-	Idx   uint64 `json:"idx"`
+	Verb  string   `json:"verb"`
+	Idx   uint64   `json:"idx"`
 	To    string   `json:"to"`    // "" = contract creation, else 0x-hex
 	Value *big.Int `json:"value"` // wei; may exceed uint64 (multi-ETH transfers)
 	Data  string   `json:"data"`  // 0x-hex
-	Gas   uint64 `json:"gas"`
+	Gas   uint64   `json:"gas"`
 }
 
 // goldenContractRegistry returns a stable contract registry for golden
