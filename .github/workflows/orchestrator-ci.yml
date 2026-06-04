@@ -4,14 +4,10 @@ name: orchestrator CI
 # RocksDB (grocksdb), but a `nogrocksdb` build tag swaps in pure-Go stubs so the
 # bulk of the code compiles and vets without system RocksDB on the runner.
 #
-# Blocking gates below (gofmt, build, vet) run under `-tags nogrocksdb` and are
-# known-green. `golangci-lint` and `go test` are non-blocking for now:
-#   - golangci-lint is informational until the lint backlog is triaged, and
-#   - TestRefreshFeePolicyFixedEthPerGas (internal/lifecycle) asserts maxFee ==
-#     EthPerGasTarget, but with the default config PriorityTipWei == target so
-#     the EIP-1559 floor (baseFee + tip) is target+1; the fee-policy semantics
-#     need an author decision before the test step is made blocking.
-# Make them blocking once that is resolved.
+# Blocking gates below (gofmt, build, vet, test) run under `-tags nogrocksdb`
+# and are known-green. golangci-lint is non-blocking (informational) until the
+# lint backlog is triaged. The grocksdb-tagged sidecar integration tests need a
+# RocksDB-equipped runner and are not exercised here.
 
 on:
   push:
@@ -64,5 +60,4 @@ jobs:
           args: --build-tags nogrocksdb
 
       - name: test
-        continue-on-error: true # needs RocksDB runner + TestVerbsGolden fix
         run: go test -tags nogrocksdb ./...
