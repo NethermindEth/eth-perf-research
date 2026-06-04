@@ -102,8 +102,10 @@ func TestBootstrapTailServeFlow(t *testing.T) {
 	s.SetChainHead(1010)
 
 	gotLite := callRPC(t, s, "statecomp_lite")
-	if got := int64(gotLite["accountsTotal"].(float64)); got != 500_000 {
-		t.Errorf("accountsTotal = %d, want 500_000", got)
+	// 500_000 seeded + 1: the diff's CodeHashChange{OldHash: zero, NewHash: a3}
+	// is a new contract deployment, which ApplyBlockDiff counts as a new account.
+	if got := int64(gotLite["accountsTotal"].(float64)); got != 500_001 {
+		t.Errorf("accountsTotal = %d, want 500_001", got)
 	}
 	// Original contractsTotal = sum(refcounts) = 150; +1 from the new code hash → 151.
 	if got := int64(gotLite["contractsTotal"].(float64)); got != 151 {
@@ -126,8 +128,12 @@ func TestBootstrapTailServeFlow(t *testing.T) {
 	}
 
 	gotFull := callRPC(t, s, "statecomp_get")
-	if got := int64(gotFull["storageTrieBytes"].(float64)); got != 20_000_000 {
-		t.Errorf("storageTrieBytes = %d, want 20M", got)
+	// 20_000_000 seeded + 1_904_700 from the estimator fallback: the diff adds
+	// 100 slots (b1 1000->1100) with no explicit byte delta, so ApplyBlockDiff
+	// applies slotDelta * bytesPerSlot = 100 * (20_000_000 / 1_050 seeded slots
+	// = 19_047) = 1_904_700.
+	if got := int64(gotFull["storageTrieBytes"].(float64)); got != 21_904_700 {
+		t.Errorf("storageTrieBytes = %d, want 21_904_700", got)
 	}
 	hist := gotFull["slotCountHistogram"].([]any)
 	if len(hist) != 16 {
