@@ -157,6 +157,14 @@ func relink(p *payloads.ExecutionPayloadV3, prevHash *common.Hash, prevTs uint64
 }
 
 func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayloadV3) error {
+	// We submit empty blobVersionedHashes and a zero parentBeaconBlockRoot, which
+	// is correct only for the synthetic non-blob bloating workload. Fail loudly
+	// rather than replay a blob-carrying payload with mismatched (empty) hashes.
+	if p.BlobGasUsed != nil && *p.BlobGasUsed != 0 {
+		return fmt.Errorf("replay: block %s carries blobs (blobGasUsed=%d); blob replay is unsupported",
+			p.BlockHash.Hex(), *p.BlobGasUsed)
+	}
+
 	var status engine.PayloadStatusV1
 	err := d.Client.Call(ctx, "engine_newPayloadV4", []any{
 		p,                 // ExecutionPayloadV3 == engine.ExecutableData
