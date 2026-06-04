@@ -2,6 +2,8 @@ module github.com/NethermindEth/eth-perf-research/orchestrator
 
 go 1.26
 
+toolchain go1.26.0
+
 require (
 	github.com/ethereum/go-ethereum v1.17.3
 	github.com/fsnotify/fsnotify v1.10.1
