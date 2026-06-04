@@ -87,26 +87,6 @@ func writePayloadsFile(t *testing.T, ps []*payloads.ExecutionPayloadV3) string {
 	return path
 }
 
-// blockHashHex returns the 0x-prefixed block hash for payload p.
-func blockHashHex(p *payloads.ExecutionPayloadV3) string {
-	var sb strings.Builder
-	sb.WriteString("0x")
-	for _, b := range p.BlockHash {
-		sb.WriteString(string([]byte{
-			hexNibble(b >> 4),
-			hexNibble(b & 0x0f),
-		}))
-	}
-	return sb.String()
-}
-
-func hexNibble(n byte) byte {
-	if n < 10 {
-		return '0' + n
-	}
-	return 'a' + n - 10
-}
-
 // mockResponse encodes a single JSON-RPC result response.
 func mockResponse(id json.RawMessage, result any) []byte {
 	res, _ := json.Marshal(result)
@@ -204,10 +184,6 @@ func TestReplaySuccess(t *testing.T) {
 		ps[i] = randPayload(rng, i)
 	}
 
-	// Use the last payload's stateRoot as the manifest's FinalStateRoot.
-	wantRoot := "0x" + strings.ToLower(strings.TrimPrefix(
-		blockHashHex(ps[len(ps)-1]), "0x"))
-	// Actually, use a fixed expected root for simplicity.
 	const expectedRoot = "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
 	srv := newEngineServer(t, validHandler(expectedRoot))
@@ -227,7 +203,6 @@ func TestReplaySuccess(t *testing.T) {
 	if err := d.Replay(context.Background(), path); err != nil {
 		t.Fatalf("expected nil, got: %v", err)
 	}
-	_ = wantRoot
 }
 
 // TestReplayInvalid: server returns INVALID for the second payload → ErrReplayInvalid.
