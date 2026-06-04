@@ -159,11 +159,15 @@ func TestFeePolicyLoopSurvivesTransientError(t *testing.T) {
 }
 
 // TestRefreshFeePolicyFixedEthPerGas verifies the normal case: when base fee is
-// below the configured eth-per-gas target, maxFeePerGas is the fixed target —
-// not 2x base fee. The policy stays cheap and predictable.
+// below the configured eth-per-gas target, maxFeePerGas is the fixed target,
+// floored at baseFee+tip (per refreshFeePolicy's contract) so a base-fee spike
+// can never underprice the tx. With the default config tip == target, so that
+// floor sits one wei above the bare target; assert it generically.
 func TestRefreshFeePolicyFixedEthPerGas(t *testing.T) {
-	// Base fee 1 wei (far below the 1 gwei target) — target must dominate.
-	f := &fakeFetcher{baseFee: big.NewInt(1), gasLimit: 12_345_678}
+	// Base fee 1 wei — far below the target, so the target (or its tip floor)
+	// dominates rather than 2x base fee.
+	baseFee := int64(1)
+	f := &fakeFetcher{baseFee: big.NewInt(baseFee), gasLimit: 12_345_678}
 	fctx := &facade.Context{BaseAddress: make([]byte, 20)}
 
 	if err := refreshFeePolicy(context.Background(), f, fctx, testEthPerGas, testTipWei); err != nil {
@@ -177,8 +181,13 @@ func TestRefreshFeePolicyFixedEthPerGas(t *testing.T) {
 	if tip.Cmp(big.NewInt(testTipWei)) != 0 {
 		t.Fatalf("tip = %s, want %d", tip, testTipWei)
 	}
-	if maxFee.Cmp(big.NewInt(testEthPerGas)) != 0 {
-		t.Fatalf("maxFee = %s, want fixed target %d", maxFee, testEthPerGas)
+	// Documented policy: maxFee = max(target, baseFee+tip).
+	wantMax := big.NewInt(testEthPerGas)
+	if floor := big.NewInt(baseFee + testTipWei); floor.Cmp(wantMax) > 0 {
+		wantMax = floor
+	}
+	if maxFee.Cmp(wantMax) != 0 {
+		t.Fatalf("maxFee = %s, want %s", maxFee, wantMax)
 	}
 	if got := fctx.LoadBlockGasLimit(); got != f.gasLimit {
 		t.Fatalf("gas limit = %d, want %d", got, f.gasLimit)
