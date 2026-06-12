@@ -260,13 +260,30 @@ func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayload
 			p.BlockHash.Hex(), *p.BlobGasUsed)
 	}
 
+	// newPayload is idempotent, and a busy EL legitimately times out on it: geth
+	// caps engine-API payload insertion at ~8s while it is still importing the
+	// previous heavy block (-32002 "request timed out"), and a client-side HTTP
+	// timeout means the same thing. Retry with a wait instead of dying — the
+	// import completes and the resubmission succeeds.
 	var status engine.PayloadStatusV1
-	err := d.Client.Call(ctx, "engine_newPayloadV4", []any{
-		p,                 // ExecutionPayloadV3 == engine.ExecutableData
-		[]hexutil.Bytes{}, // blobVersionedHashes
-		common.Hash{},     // parentBeaconBlockRoot (zero)
-		[]hexutil.Bytes{}, // executionRequests
-	}, &status)
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = d.Client.Call(ctx, "engine_newPayloadV4", []any{
+			p,                 // ExecutionPayloadV3 == engine.ExecutableData
+			[]hexutil.Bytes{}, // blobVersionedHashes
+			common.Hash{},     // parentBeaconBlockRoot (zero)
+			[]hexutil.Bytes{}, // executionRequests
+		}, &status)
+		if err == nil || !isTimeout(err) || attempt >= 60 {
+			break
+		}
+		slog.Warn("replay: newPayload timed out, EL busy — retrying", "block", p.BlockHash.Hex(), "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("replay: engine_newPayloadV4 block %s: %w", p.BlockHash.Hex(), err)
 	}
@@ -285,7 +302,19 @@ func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayload
 		FinalizedBlockHash: p.BlockHash,
 	}
 	var fcuResp engine.ForkChoiceResponse
-	if err := d.Client.Call(ctx, "engine_forkchoiceUpdatedV3", []any{fcs, nil}, &fcuResp); err != nil {
+	for attempt := 0; ; attempt++ {
+		err = d.Client.Call(ctx, "engine_forkchoiceUpdatedV3", []any{fcs, nil}, &fcuResp)
+		if err == nil || !isTimeout(err) || attempt >= 60 {
+			break
+		}
+		slog.Warn("replay: forkchoiceUpdated timed out, EL busy — retrying", "block", p.BlockHash.Hex(), "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
+	}
+	if err != nil {
 		return fmt.Errorf("replay: engine_forkchoiceUpdatedV3 block %s: %w", p.BlockHash.Hex(), err)
 	}
 	if fcuResp.PayloadStatus.Status != "VALID" {
@@ -294,6 +323,15 @@ func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayload
 	}
 
 	return nil
+}
+
+// isTimeout reports whether err is a busy-EL timeout worth retrying: the engine
+// API's -32002 "request timed out" or a client-side HTTP deadline.
+func isTimeout(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "request timed out") ||
+		strings.Contains(s, "Client.Timeout") ||
+		strings.Contains(s, "context deadline exceeded")
 }
 
 // equalHex compares two 0x-prefixed hex strings case-insensitively after
