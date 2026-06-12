@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
@@ -35,6 +36,19 @@ var (
 type Driver struct {
 	Client   *rpc.Client
 	Manifest *manifest.Manifest
+	// MemGate, when non-nil, paces dispatch so the EL is never driven past its
+	// state-flush throughput — preventing the diff-layer OOM (see MemGate).
+	MemGate *MemGate
+	// lastHead is the hash of the most recently applied block. The mem gate's
+	// Flush nudge re-asserts forkchoice to it while paused. Set and read on the
+	// single Replay goroutine (the gate runs synchronously between blocks).
+	lastHead common.Hash
+	// Follow, when true, tails a payloads file a live bloat run is still appending
+	// to: instead of stopping at EOF, the reader waits FollowPoll for more frames.
+	// Lets the replay stream blocks as they are produced, decoupled via the file so
+	// the replay's pace never backpressures the bloat. Runs until ctx is cancelled.
+	Follow     bool
+	FollowPoll time.Duration
 }
 
 // Replay reads payloads from payloadsPath and submits them to the EL client
@@ -59,38 +73,90 @@ func (d *Driver) Replay(ctx context.Context, payloadsPath string) error {
 	// rewrites BlockHash to keep the chain hash-linked. The state root is
 	// timestamp-independent for this workload, so the final-state-root check
 	// downstream still holds.
+	// Resume support: if the EL already has blocks (a prior run persisted up to
+	// some head before stopping — e.g. after an OOM-kill), payloads at or below
+	// that head are skipped. Re-submitting them is wasted work and, worse, a
+	// forkchoice to a block far below the EL head is rejected as "Too deep
+	// reorg". With a fresh EL (head 0) nothing is skipped.
+	// The EL head must be detected reliably: skipping the wrong number of applied
+	// blocks would either re-submit known blocks (too-deep-reorg rejection) or
+	// skip un-applied ones (a gap). Fail loudly rather than guess.
+	head, err := d.headBlockNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("replay: detect EL head: %w", err)
+	}
+
+	// While the gate is paused, re-assert forkchoice to the last applied head so
+	// the EL keeps persisting its dirty state buffer (no new blocks arrive to
+	// trigger it otherwise). No-op until the first block is submitted.
+	if d.MemGate != nil {
+		d.MemGate.Flush = func(ctx context.Context) error {
+			if (d.lastHead == common.Hash{}) {
+				return nil
+			}
+			return d.forceFlushHead(ctx)
+		}
+	}
+
 	var prevHash *common.Hash
 	var prevTs uint64
-
-	var count int
+	var read, submitted, skipped int
 	for {
-		p, err := r.Next()
+		var p *payloads.ExecutionPayloadV3
+		var err error
+		if d.Follow {
+			// Tail the file a live bloat run is appending to; blocks for more frames.
+			p, err = r.NextFollow(ctx, d.FollowPoll)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				slog.Info("replay follow: stopped", "submitted", submitted)
+				return nil
+			}
+		} else {
+			p, err = r.Next()
+		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("replay: read payload %d: %w", count, err)
+			return fmt.Errorf("replay: read payload %d: %w", read, err)
 		}
+		read++
 
 		if err := relink(p, prevHash, prevTs); err != nil {
-			return fmt.Errorf("replay: relink payload %d: %w", count, err)
+			return fmt.Errorf("replay: relink payload %d: %w", read, err)
+		}
+		// Track linkage for every payload (including skipped ones) so the relink
+		// chain is byte-identical to the original run and the resume block's
+		// parent hash matches what the EL already stored.
+		h := p.BlockHash
+		prevHash = &h
+		prevTs = p.Timestamp
+
+		if p.Number <= head {
+			skipped++
+			if skipped%50000 == 0 {
+				slog.Info("replay fast-forward over applied blocks", "skipped", skipped, "el_head", head)
+			}
+			continue
 		}
 
 		if err := d.submitPayload(ctx, p); err != nil {
 			return err
 		}
+		submitted++
+		d.lastHead = p.BlockHash
 
-		h := p.BlockHash
-		prevHash = &h
-		prevTs = p.Timestamp
-
-		count++
-		if count%100 == 0 {
-			slog.Info("replay progress", "submitted", count)
+		if d.MemGate != nil && d.MemGate.CheckEvery > 0 && submitted%d.MemGate.CheckEvery == 0 {
+			if err := d.MemGate.Wait(ctx); err != nil {
+				return fmt.Errorf("replay: mem gate at block %d: %w", p.Number, err)
+			}
+		}
+		if submitted%100 == 0 {
+			slog.Info("replay progress", "submitted", submitted, "skipped", skipped, "block", p.Number)
 		}
 	}
 
-	slog.Info("replay complete", "total_payloads", count)
+	slog.Info("replay complete", "submitted", submitted, "skipped", skipped)
 
 	if d.Manifest.FinalStateRoot == "" {
 		return nil
@@ -153,6 +219,35 @@ func relink(p *payloads.ExecutionPayloadV3, prevHash *common.Hash, prevTs uint64
 		return err
 	}
 	p.BlockHash = blk.Hash()
+	return nil
+}
+
+// headBlockNumber returns the EL's current head block number via eth_blockNumber,
+// used to skip already-applied payloads on resume.
+func (d *Driver) headBlockNumber(ctx context.Context) (uint64, error) {
+	var hexNum string
+	if err := d.Client.Call(ctx, "eth_blockNumber", []any{}, &hexNum); err != nil {
+		return 0, err
+	}
+	return hexutil.DecodeUint64(hexNum)
+}
+
+// forceFlushHead re-issues forkchoiceUpdated for the last applied head with no
+// payload attributes. Re-asserting the canonical/finalized head drives the EL's
+// state-persist pipeline forward while the mem gate is paused and no new blocks
+// are arriving, so its dirty diff-layer/journal buffer drains instead of merely
+// stalling. The head already exists, so a transport error is surfaced (worth a
+// log) but a non-VALID status is not treated as fatal.
+func (d *Driver) forceFlushHead(ctx context.Context) error {
+	fcs := engine.ForkchoiceStateV1{
+		HeadBlockHash:      d.lastHead,
+		SafeBlockHash:      d.lastHead,
+		FinalizedBlockHash: d.lastHead,
+	}
+	var fcuResp engine.ForkChoiceResponse
+	if err := d.Client.Call(ctx, "engine_forkchoiceUpdatedV3", []any{fcs, nil}, &fcuResp); err != nil {
+		return fmt.Errorf("replay: flush-nudge forkchoiceUpdated head %s: %w", d.lastHead.Hex(), err)
+	}
 	return nil
 }
 

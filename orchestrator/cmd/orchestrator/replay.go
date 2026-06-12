@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -15,6 +16,19 @@ type replayFlags struct {
 	manifestPath string
 	rpcURL       string
 	jwtPath      string
+
+	// Memory-gated backpressure: poll the EL's debug_memStats and pause dispatch
+	// when its resident heap is high, so replay never outruns the client's
+	// state-flush throughput (the diff-layer OOM guard). Empty URL disables it.
+	memGateURL    string
+	memGateHighGB float64
+	memGateLowGB  float64
+	memGateEvery  int
+
+	// follow tails a payloads file a live bloat run is still appending to, so the
+	// replay streams blocks as they are produced rather than stopping at EOF.
+	follow         bool
+	followPollSecs float64
 }
 
 func newReplayCmd() *cobra.Command {
@@ -39,7 +53,36 @@ func newReplayCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			d := &replay.Driver{Client: client, Manifest: m}
+			d := &replay.Driver{Client: client, Manifest: m, Follow: f.follow}
+			if f.follow {
+				poll := f.followPollSecs
+				if poll <= 0 {
+					poll = 2
+				}
+				d.FollowPoll = time.Duration(poll * float64(time.Second))
+			}
+
+			if f.memGateURL != "" {
+				if f.memGateLowGB <= 0 || f.memGateHighGB <= f.memGateLowGB {
+					return errors.New("--mem-gate-high-gb must be greater than --mem-gate-low-gb > 0")
+				}
+				if f.memGateEvery <= 0 {
+					return errors.New("--mem-gate-every must be > 0")
+				}
+				gateClient, err := rpc.NewClient(f.memGateURL)
+				if err != nil {
+					return err
+				}
+				d.MemGate = &replay.MemGate{
+					Client:     gateClient,
+					High:       uint64(f.memGateHighGB * 1e9),
+					Low:        uint64(f.memGateLowGB * 1e9),
+					CheckEvery: f.memGateEvery,
+					Poll:       10 * time.Second,
+					MaxWait:    10 * time.Minute,
+				}
+			}
+
 			return d.Replay(cmd.Context(), f.payloadsPath)
 		},
 	}
@@ -47,5 +90,11 @@ func newReplayCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.manifestPath, "manifest", "", "Path to run-manifest.json")
 	cmd.Flags().StringVar(&f.rpcURL, "rpc-url", "", "Engine API URL (e.g. http://localhost:8551)")
 	cmd.Flags().StringVar(&f.jwtPath, "jwt-path", "", "Path to JWT secret file")
+	cmd.Flags().StringVar(&f.memGateURL, "mem-gate-url", "", "EL debug RPC URL (e.g. http://127.0.0.1:8545) for memStats backpressure; empty disables the gate")
+	cmd.Flags().Float64Var(&f.memGateHighGB, "mem-gate-high-gb", 38, "pause replay when EL resident heap exceeds this many GB")
+	cmd.Flags().Float64Var(&f.memGateLowGB, "mem-gate-low-gb", 26, "resume replay once EL resident heap drops below this many GB")
+	cmd.Flags().IntVar(&f.memGateEvery, "mem-gate-every", 8, "check EL heap every N blocks")
+	cmd.Flags().BoolVar(&f.follow, "follow", false, "tail the payloads file (stream blocks as a live bloat run records them, never stop at EOF)")
+	cmd.Flags().Float64Var(&f.followPollSecs, "follow-poll-secs", 2, "in --follow mode, seconds to wait for new frames when at end of file")
 	return cmd
 }

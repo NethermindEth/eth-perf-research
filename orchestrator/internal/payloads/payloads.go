@@ -3,11 +3,14 @@ package payloads
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -263,7 +266,9 @@ func (r *Reader) Next() (*ExecutionPayloadV3, error) {
 		if err == io.EOF {
 			return nil, io.EOF
 		}
-		return nil, fmt.Errorf("payloads: truncated length header")
+		// Wrap ErrUnexpectedEOF so NextFollow can distinguish a partially-written
+		// frame (writer mid-append) from a genuine decode error.
+		return nil, fmt.Errorf("payloads: truncated length header: %w", io.ErrUnexpectedEOF)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("payloads: read header: %w", err)
@@ -280,6 +285,38 @@ func (r *Reader) Next() (*ExecutionPayloadV3, error) {
 		return nil, fmt.Errorf("payloads: rlp decode: %w", err)
 	}
 	return fromRLP(&rp)
+}
+
+// NextFollow behaves like Next but tails a file that a concurrent writer is still
+// appending to: on a clean EOF or a partially-written frame it rewinds to the
+// frame start, waits poll, and retries — so a replay can stream blocks as a live
+// bloat run records them, never stopping at the current end of file. Only a real
+// decode/I/O error or ctx cancellation returns. It never returns io.EOF.
+func (r *Reader) NextFollow(ctx context.Context, poll time.Duration) (*ExecutionPayloadV3, error) {
+	for {
+		start, err := r.f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, fmt.Errorf("payloads: follow seek: %w", err)
+		}
+		p, err := r.Next()
+		switch {
+		case err == nil:
+			return p, nil
+		case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+			// End of file, or the writer is mid-frame. Rewind to the frame start so
+			// the partial bytes are re-read once complete, then wait for more data.
+			if _, serr := r.f.Seek(start, io.SeekStart); serr != nil {
+				return nil, fmt.Errorf("payloads: follow rewind: %w", serr)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(poll):
+			}
+		default:
+			return nil, err
+		}
+	}
 }
 
 func (r *Reader) Close() error {

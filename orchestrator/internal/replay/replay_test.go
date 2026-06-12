@@ -124,7 +124,14 @@ func newEngineServer(t *testing.T, handler handlerFunc) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		resp := handler(body)
+		// Tests model a fresh EL (head 0), so answer the resume head probe here
+		// and let each handler model only the engine methods under test.
+		var resp []byte
+		if rpcMethod(body) == "eth_blockNumber" {
+			resp = mockResponse(rpcID(body), "0x0")
+		} else {
+			resp = handler(body)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(resp)
 	}))
