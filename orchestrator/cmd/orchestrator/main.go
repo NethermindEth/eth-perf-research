@@ -34,6 +34,6 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	cmd.AddCommand(newRunCmd(), newReplayCmd(), newVerifyJournalCmd())
+	cmd.AddCommand(newRunCmd(), newReplayCmd(), newReplayCommitCmd(), newVerifyJournalCmd())
 	return cmd
 }

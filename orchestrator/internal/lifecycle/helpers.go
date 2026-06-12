@@ -78,6 +78,14 @@ func reachedTarget(obs *controller.Observation, t *controller.Target) bool {
 // particular produced payloads whose block_hash could not be reproduced on
 // replay (Geth recomputes a different hash). Withdrawals stay nil — the
 // synthetic commit path produces no withdrawals (empty withdrawalsRoot).
+// BuildExecutionPayloadV3 is the exported entry point onto the canonical
+// block->payload conversion used by the live commit loop (commitBatch). The
+// replay-commit driver reuses it verbatim so a re-executed block is recorded
+// with byte-identical framing to a freshly-bloated one.
+func BuildExecutionPayloadV3(block *rpc.BlockHeader, signedRLP [][]byte) *payloads.ExecutionPayloadV3 {
+	return buildExecutionPayloadV3(block, signedRLP)
+}
+
 func buildExecutionPayloadV3(block *rpc.BlockHeader, signedRLP [][]byte) *payloads.ExecutionPayloadV3 {
 	baseFee := block.BaseFee
 	if baseFee == nil {
