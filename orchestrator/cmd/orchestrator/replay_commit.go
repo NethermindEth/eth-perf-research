@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -10,9 +11,10 @@ import (
 )
 
 type replayCommitFlags struct {
-	payloadsPath string
-	outPath      string
-	rpcURL       string
+	payloadsPath   string
+	outPath        string
+	rpcURL         string
+	commitTimeoutS float64
 }
 
 func newReplayCommitCmd() *cobra.Command {
@@ -29,8 +31,12 @@ func newReplayCommitCmd() *cobra.Command {
 				return errors.New("--payloads, --out, --rpc-url required")
 			}
 			// testing_commitBlockV1 is a plain JSON-RPC method (Testing module); no
-			// JWT/engine auth needed.
-			client, err := rpc.NewClient(f.rpcURL)
+			// JWT/engine auth needed. The timeout must cover synchronously executing
+			// the heaviest recorded block (the 14400-tx / 327M-gas wedge-recovery
+			// monsters take minutes); a timeout mid-commit loses the response while
+			// the block still commits server-side, leaving a gap in --out.
+			client, err := rpc.NewClient(f.rpcURL,
+				rpc.WithTimeout(time.Duration(f.commitTimeoutS*float64(time.Second))))
 			if err != nil {
 				return err
 			}
@@ -41,5 +47,6 @@ func newReplayCommitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.payloadsPath, "payloads", "", "Path to input payloads.rlp (recorded, possibly poison-tailed)")
 	cmd.Flags().StringVar(&f.outPath, "out", "", "Path to output clean payloads.rlp (O_APPEND; resumes if non-empty)")
 	cmd.Flags().StringVar(&f.rpcURL, "rpc-url", "", "Nethermind JSON-RPC URL with the Testing module (e.g. http://localhost:8545)")
+	cmd.Flags().Float64Var(&f.commitTimeoutS, "commit-timeout-secs", 600, "per-call RPC timeout; must cover executing the heaviest recorded block")
 	return cmd
 }
