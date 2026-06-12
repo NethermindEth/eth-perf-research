@@ -15,6 +15,7 @@ type replayCommitFlags struct {
 	outPath        string
 	rpcURL         string
 	commitTimeoutS float64
+	fixNoncesKey   string
 }
 
 func newReplayCommitCmd() *cobra.Command {
@@ -41,6 +42,13 @@ func newReplayCommitCmd() *cobra.Command {
 				return err
 			}
 			d := &replaycommit.Driver{Client: client}
+			if f.fixNoncesKey != "" {
+				fixer, err := replaycommit.NewNonceFixer(f.fixNoncesKey)
+				if err != nil {
+					return err
+				}
+				d.Fixer = fixer
+			}
 			return d.RunFiles(cmd.Context(), f.payloadsPath, f.outPath)
 		},
 	}
@@ -48,5 +56,6 @@ func newReplayCommitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&f.outPath, "out", "", "Path to output clean payloads.rlp (O_APPEND; resumes if non-empty)")
 	cmd.Flags().StringVar(&f.rpcURL, "rpc-url", "", "Nethermind JSON-RPC URL with the Testing module (e.g. http://localhost:8545)")
 	cmd.Flags().Float64Var(&f.commitTimeoutS, "commit-timeout-secs", 600, "per-call RPC timeout; must cover executing the heaviest recorded block")
+	cmd.Flags().StringVar(&f.fixNoncesKey, "fix-nonces-key", "", "hex private key of the bloat sender; renumbers its recorded tx nonces onto the clean chain's trajectory and re-signs (wedge nonce-rewind repair)")
 	return cmd
 }

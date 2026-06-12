@@ -65,6 +65,10 @@ type blockSkipper interface {
 // Driver holds the dependencies for a replay-commit run.
 type Driver struct {
 	Client Committer
+	// Fixer, when non-nil, renumbers the bloat sender's tx nonces onto the
+	// clean chain's trajectory (see NonceFixer). Seeded from the EL after head
+	// detection.
+	Fixer *NonceFixer
 }
 
 // Run reads payloads from in, re-executes each via testing_commitBlockV1, and
@@ -78,6 +82,21 @@ func (d *Driver) Run(ctx context.Context, in payloadReader, out payloadWriter) e
 		return fmt.Errorf("replaycommit: detect EL head: %w", err)
 	}
 	slog.Info("replaycommit: starting", "el_head", head)
+
+	if d.Fixer != nil {
+		// Seed the nonce trajectory from the CLEAN chain's state, not the
+		// recording — the whole point is that they diverge after the wedge.
+		var hexNonce string
+		if err := d.Client.Call(ctx, "eth_getTransactionCount", []any{d.Fixer.Address().Hex(), "latest"}, &hexNonce); err != nil {
+			return fmt.Errorf("replaycommit: seed fixer nonce: %w", err)
+		}
+		seed, err := hexutil.DecodeUint64(hexNonce)
+		if err != nil {
+			return fmt.Errorf("replaycommit: parse fixer nonce: %w", err)
+		}
+		d.Fixer.Seed(seed)
+		slog.Info("replaycommit: nonce fixer armed", "sender", d.Fixer.Address().Hex(), "clean_next_nonce", seed)
+	}
 
 	var committed, skipped int
 	// Fast-forward past already-applied blocks without decoding their txs: a full
@@ -108,6 +127,14 @@ func (d *Driver) Run(ctx context.Context, in payloadReader, out payloadWriter) e
 				slog.Info("replaycommit: fast-forward over applied blocks", "skipped", skipped, "el_head", head)
 			}
 			continue
+		}
+
+		if d.Fixer != nil {
+			fixed, ferr := d.Fixer.Fix(p.Transactions)
+			if ferr != nil {
+				return fmt.Errorf("replaycommit: fix nonces block %d: %w", p.Number, ferr)
+			}
+			p.Transactions = fixed
 		}
 
 		// Re-execute the recorded txs at the recorded timestamp. NoValidation
@@ -157,6 +184,10 @@ func (d *Driver) Run(ctx context.Context, in payloadReader, out payloadWriter) e
 		}
 	}
 
+	if d.Fixer != nil {
+		rw, kept := d.Fixer.Stats()
+		slog.Info("replaycommit: nonce fixer stats", "rewritten", rw, "kept_verbatim", kept)
+	}
 	slog.Info("replaycommit: complete",
 		"committed", committed,
 		"skipped", skipped,
