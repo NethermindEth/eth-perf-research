@@ -272,3 +272,62 @@ func TestRLPByteStabilityGolden(t *testing.T) {
 		t.Fatalf("wire format changed: got sha256=%x want %s (len=%d)", got[:], want, len(buf))
 	}
 }
+
+func TestSkipToBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/payloads.rlp"
+	w, err := OpenWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rng := rand.New(rand.NewSource(7))
+	const n = 50
+	for i := 0; i < n; i++ { // block numbers 1..50
+		if err := w.Append(randPayload(rng, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// SkipToBlock(head) should land on the first frame with number > head, never
+	// decoding the skipped frames' transactions, and Next must continue from there.
+	for _, head := range []uint64{0, 1, 25, 49, 50, 100} {
+		r, err := OpenReader(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		skipped, err := r.SkipToBlock(head)
+		if err != nil {
+			t.Fatalf("head=%d: SkipToBlock: %v", head, err)
+		}
+		wantSkipped := int(head)
+		if head > n {
+			wantSkipped = n
+		}
+		if skipped != wantSkipped {
+			t.Errorf("head=%d: skipped=%d want %d", head, skipped, wantSkipped)
+		}
+		// Read the remaining frames; they must be exactly head+1 .. n in order.
+		var got []uint64
+		for {
+			p, err := r.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("head=%d: Next: %v", head, err)
+			}
+			got = append(got, p.Number)
+		}
+		r.Close()
+		var want []uint64
+		for b := head + 1; b <= n; b++ {
+			want = append(want, b)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("head=%d: remaining=%v want %v", head, got, want)
+		}
+	}
+}

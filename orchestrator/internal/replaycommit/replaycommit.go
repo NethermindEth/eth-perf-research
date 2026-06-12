@@ -25,6 +25,14 @@ import (
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/rpc"
 )
 
+// NOTE: the EL must run testing_commitBlockV1 on the MAIN world state, otherwise
+// only the first commit succeeds and every subsequent one fails with "Unable to
+// gather snapshots" — the producer pass runs on a detached read-only scope that
+// never registers the post-state snapshot (NethermindEth/nethermind#11979). Until
+// the node carries the #11981 fix, start it with --Blocks.BuildBlocksOnMainState=true,
+// which DI-binds the global-world-state producer env. This is a node-side
+// requirement, not something the client can paper over with retries.
+
 // Committer is the subset of *rpc.Client the driver needs. Narrowed to an
 // interface so tests can supply a deterministic fake.
 type Committer interface {
@@ -47,6 +55,13 @@ type payloadReader interface {
 	Next() (*payloads.ExecutionPayloadV3, error)
 }
 
+// blockSkipper is optionally implemented by readers that can fast-forward past
+// already-applied blocks without decoding their transactions. *payloads.Reader
+// satisfies it; test fakes need not.
+type blockSkipper interface {
+	SkipToBlock(head uint64) (int, error)
+}
+
 // Driver holds the dependencies for a replay-commit run.
 type Driver struct {
 	Client Committer
@@ -65,6 +80,17 @@ func (d *Driver) Run(ctx context.Context, in payloadReader, out payloadWriter) e
 	slog.Info("replaycommit: starting", "el_head", head)
 
 	var committed, skipped int
+	// Fast-forward past already-applied blocks without decoding their txs: a full
+	// decode of every skipped heavy bloat block is decode-bound (~tens of MB/s);
+	// SkipToBlock reads only each frame's number and seeks past the rest.
+	if sk, ok := in.(blockSkipper); ok && head > 0 {
+		n, serr := sk.SkipToBlock(head)
+		if serr != nil {
+			return fmt.Errorf("replaycommit: fast-skip to head %d: %w", head, serr)
+		}
+		skipped = n
+		slog.Info("replaycommit: fast-skipped applied blocks", "skipped", n, "el_head", head)
+	}
 	var lastNumber uint64
 	var lastCleanRoot common.Hash
 	for {

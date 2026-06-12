@@ -250,6 +250,136 @@ type Reader struct {
 	f *os.File
 }
 
+// SkipToBlock fast-forwards past every frame whose block number is <= head,
+// decoding ONLY each frame's block number and seeking past the
+// transaction-bearing remainder of the body. On return the reader is positioned
+// at the first frame with number > head (or at EOF). Orders of magnitude cheaper
+// than calling Next per skipped frame, because the (large) transaction list of
+// each skipped block is never read or decoded — only the ~480-byte prefix that
+// precedes BlockNumber is touched, the rest is an lseek.
+func (r *Reader) SkipToBlock(head uint64) (skipped int, err error) {
+	var hdr [4]byte
+	for {
+		start, serr := r.f.Seek(0, io.SeekCurrent)
+		if serr != nil {
+			return skipped, fmt.Errorf("payloads: skip seek: %w", serr)
+		}
+		_, rerr := io.ReadFull(r.f, hdr[:])
+		if rerr == io.EOF {
+			return skipped, nil
+		}
+		if rerr != nil {
+			return skipped, fmt.Errorf("payloads: skip read header: %w", rerr)
+		}
+		size := binary.BigEndian.Uint32(hdr[:])
+
+		// The six fields before BlockNumber are fixed-size (32+20+32+32+256+32
+		// bytes plus RLP prefixes and the outer-list header), well under 512.
+		const peekMax = 512
+		peekN := int(size)
+		if peekN > peekMax {
+			peekN = peekMax
+		}
+		peek := make([]byte, peekN)
+		if _, perr := io.ReadFull(r.f, peek); perr != nil {
+			return skipped, fmt.Errorf("payloads: skip read peek at %d: %w", start, perr)
+		}
+		num, nerr := peekBlockNumber(peek)
+		if nerr != nil {
+			return skipped, fmt.Errorf("payloads: skip peek number at %d: %w", start, nerr)
+		}
+		if num > head {
+			// Rewind so the caller's Next reads this frame in full.
+			if _, sErr := r.f.Seek(start, io.SeekStart); sErr != nil {
+				return skipped, fmt.Errorf("payloads: skip rewind: %w", sErr)
+			}
+			return skipped, nil
+		}
+		if rem := int64(size) - int64(peekN); rem > 0 {
+			if _, sErr := r.f.Seek(rem, io.SeekCurrent); sErr != nil {
+				return skipped, fmt.Errorf("payloads: skip advance: %w", sErr)
+			}
+		}
+		skipped++
+	}
+}
+
+// peekBlockNumber reads the 7th RLP element (BlockNumber) of an rlpPayload body
+// from a prefix buffer that may be truncated mid-body. It walks element HEADERS
+// only (never requiring the full outer-list content to be present), stepping past
+// the six fixed-size leading fields, so it works on a ~512-byte peek of a
+// multi-megabyte frame. A full rlp.Stream can't: it caps its input limit at the
+// buffer length, and the outer list header declares the whole (absent) body.
+func peekBlockNumber(peek []byte) (uint64, error) {
+	// Enter the outer list: advance past its header to the first element.
+	hdr, _, err := rlpHeader(peek)
+	if err != nil {
+		return 0, err
+	}
+	c := hdr
+	// Skip the six fixed-size fields preceding BlockNumber.
+	for i := 0; i < 6; i++ {
+		h, p, err := rlpHeader(peek[c:])
+		if err != nil {
+			return 0, err
+		}
+		c += h + p
+	}
+	// Decode the seventh element (BlockNumber) as a big-endian RLP integer.
+	h, p, err := rlpHeader(peek[c:])
+	if err != nil {
+		return 0, err
+	}
+	start, end := c+h, c+h+p
+	if end > len(peek) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	var n uint64
+	for _, b := range peek[start:end] {
+		n = n<<8 | uint64(b)
+	}
+	return n, nil
+}
+
+// rlpHeader returns the header length and payload length of the single RLP
+// element at the front of buf. For a single-byte value (< 0x80) the header is 0
+// and the payload length 1 (the byte is its own value).
+func rlpHeader(buf []byte) (hdrLen, payloadLen int, err error) {
+	if len(buf) == 0 {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	b := buf[0]
+	switch {
+	case b < 0x80: // single byte
+		return 0, 1, nil
+	case b < 0xb8: // short string
+		return 1, int(b - 0x80), nil
+	case b < 0xc0: // long string: length-of-length = b-0xb7
+		ll := int(b - 0xb7)
+		if len(buf) < 1+ll {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
+		return 1 + ll, beInt(buf[1 : 1+ll]), nil
+	case b < 0xf8: // short list
+		return 1, int(b - 0xc0), nil
+	default: // long list: length-of-length = b-0xf7
+		ll := int(b - 0xf7)
+		if len(buf) < 1+ll {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
+		return 1 + ll, beInt(buf[1 : 1+ll]), nil
+	}
+}
+
+// beInt reads a big-endian unsigned integer from b as an int.
+func beInt(b []byte) int {
+	n := 0
+	for _, x := range b {
+		n = n<<8 | int(x)
+	}
+	return n
+}
+
 func OpenReader(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
