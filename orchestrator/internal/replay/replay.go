@@ -326,12 +326,16 @@ func (d *Driver) submitPayload(ctx context.Context, p *payloads.ExecutionPayload
 }
 
 // isTimeout reports whether err is a busy-EL timeout worth retrying: the engine
-// API's -32002 "request timed out" or a client-side HTTP deadline.
+// API's -32002 "request timed out", a client-side HTTP deadline, or the EL's
+// HTTP server closing the connection mid-request (EOF — geth's authrpc write
+// timeout fires when a heavy block's validation outlasts it).
 func isTimeout(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "request timed out") ||
 		strings.Contains(s, "Client.Timeout") ||
-		strings.Contains(s, "context deadline exceeded")
+		strings.Contains(s, "context deadline exceeded") ||
+		strings.Contains(s, "EOF") ||
+		strings.Contains(s, "connection reset")
 }
 
 // equalHex compares two 0x-prefixed hex strings case-insensitively after
