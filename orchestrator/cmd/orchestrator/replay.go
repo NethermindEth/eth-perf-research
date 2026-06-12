@@ -29,6 +29,10 @@ type replayFlags struct {
 	// replay streams blocks as they are produced rather than stopping at EOF.
 	follow         bool
 	followPollSecs float64
+
+	// rpcTimeoutSecs must cover the EL validating the heaviest replayed block
+	// (multi-hundred-Mgas blocks under GC pressure exceed the default 30s).
+	rpcTimeoutSecs float64
 }
 
 func newReplayCmd() *cobra.Command {
@@ -41,7 +45,7 @@ func newReplayCmd() *cobra.Command {
 				return errors.New("--payloads, --manifest, --rpc-url required")
 			}
 
-			opts := []rpc.Option{}
+			opts := []rpc.Option{rpc.WithTimeout(time.Duration(f.rpcTimeoutSecs * float64(time.Second)))}
 			if f.jwtPath != "" {
 				opts = append(opts, rpc.WithJWTFile(f.jwtPath))
 			}
@@ -96,5 +100,6 @@ func newReplayCmd() *cobra.Command {
 	cmd.Flags().IntVar(&f.memGateEvery, "mem-gate-every", 8, "check EL heap every N blocks")
 	cmd.Flags().BoolVar(&f.follow, "follow", false, "tail the payloads file (stream blocks as a live bloat run records them, never stop at EOF)")
 	cmd.Flags().Float64Var(&f.followPollSecs, "follow-poll-secs", 2, "in --follow mode, seconds to wait for new frames when at end of file")
+	cmd.Flags().Float64Var(&f.rpcTimeoutSecs, "rpc-timeout-secs", 600, "per-call RPC timeout; must cover the EL validating the heaviest block")
 	return cmd
 }
