@@ -899,13 +899,16 @@ func TestRatioScoring_OffByDefault_LegacyBehavior(t *testing.T) {
 	}
 }
 
-// TestRatioScoring_PreservesEpsilonGreedy: ratio scoring does not change the
-// ε-greedy exploration plumbing. With ε=0.5 over many picks the controller
-// must still explore — i.e. some picks select a verb other than the greedy
-// argmax. A run of 1000 picks at ε=0.5 expects roughly 50% exploration; we
-// only assert that exploration happens often enough to be statistically
-// indistinguishable from the legacy behaviour.
-func TestRatioScoring_PreservesEpsilonGreedy(t *testing.T) {
+// TestRatioScoring_RatioAwareEpsilonGreedy: ratio scoring keeps ε-greedy
+// exploration, but makes it RATIO-AWARE — exploration ranges only over verbs
+// that serve a currently-deficient axis (score > 0), never into verbs serving
+// an OVER-served axis. A uniform explore would feed a byte-heavy over-served
+// verb (one random storagespam batch adds more bytes than many account
+// batches), pinning that axis's share up and blocking ratio convergence. With
+// two deficient axes (accounts, code) and one over-served (storage), the
+// controller must still explore between verb_acc and verb_code, but must NEVER
+// pick verb_storage.
+func TestRatioScoring_RatioAwareEpsilonGreedy(t *testing.T) {
 	verbs := []string{"verb_acc", "verb_storage", "verb_code"}
 	rf := &referencef.ReferenceF{
 		Verbs: map[string]map[string]float64{
@@ -919,9 +922,9 @@ func TestRatioScoring_PreservesEpsilonGreedy(t *testing.T) {
 	s := newTestStateEps(verbs, rf, identity, 0.5)
 	s.UseRatioScoring = true
 
-	// Set up: accounts has the only positive deficit -> greedy argmax is
-	// verb_acc. Any pick that lands on verb_storage or verb_code must have
-	// taken the exploration branch.
+	// Set up: accounts AND code are deficient (positive deficit); storage is
+	// over-served (deficit clipped to 0 -> score 0). Greedy argmax is verb_acc
+	// (largest deficit). Exploration must reach verb_code but never verb_storage.
 	tgt := &Target{
 		Shares: map[Axis]float64{
 			AxisAccounts: 0.273,
@@ -932,8 +935,8 @@ func TestRatioScoring_PreservesEpsilonGreedy(t *testing.T) {
 	}
 	obs := &Observation{
 		AccountTrieBytes: 200,
-		StorageTrieBytes: 700,
-		CodeBytesTotal:   60,
+		StorageTrieBytes: 770,
+		CodeBytesTotal:   30,
 	}
 
 	const N = 1000
@@ -946,15 +949,19 @@ func TestRatioScoring_PreservesEpsilonGreedy(t *testing.T) {
 			explored++
 		}
 	}
-	// ε=0.5 with 3 candidates: greedy picks verb_acc with p=0.5+0.5/3≈0.667;
-	// exploration to a non-greedy verb has p≈0.333. Allow a generous band so
-	// the test is not flaky under RNG variance.
+	// ε=0.5 over the 2-verb deficient pool {verb_acc, verb_code}: exploration to
+	// verb_code has p≈0.25. Generous band so the test is not flaky under RNG.
 	if explored < N/8 {
-		t.Errorf("explored=%d/%d (%.1f%%), want > %d (~12.5%%) — ε-greedy exploration not preserved",
+		t.Errorf("explored=%d/%d (%.1f%%), want > %d (~12.5%%) — ratio-aware ε-greedy exploration not preserved",
 			explored, N, 100*float64(explored)/float64(N), N/8)
 	}
 	if len(seen) < 2 {
-		t.Errorf("seen %d distinct verbs %v, want >= 2 (ε-greedy must pick beyond the argmax)",
+		t.Errorf("seen %d distinct verbs %v, want >= 2 (ε-greedy must explore the deficient pool)",
 			len(seen), seen)
+	}
+	// The crux: exploration must NOT leak into the over-served storage axis.
+	if seen["verb_storage"] != 0 {
+		t.Errorf("verb_storage picked %d times — ratio-aware exploration must exclude over-served axes",
+			seen["verb_storage"])
 	}
 }

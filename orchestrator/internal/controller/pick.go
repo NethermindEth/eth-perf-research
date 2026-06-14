@@ -244,10 +244,30 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	}
 
 	// ε-greedy: with probability Epsilon, explore — replace the greedy verb
-	// with a uniformly-random candidate.
+	// with a random candidate. Ratio-aware: under ratio-scoring, explore only
+	// among verbs that serve a currently-deficient axis (score > 0). A uniform
+	// pick would otherwise feed byte-heavy verbs serving an OVER-served axis
+	// (e.g. a single random storagespam batch adds more bytes than many account
+	// batches), pinning that axis's share up and preventing ratio convergence.
+	// Excluding zero-score verbs lets the over-served axis actually fall while
+	// still exploring the verbs that matter; it re-enters the pool as soon as
+	// its deficit reopens. Falls back to all candidates if the filter is empty.
 	explored := false
 	if eps := s.cfg.Control.Epsilon; eps > 0 && len(candidates) > 1 && s.rng.Float64() < eps {
-		topIndex = candidates[s.rng.Intn(len(candidates))]
+		pool := candidates
+		if useRatio && !ratioFellBack {
+			pool = scratch.explorePool
+			for _, i := range candidates {
+				if score[i] > 0 {
+					pool = append(pool, i)
+				}
+			}
+			scratch.explorePool = pool
+			if len(pool) == 0 {
+				pool = candidates
+			}
+		}
+		topIndex = pool[s.rng.Intn(len(pool))]
 		explored = true
 	}
 	topVerb := verbs[topIndex]

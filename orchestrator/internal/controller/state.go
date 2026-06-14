@@ -154,16 +154,18 @@ func (t *Target) ByteTarget(a Axis) float64 {
 // a fixed slice header.
 type pickScratch struct {
 	fMat       [numAxes][]float64 // [axis][verb] F-matrix view
-	score      []float64          // per-verb argmax score
-	maxNTxs    []float64          // per-verb trajectory cap
-	candidates []int              // eligible+feasible verb indices
+	score       []float64          // per-verb argmax score
+	maxNTxs     []float64          // per-verb trajectory cap
+	candidates  []int              // eligible+feasible verb indices
+	explorePool []int              // ratio-aware ε-exploration subset (score>0)
 }
 
 func newPickScratch(n int) *pickScratch {
 	p := &pickScratch{
-		score:      make([]float64, n),
-		maxNTxs:    make([]float64, n),
-		candidates: make([]int, 0, n),
+		score:       make([]float64, n),
+		maxNTxs:     make([]float64, n),
+		candidates:  make([]int, 0, n),
+		explorePool: make([]int, 0, n),
 	}
 	for a := range p.fMat {
 		p.fMat[a] = make([]float64, n)
@@ -186,6 +188,7 @@ func (p *pickScratch) reset(rows []VerbRow) {
 		p.maxNTxs[j] = 0
 	}
 	p.candidates = p.candidates[:0]
+	p.explorePool = p.explorePool[:0]
 }
 
 // State holds the per-verb controller rows and supporting bookkeeping. F/σ/α
