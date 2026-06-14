@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"math"
 	"testing"
 
 	"github.com/NethermindEth/eth-perf-research/orchestrator/internal/referencef"
@@ -758,16 +759,18 @@ func TestRatioScoring_WeightsByDeficit(t *testing.T) {
 		t.Errorf("verb_acc score=%.6g must exceed verb_code score=%.6g (code at-share gets weight 0)",
 			plan.Mix["verb_acc"], plan.Mix["verb_code"])
 	}
-	if plan.Mix["verb_storage"] != 0 {
-		t.Errorf("verb_storage score=%.6g, want 0 (storage axis weight must be 0)", plan.Mix["verb_storage"])
+	if plan.Mix["verb_storage"] >= 0 {
+		t.Errorf("verb_storage score=%.6g, want < 0 (over-share axis must be PENALIZED via the signed residual, not just zeroed)", plan.Mix["verb_storage"])
 	}
 }
 
-// TestRatioScoring_OverShareGetsZeroWeight: a verb whose F-row touches only
-// an over-share axis gets a zero score under ratio scoring because that
-// axis's deficit is clamped to zero. The under-share axis owns the entire
-// weight mass.
-func TestRatioScoring_OverShareGetsZeroWeight(t *testing.T) {
+// TestRatioScoring_OverSharePenalized: a verb whose F-row touches only an
+// over-share axis gets a NEGATIVE score under ratio scoring — the signed
+// residual of an over-served axis is negative, so feeding it is actively
+// penalized (not merely neutralized). This is what lets the over-served axis's
+// share fall and the composition converge to target. The under-share axis verb
+// still wins.
+func TestRatioScoring_OverSharePenalized(t *testing.T) {
 	verbs := []string{"verb_acc", "verb_storage_only"}
 	rf := &referencef.ReferenceF{
 		Verbs: map[string]map[string]float64{
@@ -798,12 +801,77 @@ func TestRatioScoring_OverShareGetsZeroWeight(t *testing.T) {
 	if plan == nil {
 		t.Fatal("Pick returned nil plan")
 	}
-	if plan.Mix["verb_storage_only"] != 0 {
-		t.Errorf("verb_storage_only score=%.6g, want 0 (storage axis is over-share, weight must be 0)",
+	if plan.Mix["verb_storage_only"] >= 0 {
+		t.Errorf("verb_storage_only score=%.6g, want < 0 (storage is over-share; feeding it is penalized via the signed residual)",
 			plan.Mix["verb_storage_only"])
 	}
 	if plan.Verb != "verb_acc" {
-		t.Fatalf("verb = %q, want verb_acc (storage-only verb scores 0 on over-share axis)", plan.Verb)
+		t.Fatalf("verb = %q, want verb_acc (storage-only verb is penalized on the over-share axis)", plan.Verb)
+	}
+}
+
+// TestRatioScoring_ConvergesToTargetRatio is the end-to-end guarantee the
+// controller exists for: starting badly off-ratio (storage way over, accounts
+// and code under), repeated greedy picks must drive the cumulative composition
+// to the target ratio — automatically, with no manual intervention or endgame
+// phase. This is the regression guard for "precise bloating": it fails if the
+// scorer ever reverts to merely neutralising (rather than penalizing)
+// over-served axes, which would let storage's share stay pinned up.
+func TestRatioScoring_ConvergesToTargetRatio(t *testing.T) {
+	verbs := []string{"eoatx", "storagespam", "deploytx"}
+	rf := &referencef.ReferenceF{
+		Verbs: map[string]map[string]float64{
+			"eoatx":       {"accounts": 160, "storage": 10, "code": 0},
+			"storagespam": {"accounts": 5, "storage": 191, "code": 0},
+			"deploytx":    {"accounts": 50, "storage": 0, "code": 200},
+		},
+		AvgTxRLP: map[string]float64{"eoatx": 160, "storagespam": 200, "deploytx": 250},
+	}
+	var identity [32]byte
+	s := newTestStateEps(verbs, rf, identity, 0) // ε=0: exercise the greedy scorer
+	s.UseRatioScoring = true
+	tgt := &Target{
+		Shares:     map[Axis]float64{AxisAccounts: 0.273, AxisStorage: 0.667, AxisCode: 0.060},
+		TotalBytes: 10_000_000_000,
+	}
+
+	// Start heavily storage-skewed: ~0.196 / 0.784 / 0.020.
+	acc, stor, code := 2000.0, 8000.0, 200.0
+	share := func(x float64) float64 { return x / (acc + stor + code) }
+	startStorage, startAcc, startCode := share(stor), share(acc), share(code)
+
+	const txs = 50.0
+	for round := 0; round < 4000; round++ {
+		obs := &Observation{
+			AccountTrieBytes: uint64(acc),
+			StorageTrieBytes: uint64(stor),
+			CodeBytesTotal:   uint64(code),
+		}
+		plan := s.Pick(obs, tgt, 8*1024*1024, 8_000_000_000)
+		if plan == nil {
+			t.Fatalf("round %d: nil plan", round)
+		}
+		acc += txs * rf.Verbs[plan.Verb]["accounts"]
+		stor += txs * rf.Verbs[plan.Verb]["storage"]
+		code += txs * rf.Verbs[plan.Verb]["code"]
+	}
+	endStorage, endAcc, endCode := share(stor), share(acc), share(code)
+
+	// Each axis must end materially closer to its target than it started.
+	closer := func(name string, start, end, target float64) {
+		if math.Abs(end-target) >= math.Abs(start-target) {
+			t.Errorf("%s share did not converge: start %.4f -> end %.4f (target %.3f)", name, start, end, target)
+		}
+	}
+	closer("storage", startStorage, endStorage, 0.667)
+	closer("accounts", startAcc, endAcc, 0.273)
+	closer("code", startCode, endCode, 0.060)
+	// And it should land close to target, not just drift partway.
+	if math.Abs(endStorage-0.667) > 0.02 {
+		t.Errorf("storage share %.4f not within 0.02 of target 0.667", endStorage)
+	}
+	if math.Abs(endAcc-0.273) > 0.02 {
+		t.Errorf("accounts share %.4f not within 0.02 of target 0.273", endAcc)
 	}
 }
 

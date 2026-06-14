@@ -127,33 +127,48 @@ func (s *State) Pick(obs *Observation, tgt *Target, totalBatchBytes int, blockGa
 	useRatio := s.UseRatioScoring
 	ratioFellBack := false
 	if useRatio {
+		// Signed on-trajectory residual per axis: positive = under-served (the
+		// pick should grow it), NEGATIVE = over-served (the pick should AVOID
+		// adding to it). Scoring on the SIGNED residual — instead of a deficit
+		// clipped at zero — makes each pick a gradient step that reduces the
+		// composition error ‖target_share·cum − current‖: a verb feeding an
+		// over-served axis earns a negative term and is actively avoided, so that
+		// axis's share actually falls and the composition converges to the target
+		// ratio automatically, for ANY target ratio and verb set. Clipping at
+		// zero only *neutralised* over-served axes (weight 0), so byte-heavy verbs
+		// serving them were never avoided — e.g. with storage 1% over target its
+		// verbs still kept it pinned up and the ratio never converged. Dividing by
+		// targetFull[a] normalises axes by their target magnitude so the largest
+		// axis can't dominate the gradient purely by scale.
+		var anyUnder bool
 		for a := range numAxes {
 			expected := tgt.Shares[a] * cum
 			if expected > targetFull[a] {
 				expected = targetFull[a]
 			}
-			d := expected - current[a]
-			if d < 0 {
-				d = 0
+			r := expected - current[a]
+			ratioWeight[a] = r // signed residual; exposed to the debug logger
+			if r > 0 {
+				deficit[a] = r
+				anyUnder = true
 			}
-			deficit[a] = d
 		}
-		sumDeficit := deficit.Sum()
-		if sumDeficit > 0 {
-			for a := range numAxes {
-				ratioWeight[a] = deficit[a] / sumDeficit
-			}
+		if anyUnder {
 			for j := range n {
 				var sc float64
 				for a := range numAxes {
-					f, w := fMat[a][j], ratioWeight[a]
-					if f > 0 && w > 0 {
-						sc += f * w
+					scale := targetFull[a]
+					if scale <= 0 {
+						scale = 1
 					}
+					sc += fMat[a][j] * ratioWeight[a] / scale
 				}
 				score[j] = sc
 			}
 		} else {
+			// Every axis is at/over target — nothing under-served to drive the
+			// gradient. Defer to the legacy residual formula (it handles the
+			// past-target endgame via its own per-term clip).
 			ratioFellBack = true
 		}
 	}
