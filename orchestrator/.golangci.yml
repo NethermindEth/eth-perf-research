@@ -1,0 +1,103 @@
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - nogrocksdb
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+      # Idiomatic ignores: defer Close() on already-checked open paths, and
+      # best-effort cleanup writes whose failure can't change program outcome.
+      exclude-functions:
+        # Idiomatic defer + best-effort cleanup
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*os/exec.Cmd).Wait
+        - (*os.Process).Kill
+        - syscall.Close
+        - syscall.Flock
+        - os.Remove
+        # hash.Hash.Write never returns an error (interface contract)
+        - hash.Hash.Write
+        - (hash.Hash).Write
+        - (*lukechampine.com/blake3.Hasher).Write
+        # fsnotify watcher cleanup is best-effort
+        - (*github.com/fsnotify/fsnotify.Watcher).Close
+        - (*github.com/NethermindEth/eth-perf-research/orchestrator/internal/target.Watcher).Close
+        # Local-only types whose Close is a no-op or always-nil
+        - (*github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal.Reader).Close
+        - (*github.com/NethermindEth/eth-perf-research/orchestrator/internal/journal.Writer).Close
+        - (*github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads.Reader).Close
+        - (*github.com/NethermindEth/eth-perf-research/orchestrator/internal/payloads.Writer).Close
+        - (*github.com/NethermindEth/eth-perf-research/orchestrator/internal/builderpool.Pool).Close
+        - fmt.Fprintf
+        - fmt.Fprint
+        - fmt.Fprintln
+    gosec:
+      excludes:
+        - G104 # errcheck already covers unhandled errors
+        - G115 # int conversion overflow — too noisy on uint64<->int
+        - G301 # 0755 dir perm is fine for our orchestrator state dirs
+        - G302 # 0644 file perm is fine for journal/payloads/manifest files
+        - G304 # paths come from CLI flags + env, intentional file inclusion
+        - G306 # 0644 WriteFile perm is fine
+        - G401 # SHA-1 use is for chain-id hashing, not security
+        - G404 # math/rand is intentional for deterministic seeded picks
+        - G501 # MD5 use ditto
+        - G706 # log-injection false positive on internal addresses/values
+    revive:
+      rules:
+        - name: exported
+          disabled: true # Doc-comment policing is too noisy for an internal repo
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - ifElseChain
+        - hugeParam
+
+  exclusions:
+    paths:
+      - internal/orchpb
+      - cmd/heal-payloads/.*\.bak.*
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+          - gocritic
+      # buildFacadeContext keeps `t` for symmetry with future caller usage;
+      # runLoop's rawTarget threads through to error messages on hot-reload.
+      - path: internal/lifecycle/run\.go
+        linters:
+          - unparam
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports

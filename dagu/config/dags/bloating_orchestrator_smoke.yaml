@@ -1,0 +1,83 @@
+description: Drive a bloating-orchestrator smoke run end-to-end
+tags: bloating, orchestrator, smoke
+params:
+  - COMPOSE_DIR: "${ORCHESTRATOR_HOST_DIR}"
+  - MIN_HEAD_BLOCK: "5"
+steps:
+  - name: clean state
+    command: bash
+    script: |
+      set -e
+      cd ${COMPOSE_DIR}
+      docker compose down -v >/dev/null 2>&1 || true
+      rm -rf nethermind-data state
+      mkdir -p nethermind-data state
+
+  - name: start stack
+    command: bash
+    script: |
+      set -e
+      cd ${COMPOSE_DIR}
+      docker compose up -d
+
+  - name: wait for nethermind ready
+    command: bash
+    script: |
+      set -e
+      until docker inspect orchestrator-nethermind-1 \
+        --format '{{.State.Health.Status}}' 2>/dev/null | grep -q healthy; do
+        sleep 2
+      done
+      echo "nethermind: healthy"
+
+  - name: wait for orchestrator to finish
+    command: bash
+    script: |
+      set -e
+      docker wait orchestrator-orchestrator-1
+    output: ORCH_EXIT
+
+  - name: assert orchestrator exit 0
+    command: bash
+    script: |
+      set -e
+      [ "${ORCH_EXIT}" = "0" ] \
+        || { echo "orchestrator exited ${ORCH_EXIT}, expected 0"; exit 1; }
+      echo "orchestrator: exit 0"
+
+  - name: assert head advanced
+    command: bash
+    script: |
+      set -e
+      head=$(curl -fsS -X POST -H 'content-type: application/json' \
+        --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+        http://localhost:8545 \
+        | uv run python -c 'import json,sys; print(int(json.load(sys.stdin)["result"], 16))')
+      echo "head: $head (min ${MIN_HEAD_BLOCK})"
+      [ "$head" -ge "${MIN_HEAD_BLOCK}" ] \
+        || { echo "head $head below MIN_HEAD_BLOCK=${MIN_HEAD_BLOCK}"; exit 1; }
+
+  - name: assert artifacts
+    command: bash
+    script: |
+      set -e
+      cd ${COMPOSE_DIR}
+      for f in state/run-manifest.json state/orchestrator.journal.jsonl state/payloads.rlp; do
+        [ -s "$f" ] || { echo "missing or empty: $f"; exit 1; }
+        echo "ok: $f ($(stat -f%z "$f" 2>/dev/null || stat -c%s "$f") bytes)"
+      done
+
+  - name: dump session summary
+    command: bash
+    script: |
+      set -e
+      cd ${COMPOSE_DIR}
+      uv run python -c "
+      import json
+      m = json.load(open('state/run-manifest.json'))
+      s = m['sessions'][0]
+      print(f\"session_id={s['session_id']} last_batch={s['last_batch_id']} stop={s['stop_reason']}\")
+      print(f\"chain_identity_hash={m['chain_identity_hash']}\")
+      print(f\"genesis_sha256={m['genesis_sha256']}\")
+      print(f\"plugin_git_sha={m['plugin_git_sha']}\")
+      "

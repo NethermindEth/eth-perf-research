@@ -1,0 +1,11 @@
+/bin/
+/dist/
+lifecycle_worker
+/orchestrator
+/sidecar
+*.test
+*.out
+*.prof
+default.pgo
+coverage.txt
+.DS_Store

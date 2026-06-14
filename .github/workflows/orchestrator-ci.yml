@@ -1,0 +1,63 @@
+name: orchestrator CI
+
+# The orchestrator is a CGO-optional Go module: the production build links
+# RocksDB (grocksdb), but a `nogrocksdb` build tag swaps in pure-Go stubs so the
+# bulk of the code compiles and vets without system RocksDB on the runner.
+#
+# Blocking gates below (gofmt, build, vet, test) run under `-tags nogrocksdb`
+# and are known-green. golangci-lint is non-blocking (informational) until the
+# lint backlog is triaged. The grocksdb-tagged sidecar integration tests need a
+# RocksDB-equipped runner and are not exercised here.
+
+on:
+  push:
+    paths:
+      - 'orchestrator/**'
+      - '.github/workflows/orchestrator-ci.yml'
+  pull_request:
+    paths:
+      - 'orchestrator/**'
+      - '.github/workflows/orchestrator-ci.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: orchestrator
+
+jobs:
+  build:
+    name: build / vet / lint (nogrocksdb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: orchestrator/go.mod
+          cache-dependency-path: orchestrator/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: build
+        run: go build -tags nogrocksdb ./...
+
+      - name: vet
+        run: go vet -tags nogrocksdb ./...
+
+      - name: golangci-lint
+        continue-on-error: true # informational until the backlog is clean
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          working-directory: orchestrator
+          args: --build-tags nogrocksdb
+
+      - name: test
+        run: go test -tags nogrocksdb ./...

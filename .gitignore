@@ -1,2 +1,23 @@
 dagu/config/logs/*
 dagu/config/scripts/*.json
+
+# macOS
+.DS_Store
+
+# Local agent / orchestration state.
+.omc/
+dagu/.omc/
+dagu/config/dags/souls/
+
+# Per-host secrets and env overrides.
+dagu/.env
+
+# Demo-only artefacts — not part of the orchestrator package itself; live on
+# disk so a local `dagu start bloating_demo.yaml` works, but stay out of PRs.
+orchestrator/monitoring/
+orchestrator/scenarios/
+orchestrator/scripts/compare-clients.py
+orchestrator/scripts/orchestrator_report.py
+orchestrator/scripts/replay_on_geth.py
+dagu/config/dags/bloating_demo.yaml
+presentations/

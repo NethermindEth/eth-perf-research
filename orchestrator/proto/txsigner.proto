@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package txsigner;
+
+option go_package = "github.com/NethermindEth/eth-perf-research/orchestrator/internal/orchpb;orchpb";
+
+message AccessTuple {
+  bytes address = 1;
+  repeated bytes storage_keys = 2;
+}
+
+message TxIn {
+  uint64 chain_id = 1;
+  uint64 nonce = 2;
+  bytes max_priority_fee_per_gas = 3;
+  bytes max_fee_per_gas = 4;
+  uint64 gas = 5;
+  bytes to = 6;
+  bytes value = 7;
+  bytes data = 8;
+  repeated AccessTuple access_list = 9;
+}
+
+message SignRequest {
+  uint64 id = 1;
+  repeated TxIn txs = 2;
+}
+
+message SignResponse {
+  uint64 id = 1;
+  repeated bytes raw = 2;
+  repeated string errors = 3;
+}

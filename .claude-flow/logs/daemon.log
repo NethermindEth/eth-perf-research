@@ -1,0 +1,30 @@
+[2026-05-22T12:56:09.219Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-05-22T12:56:09.219Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-05-22T12:56:09.219Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-05-22T12:56:09.219Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-05-22T12:56:09.219Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-05-22T12:56:09.219Z] [INFO] Daemon started (PID: 53437, CPUs: 10, workers: 5, maxCpuLoad: 8, minFreeMemoryPercent: 5%)
+[2026-05-22T12:56:09.219Z] [INFO] Claude Code headless mode available - AI workers enabled
+[2026-05-22T12:56:09.220Z] [INFO] Worker map deferred: Memory too low: 0.8% free
+[2026-05-22T12:58:09.220Z] [INFO] Worker audit deferred: Memory too low: 0.4% free
+[2026-05-22T13:00:09.221Z] [INFO] Worker optimize deferred: Memory too low: 0.4% free
+[2026-05-22T13:02:09.223Z] [INFO] Worker consolidate deferred: Memory too low: 0.6% free
+[2026-05-22T13:04:09.223Z] [INFO] Worker testgaps deferred: Memory too low: 0.6% free
+[2026-05-22T13:08:09.229Z] [INFO] Worker audit deferred: Memory too low: 1.4% free
+[2026-05-22T13:11:09.227Z] [INFO] Worker map deferred: Memory too low: 1.1% free
+[2026-05-22T13:15:09.229Z] [INFO] Worker optimize deferred: Memory too low: 0.5% free
+[2026-05-22T13:18:09.237Z] [INFO] Worker audit deferred: CPU load too high: 14.96
+[2026-05-22T13:24:09.237Z] [INFO] Worker testgaps deferred: Memory too low: 0.5% free
+[2026-05-22T13:26:09.238Z] [INFO] Worker map deferred: Memory too low: 0.4% free
+[2026-05-22T13:28:09.253Z] [INFO] Worker audit deferred: Memory too low: 0.4% free
+[2026-05-22T13:30:09.267Z] [INFO] Worker optimize deferred: Memory too low: 0.6% free
+[2026-05-22T13:32:09.255Z] [INFO] Worker consolidate deferred: Memory too low: 0.4% free
+[2026-05-22T13:38:09.303Z] [INFO] Worker audit deferred: Memory too low: 0.4% free
+[2026-05-22T13:41:09.380Z] [INFO] Worker map deferred: Memory too low: 0.5% free
+[2026-05-22T13:44:09.300Z] [INFO] Worker testgaps deferred: CPU load too high: 101.82
+[2026-05-22T13:45:09.298Z] [INFO] Worker optimize deferred: CPU load too high: 177.05
+[2026-05-22T13:48:09.427Z] [INFO] Worker audit deferred: CPU load too high: 48.68
+[2026-05-22T13:56:09.442Z] [INFO] Worker map deferred: CPU load too high: 8.10
+[2026-05-22T13:58:09.487Z] [INFO] Worker audit deferred: CPU load too high: 220.02
+[2026-05-22T14:00:10.504Z] [INFO] Worker optimize deferred: CPU load too high: 57.93
+[2026-05-22T14:49:43.833Z] [INFO] Claude Code headless mode available - AI workers enabled
