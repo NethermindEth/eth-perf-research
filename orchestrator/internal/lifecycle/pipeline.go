@@ -236,6 +236,37 @@ func (p *pipeline) committer(loopCtx context.Context, cancel context.CancelFunc,
 					"included", included,
 					"verb", db.plan.Verb,
 				)
+				// Re-prime the master nonce from the chain. On a partial (or
+				// zero) acceptance AddressCursor advanced by `expected` but the
+				// chain only advanced by `included`, leaving a permanent nonce
+				// gap that makes every subsequent batch nonce-too-high (0
+				// included) — the fatal cascade that halts the run. Re-syncing
+				// the cursor to the chain's actual next nonce makes partials
+				// self-healing: the next planner batch resumes from the true
+				// nonce. The single depth-1 in-flight batch still holds stale
+				// nonces and 0-includes once more before the corrected cursor
+				// takes effect, which stays well within RejectionStreakHalt.
+				if n, nerr := deps.rpc.TransactionCount(loopCtx, deps.dispatcher.Signer.Address()); nerr == nil {
+					deps.facadeCtx.AddressCursor.Store(n)
+					slog.Info("lifecycle: re-primed master nonce after partial-acceptance",
+						"batch_id", db.batchID, "nonce", n)
+				} else if loopCtx.Err() == nil {
+					slog.Warn("lifecycle: nonce re-prime failed after partial-acceptance",
+						"batch_id", db.batchID, "err", nerr)
+				}
+				// Learn the verb's real gas cost from the partial. A skipped batch
+				// records no outcome, so without this the gas EWMA never moves off
+				// the static baseline that over-sized the batch — the verb partials
+				// forever. The block filled at `included` txs, so realized per-tx
+				// gas ≈ blockGasLimit / included; folding that in shrinks the next
+				// batch of this verb to a size that commits whole. Only gas-bound
+				// partials (included > 0) inform sizing; a 0-included batch is
+				// nonce-bound and handled by the re-prime above.
+				if included > 0 {
+					if gl := deps.facadeCtx.LoadBlockGasLimit(); gl > 0 {
+						deps.state.UpdateVerbStats(db.plan.Verb, gl, included)
+					}
+				}
 				if included == 0 {
 					consecutiveFullRejections++
 					if consecutiveFullRejections >= deps.cfg.Run.RejectionStreakHalt {
